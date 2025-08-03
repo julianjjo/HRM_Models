@@ -6,6 +6,7 @@ from HRM import HRM
 from tqdm import tqdm
 import os
 import wandb
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # 1. Configuration
 # Model & Tokenizer
@@ -36,8 +37,9 @@ SEQ_LEN = 256
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 1
 NUM_SEGMENTS = 4
+CHECKPOINT_INTERVAL = 1000  # Configurable interval for checkpointing (in steps)
 
-## WandB Logging
+# WandB Logging
 wandb.init(
     project="hrm-training-demo",
     name=MODEL_NAME,
@@ -63,6 +65,7 @@ wandb.init(
         "learning_rate": LEARNING_RATE,
         "epochs": NUM_EPOCHS,
         "num_segments": NUM_SEGMENTS,
+        "checkpoint_interval": CHECKPOINT_INTERVAL,
     }
 )
 
@@ -75,7 +78,7 @@ if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 VOCAB_SIZE = tokenizer.vocab_size
 
-# 3. Load and Prepare Dataset (same as before)
+# 3. Load and Prepare Dataset
 print("Loading and preparing TinyStories dataset...")
 dataset = load_dataset("roneneldan/TinyStories", split='train')
 
@@ -148,6 +151,7 @@ hrm = HRM(
 ).to(device)
 
 optimizer = torch.optim.AdamW(hrm.parameters(), lr=LEARNING_RATE)
+scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS * len(dataloader))
 
 def detach_hiddens(hiddens):
     if hiddens is None:
@@ -161,6 +165,7 @@ def detach_hiddens(hiddens):
 
 # 5. Training Loop
 print("Starting training...")
+total_steps = 0  # Counter for total training steps
 for epoch in range(NUM_EPOCHS):
     hrm.train()
     total_loss = 0
@@ -178,6 +183,12 @@ for epoch in range(NUM_EPOCHS):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(hrm.parameters(), 1.0)
             optimizer.step()
+            total_steps += 1  # Increment step counter after each gradient update
+            if total_steps % CHECKPOINT_INTERVAL == 0:
+                checkpoint_path = f"{MODEL_NAME}_checkpoint_{total_steps}.pth"
+                torch.save(hrm.state_dict(), checkpoint_path)
+                print(f"Checkpoint saved at step {total_steps} to {checkpoint_path}")
+            scheduler.step()
             hiddens = detach_hiddens(new_hiddens)
             segment_loss += loss.item()
 
@@ -186,12 +197,11 @@ for epoch in range(NUM_EPOCHS):
         progress_bar.set_postfix({"loss": f"{avg_segment_loss:.4f}"})
         
         wandb.log({"train_loss": avg_segment_loss})
+        wandb.log({"learning_rate": scheduler.get_last_lr()[0]})
 
     avg_epoch_loss = total_loss / len(dataloader)
     print(f"Epoch {epoch+1} finished. Average Batch Loss: {avg_epoch_loss:.4f}")
-
     wandb.log({"epoch_avg_loss": avg_epoch_loss, "epoch": epoch + 1})
-
 
 # 6. Save the Model
 print(f"Training complete. Saving model to {MODEL_NAME}.pth")
