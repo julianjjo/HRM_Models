@@ -1,4 +1,4 @@
-# train_hrm.py
+# train_hrm_wandb.py
 
 import torch
 from torch.utils.data import DataLoader
@@ -7,6 +7,7 @@ from datasets import load_dataset
 from HRM import HRM
 from tqdm import tqdm
 import os
+import wandb
 
 # 1. Configuration
 # Model & Tokenizer
@@ -23,6 +24,25 @@ LEARNING_RATE = 1e-4
 NUM_EPOCHS = 1  # Set to 1 for a quick demo, increase for real training
 NUM_SEGMENTS = 4  # Number of "deep supervision" steps per batch
 REASONING_STEPS = 8  # 'T' from the paper: internal steps for the L-module
+
+## WandB Logging
+wandb.init(
+    project="hrm-training-demo",
+    name=MODEL_NAME,
+    config={
+        "model_name": MODEL_NAME,
+        "tokenizer": TOKENIZER_NAME,
+        "hrm_dim": HRM_DIM,
+        "depth_l": HRM_DEPTH_L,
+        "depth_h": HRM_DEPTH_H,
+        "batch_size": BATCH_SIZE,
+        "seq_len": SEQ_LEN,
+        "learning_rate": LEARNING_RATE,
+        "epochs": NUM_EPOCHS,
+        "num_segments": NUM_SEGMENTS,
+        "reasoning_steps": REASONING_STEPS,
+    }
+)
 
 # 2. Setup Device and Tokenizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -126,9 +146,17 @@ for epoch in range(NUM_EPOCHS):
         avg_segment_loss = segment_loss / NUM_SEGMENTS
         total_loss += avg_segment_loss
         progress_bar.set_postfix({"loss": f"{avg_segment_loss:.4f}"})
+        
+        wandb.log({"train_loss": avg_segment_loss})
 
-    print(f"Epoch {epoch+1} finished. Average Batch Loss: {total_loss / len(dataloader):.4f}")
+    avg_epoch_loss = total_loss / len(dataloader)
+    print(f"Epoch {epoch+1} finished. Average Batch Loss: {avg_epoch_loss:.4f}")
+
+    wandb.log({"epoch_avg_loss": avg_epoch_loss, "epoch": epoch + 1})
+
 
 # 6. Save the Model
 print(f"Training complete. Saving model to {MODEL_NAME}.pth")
 torch.save(hrm.state_dict(), f"{MODEL_NAME}.pth")
+
+wandb.finish()
