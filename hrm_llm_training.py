@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingLR 
 
 from datasets import load_dataset
 from transformers import T5Tokenizer
@@ -35,6 +35,8 @@ LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.01
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 2 # Stop if validation loss doesn't improve for 2 epochs
+
+SAVE_STEPS = 500  # Save a checkpoint every 500 global steps
 
 # HRM Model Hyperparameters
 MODEL_CONFIG = {"d_model": 512, "n_heads": 8, "d_ff": 2048, "dropout": 0.1}
@@ -221,7 +223,7 @@ def tokenize_function(examples):
     )
 
 tokenized = raw_datasets.map(
-    tokenize_function, batched=True, num_proc=2,
+    tokenize_function, batched=True, num_proc=os.cpu_count(),
     remove_columns=raw_datasets["train"].column_names,
 )
 tokenized.set_format("torch")
@@ -332,7 +334,40 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                 "train/grad_norm": grad_norm.item(),
                 "global_step": global_step,
             })
+            
+            if global_step > 0 and global_step % SAVE_STEPS == 0:
+                print(f"\nSaving checkpoint at global_step {global_step}")
+                # Create a dedicated directory for this checkpoint
+                checkpoint_dir = f"checkpoint-{global_step}"
+                os.makedirs(checkpoint_dir, exist_ok=True)
 
+                # Save model weights and full training state for resuming
+                model_path = os.path.join(checkpoint_dir, LOCAL_WEIGHTS_PATH)
+                state_path = os.path.join(checkpoint_dir, LOCAL_CHECKPOINT_PATH)
+                
+                torch.save(model.state_dict(), model_path)
+                torch.save({
+                    "epoch": epoch,
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "global_step": global_step
+                }, state_path)
+
+                # Upload the checkpoint folder to Hugging Face Hub
+                try:
+                    api = HfApi()
+                    commit_msg = f"Checkpoint at step {global_step} (Epoch {epoch})"
+                    api.upload_folder(
+                        folder_path=checkpoint_dir,
+                        repo_id=HF_REPO_ID,
+                        repo_type="model",
+                        commit_message=commit_msg,
+                    )
+                    print(f"Successfully uploaded checkpoint {global_step} to {HF_REPO_ID}")
+                    # Clean up the local folder after a successful upload
+                    shutil.rmtree(checkpoint_dir)
+                except Exception as e:
+                    print(f"Upload failed for checkpoint {global_step}: {e}")
+                    
         progress.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
     # Validation
@@ -361,18 +396,19 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         patience_counter += 1
         print(f"Validation loss did not improve. Patience: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
 
-    # Save full checkpoint for resuming
+    # Save full checkpoint for resuming (this one is for local recovery)
     torch.save({"epoch": epoch, "optimizer_state_dict": optimizer.state_dict(), "global_step": global_step}, LOCAL_CHECKPOINT_PATH)
 
-    print("\nUploading model to HuggingFace Hub...")
+    print("\nUploading best model from epoch to HuggingFace Hub...")
     try:
         api = HfApi()
+        # Upload the best model to the root of the repo
         api.upload_file(
             path_or_fileobj=BEST_MODEL_PATH,
-            path_in_repo=LOCAL_WEIGHTS_PATH,
+            path_in_repo=LOCAL_WEIGHTS_PATH, # Overwrites the main model file
             repo_id=HF_REPO_ID,
             repo_type="model",
-            commit_message=f"Epoch {epoch}: Val Loss {avg_val_loss:.4f}, Perplexity {val_perplexity:.2f}",
+            commit_message=f"End of Epoch {epoch}: Val Loss {avg_val_loss:.4f}, Perplexity {val_perplexity:.2f}",
             token=HF_TOKEN
         )
 
@@ -409,7 +445,7 @@ The model utilizes the HRM structure, consisting of a "Specialist" module for lo
                 path_in_repo="README.md",
                 repo_id=HF_REPO_ID,
                 repo_type="model",
-                commit_message=f"Model card updated",
+                commit_message=f"Model card updated after epoch {epoch}",
                 token=HF_TOKEN
             )
 
