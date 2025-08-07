@@ -21,7 +21,7 @@ def generate_text(model, tokenizer, prompt_text, max_new_tokens=15, temperature=
     """Generates text using the HRMText1 model."""
     model.eval()
     device = next(model.parameters()).device
-    input_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
+    input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
     attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
 
     generated_ids = []

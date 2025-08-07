@@ -352,7 +352,7 @@ print("Training run finished.")
 # Chatting!
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval()
-    input_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
+    input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
     attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
 
     with torch.inference_mode():
