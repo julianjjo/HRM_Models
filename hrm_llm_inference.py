@@ -120,6 +120,9 @@ def main():
         print(f"Error loading model weights: {e}")
         return
 
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Number of parameters in the model: {num_params:,}")
+
     try:
         prompt = input("Enter your prompt: ")
         print("\nGenerating...")
