@@ -57,7 +57,7 @@ def generate_text(model, tokenizer, prompt_text, max_new_tokens=15, temperature=
             attention_mask = torch.cat([attention_mask, torch.ones((1, 1), device=device, dtype=torch.long)], dim=1)
             generated_ids.append(next_token_id.item())
 
-    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return tokenizer.decode(input_ids[0], skip_special_tokens=True)
 
 def main():
     """Main function to run the inference script."""
@@ -127,7 +127,7 @@ def main():
         generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=args.max_new_tokens, temperature=args.temperature, top_k=args.top_k)
 
         print("\n--- Generated Text ---")
-        print(prompt + generated_text)
+        print(generated_text)
         print("----------------------\n")
 
     except KeyboardInterrupt:
