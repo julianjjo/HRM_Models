@@ -68,6 +68,24 @@ def main():
         required=True,
         help="Path to the trained model weights file (e.g., pytorch_model.bin)."
     )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=15,
+        help="Maximum number of new tokens to generate (default: 15)."
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.7,
+        help="Temperature for sampling (default: 0.7)."
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=50,
+        help="Top-k value for filtering (default: 50)."
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -106,7 +124,7 @@ def main():
         prompt = input("Enter your prompt: ")
         print("\nGenerating...")
 
-        generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=15)
+        generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=args.max_new_tokens, temperature=args.temperature, top_k=args.top_k)
 
         print("\n--- Generated Text ---")
         print(prompt + generated_text)
