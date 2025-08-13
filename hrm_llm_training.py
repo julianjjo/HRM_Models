@@ -96,12 +96,12 @@ from hrm_text1_modeling import HRMText1
 
 # -----------------------------------
 # Data Loading and Preprocessing
-print("Loading and preparing dataset roneneldan/TinyStories...")
-raw_datasets = load_dataset("roneneldan/TinyStories")
+print("Loading and preparing dataset tiiuae/falcon-refinedweb...")
+raw_datasets = load_dataset("tiiuae/falcon-refinedweb")
 
 def tokenize_function(examples):
     # Process each document separately, filter empty lines, add EOS, then pad/truncate
-    texts = [text + tokenizer.eos_token for text in examples["text"] if text.strip()]
+    texts = [text + tokenizer.eos_token for text in examples["content"] if text.strip()]
     return tokenizer(
         texts,
         truncation=True,
