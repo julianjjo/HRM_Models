@@ -6,29 +6,29 @@ import torch.nn.functional as F
 # HRM Architecture (w/ Positional Embeddings for CausalLM)
 # I shall refer to it as HRM-Text1
 class RMSNorm(nn.Module):
-    def __init__(self, d_model, eps=1e-8):
+    def __init__(self, n_embd, eps=1e-8):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(d_model))
+        self.weight = nn.Parameter(torch.ones(n_embd))
     def forward(self, x):
         return self.weight * (x * torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps))
 
 class SwiGLUMuchPelu(nn.Module):
-    def __init__(self, d_model, d_ff, dropout=0.1):
+    def __init__(self, n_embd, d_ff, dropout=0.1):
         super().__init__()
-        self.w1 = nn.Linear(d_model, d_ff, bias=False)
-        self.w2 = nn.Linear(d_model, d_ff, bias=False)
-        self.w3 = nn.Linear(d_ff, d_model, bias=False)
+        self.w1 = nn.Linear(n_embd, d_ff, bias=False)
+        self.w2 = nn.Linear(n_embd, d_ff, bias=False)
+        self.w3 = nn.Linear(d_ff, n_embd, bias=False)
         self.dropout = nn.Dropout(dropout)
     def forward(self, x):
         return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
 class HRMBlock(nn.Module):
-    def __init__(self, d_model, n_heads, d_ff, dropout=0.1):
+    def __init__(self, n_embd, n_head, d_ff, dropout=0.1):
         super().__init__()
-        self.norm1 = RMSNorm(d_model)
-        self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
-        self.norm2 = RMSNorm(d_model)
+        self.norm1 = RMSNorm(n_embd)
+        self.attn = nn.MultiheadAttention(n_embd, n_head, dropout=dropout, batch_first=True)
+        self.norm2 = RMSNorm(n_embd)
         self.mlp = SwiGLUMuchPelu(d_model, d_ff, dropout)
         self.dropout = nn.Dropout(dropout)
     def forward(self, x, attn_mask=None, key_padding_mask=None):
@@ -41,8 +41,8 @@ class HRMBlock(nn.Module):
 class HRMInner(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.H_module = HRMBlock(config["d_model"], config["n_heads"], config["d_ff"], config["dropout"])
-        self.L_module = HRMBlock(config["d_model"], config["n_heads"], config["d_ff"], config["dropout"])
+        self.H_module = HRMBlock(config.n_embd, config.n_head, config.d_ff, config.dropout)
+        self.L_module = HRMBlock(config.n_embd, config.n_head, config.d_ff, config.dropout)
     def forward(self, z_H, z_L, attn_mask=None, key_padding_mask=None):
         z_L_input = z_L + z_H
         z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
@@ -54,14 +54,14 @@ class HRMText1(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.token_embeddings = nn.Embedding(config["vocab_size"], config["d_model"])
-        self.pos_embeddings = nn.Embedding(config["block_size"], config["d_model"])  # Positional embeddings
-        self.register_buffer("pos_ids", torch.arange(config["block_size"]).unsqueeze(0))
+        self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
+        self.pos_embeddings = nn.Embedding(config.block_size, config.n_embd)  # Positional embeddings
+        self.register_buffer("pos_ids", torch.arange(config.block_size).unsqueeze(0))
         self.inner_model = HRMInner(config)
-        self.lm_head = nn.Linear(config["d_model"], config["vocab_size"], bias=False)
-        self.halt_head = nn.Sequential(nn.Linear(config["d_model"], 1), nn.Sigmoid())
-        self.max_steps = config["halt_max_steps"]
-        self.ponder_loss_weight = config["ponder_loss_weight"]
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.halt_head = nn.Sequential(nn.Linear(config.n_embd, 1), nn.Sigmoid())
+        self.max_steps = config.halt_max_steps
+        self.ponder_loss_weight = config.ponder_loss_weight
 
         with torch.no_grad():
             self.halt_head[0].bias.fill_(config.get("halt_bias_init", -2.0))
@@ -112,7 +112,7 @@ class HRMText1(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
-            lm_loss = loss_fct(shift_logits.view(-1, self.config["vocab_size"]), shift_labels.view(-1))
+            lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
             ponder_loss = torch.mean(n_updates)
             loss = lm_loss + self.ponder_loss_weight * ponder_loss
 
