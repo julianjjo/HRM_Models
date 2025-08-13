@@ -20,7 +20,6 @@ from transformers import T5Tokenizer
 from tqdm.auto import tqdm
 
 from huggingface_hub import HfApi, HfFolder, hf_hub_download
-import wandb
 
 # ----------------------------
 # Training Parameters
@@ -74,7 +73,6 @@ try:
 
     print("Hugging Face & W&B tokens loaded.")
     HfFolder.save_token(HF_TOKEN)
-    wandb.login(key=WANDB_API_KEY)
 
     print("Login to Hugging Face Hub and W&B successful.")
 except Exception as e:
@@ -171,8 +169,6 @@ scaler = torch.cuda.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == "
 
 # ----------------------------
 # Training Loop
-wandb.init(project=WANDB_PROJECT, config=config, name=f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}")
-wandb.watch(model, log="all", log_freq=steps_per_epoch)
 
 best_val_loss = float('inf')
 patience_counter = 0
@@ -214,14 +210,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             scheduler.step()
             global_step += 1
 
-            wandb.log({
-                "train/step_loss": loss.item(),
-                "train/lm_loss": lm_loss.item(),
-                "train/ponder_loss": ponder_loss.item(),
-                "train/learning_rate": scheduler.get_last_lr()[0],
-                "train/grad_norm": grad_norm.item(),
-                "global_step": global_step,
-            })
 
             if global_step > 0 and global_step % SAVE_STEPS == 0:
                 print(f"\nSaving checkpoint at global_step {global_step}")
@@ -272,7 +260,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     avg_val_loss = total_val_loss / max(1, len(val_loader))
     val_perplexity = torch.exp(torch.tensor(avg_val_loss))
     print(f"\nEpoch {epoch} | Validation Loss: {avg_val_loss:.4f} | Validation Perplexity: {val_perplexity:.2f}")
-    wandb.log({"epoch": epoch, "val/loss": avg_val_loss, "val/perplexity": val_perplexity})
 
     # Save Model & Check for Early Stopping
     if avg_val_loss < best_val_loss:
@@ -345,7 +332,6 @@ The model utilizes the HRM structure, consisting of a "Specialist" module for lo
         print(f"Early stopping triggered after {epoch+1} epochs.")
         break
 
-wandb.finish()
 print("Training run finished.")
 
 # ----------------------------
