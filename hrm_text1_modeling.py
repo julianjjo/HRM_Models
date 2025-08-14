@@ -29,7 +29,6 @@ class HRMBlock(nn.Module):
         self.norm1 = RMSNorm(n_embd)
         self.attn = nn.MultiheadAttention(n_embd, n_head, dropout=dropout, batch_first=True)
         self.norm2 = RMSNorm(n_embd)
-        # FIX: The variable 'd_model' was not defined. The correct parameter is 'n_embd'.
         self.mlp = SwiGLUMuchPelu(n_embd, d_ff, dropout)
         self.dropout = nn.Dropout(dropout)
 
@@ -66,7 +65,9 @@ class HRMText1(nn.Module):
         self.ponder_loss_weight = config.ponder_loss_weight
 
         with torch.no_grad():
-            self.halt_head[0].bias.fill_(config.get("halt_bias_init", -2.0))
+            # FIX: Use getattr() for objects/namespaces instead of .get() which is for dictionaries.
+            halt_bias_value = getattr(config, "halt_bias_init", -2.0)
+            self.halt_head[0].bias.fill_(halt_bias_value)
 
     def forward(self, input_ids, labels=None, attention_mask=None):
         batch_size, seq_len = input_ids.shape
