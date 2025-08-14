@@ -60,7 +60,6 @@ class HRMInner(nn.Module):
     def forward(self, z_H, z_L, attn_mask=None, key_padding_mask=None):
         z_L_input = z_L + z_H; z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask); z_H_input = z_H + z_L_new; z_H_new = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask); return z_H_new, z_L_new
 
-# ===================== CLASE DE MODELO FINAL Y CORREGIDA =====================
 class HRMText1(PreTrainedModel, GenerationMixin):
     config_class = HRMText1Config
     main_input_name = "input_ids"
@@ -76,7 +75,8 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         with torch.no_grad():
             self.halt_head[0].bias.fill_(config.halt_bias_init)
 
-    def forward(self, input_ids, labels=None, attention_mask=None, past_key_values=None):
+    # CORRECCIÓN: Se añade **kwargs para aceptar argumentos extra de .generate()
+    def forward(self, input_ids, labels=None, attention_mask=None, past_key_values=None, **kwargs):
         batch_size, seq_len = input_ids.shape; device = input_ids.device
         z_L = self.token_embeddings(input_ids) + self.pos_embeddings(self.pos_ids[:, :seq_len])
         z_H = torch.zeros_like(z_L)
@@ -265,7 +265,8 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                     total_val_loss += batch_loss
                     val_batches += 1
                 else:
-                    print(f"Advertencia: Pérdida no válida o nula en el lote de validación {i}")
+                    # Este print ahora es menos necesario, pero lo dejamos por si acaso
+                    pass 
 
         if val_batches > 0:
             avg_val_loss = total_val_loss / val_batches
