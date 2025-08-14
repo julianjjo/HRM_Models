@@ -17,10 +17,38 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from datasets import load_dataset
-from transformers import T5Tokenizer
+from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig
 from tqdm.auto import tqdm
 
 from huggingface_hub import HfApi, HfFolder, hf_hub_download
+
+
+class HRMText1Config(PretrainedConfig):
+    model_type = "hrm_text1" # Nombre para identificar tu arquitectura
+
+    def __init__(
+        self,
+        vocab_size=32100,
+        block_size=512,
+        n_embd=512,
+        n_head=8,
+        d_ff=2048,
+        dropout=0.1,
+        halt_max_steps=8,
+        ponder_loss_weight=1e-2,
+        halt_bias_init=-2.2,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.d_ff = d_ff
+        self.dropout = dropout
+        self.halt_max_steps = halt_max_steps
+        self.ponder_loss_weight = ponder_loss_weight
+        self.halt_bias_init = halt_bias_init
 
 # ---------------------------------------------------------
 # HRM Architecture
@@ -69,9 +97,9 @@ class HRMInner(nn.Module):
         z_H_new = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
         return z_H_new, z_L_new
 
-class HRMText1(nn.Module):
-    def __init__(self, config):
-        super().__init__()
+class HRMText1(PreTrainedModel):
+    def __init__(self, config: HRMText1Config):
+        super().__init__(config)
         self.config = config
         self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_embeddings = nn.Embedding(config.block_size, config.n_embd)
@@ -120,6 +148,16 @@ class HRMText1(nn.Module):
             ponder_loss = torch.mean(n_updates)
             loss = lm_loss + self.ponder_loss_weight * ponder_loss
         return {"loss": loss, "logits": logits}
+    
+    # Función auxiliar para crear la máscara causal dinámicamente (necesaria para `generate`)
+    def _prepare_causal_attention_mask(self, attention_mask, input_shape, dtype):
+        bsz, seq_len = input_shape
+        # Crea la máscara triangular superior
+        causal_mask = torch.full((seq_len, seq_len), torch.finfo(dtype).min, device=attention_mask.device)
+        mask_cond = torch.arange(causal_mask.size(-1), device=attention_mask.device)
+        causal_mask.masked_fill_(mask_cond < (mask_cond + 1).view(causal_mask.size(-1), 1), 0)
+        causal_mask = causal_mask.to(dtype)
+        return causal_mask.unsqueeze(0).expand(bsz, 1, seq_len, seq_len)
 # ---------------------------------------------------------
 
 # ==============================================================================
@@ -254,7 +292,18 @@ val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, s
 
 # Model, Optimizer, Scheduler
 from types import SimpleNamespace
-config = SimpleNamespace(**MODEL_CONFIG, halt_max_steps=MAX_HALT_STEPS, ponder_loss_weight=PONDER_WEIGHT, halt_bias_init=HALT_BIAS_INIT)
+config = HRMText1Config(
+    vocab_size=len(tokenizer),
+    block_size=BLOCK_SIZE,
+    n_embd=MODEL_CONFIG["n_embd"],
+    n_head=MODEL_CONFIG["n_head"],
+    d_ff=MODEL_CONFIG["d_ff"],
+    dropout=MODEL_CONFIG["dropout"],
+    halt_max_steps=MAX_HALT_STEPS,
+    ponder_loss_weight=PONDER_WEIGHT,
+    halt_bias_init=HALT_BIAS_INIT
+)
+
 model = HRMText1(config).to(device)
 
 if torch.__version__.startswith("2"):

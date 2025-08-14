@@ -120,3 +120,13 @@ class HRMText1(nn.Module):
             loss = lm_loss + self.ponder_loss_weight * ponder_loss
 
         return {"loss": loss, "logits": logits, "ponder_loss": ponder_loss, "lm_loss": lm_loss}
+
+    # Función auxiliar para crear la máscara causal dinámicamente (necesaria para `generate`)
+    def _prepare_causal_attention_mask(self, attention_mask, input_shape, dtype):
+        bsz, seq_len = input_shape
+        # Crea la máscara triangular superior
+        causal_mask = torch.full((seq_len, seq_len), torch.finfo(dtype).min, device=attention_mask.device)
+        mask_cond = torch.arange(causal_mask.size(-1), device=attention_mask.device)
+        causal_mask.masked_fill_(mask_cond < (mask_cond + 1).view(causal_mask.size(-1), 1), 0)
+        causal_mask = causal_mask.to(dtype)
+        return causal_mask.unsqueeze(0).expand(bsz, 1, seq_len, seq_len)
