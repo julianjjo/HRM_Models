@@ -348,6 +348,9 @@ The model utilizes the HRM structure, consisting of a "Specialist" module for lo
         break
 
 print("Training run finished.")
+# Exportar modelo y tokenizer en formato Hugging Face
+model.save_pretrained("output_model")
+tokenizer.save_pretrained("output_model")
 
 # ----------------------------
 # Chatting!
