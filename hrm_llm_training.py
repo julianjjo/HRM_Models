@@ -189,6 +189,8 @@ else:
 # --------------------------------
 # Model, Optimizer, Scheduler
 from types import SimpleNamespace
+print("Estructura de MODEL_CONFIG:", MODEL_CONFIG)
+print("Claves disponibles en MODEL_CONFIG:", list(MODEL_CONFIG.keys()))
 config = SimpleNamespace(
     vocab_size=len(tokenizer),
     block_size=BLOCK_SIZE,
