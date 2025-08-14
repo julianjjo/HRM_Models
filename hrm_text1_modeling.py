@@ -29,8 +29,10 @@ class HRMBlock(nn.Module):
         self.norm1 = RMSNorm(n_embd)
         self.attn = nn.MultiheadAttention(n_embd, n_head, dropout=dropout, batch_first=True)
         self.norm2 = RMSNorm(n_embd)
-        self.mlp = SwiGLUMuchPelu(d_model, d_ff, dropout)
+        # FIX: The variable 'd_model' was not defined. The correct parameter is 'n_embd'.
+        self.mlp = SwiGLUMuchPelu(n_embd, d_ff, dropout)
         self.dropout = nn.Dropout(dropout)
+
     def forward(self, x, attn_mask=None, key_padding_mask=None):
         x_norm = self.norm1(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm, attn_mask=attn_mask, key_padding_mask=key_padding_mask, need_weights=False)
