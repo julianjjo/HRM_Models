@@ -53,6 +53,11 @@ WANDB_PROJECT = "HRM-Text1"
 UPDATE_README = True
 
 # ----------------------------
+# Selección del campo para entrenamiento
+# Opciones: "conversations" (por defecto), "input_answer"
+TRAIN_FIELD_MODE = "conversations"
+
+# ----------------------------
 # Utilities & Initialization
 def set_seed(seed: int):
     random.seed(seed)
@@ -103,18 +108,32 @@ raw_datasets = load_dataset(
 )
 
 def tokenize_function(examples):
-    # Procesa el campo 'conversations' concatenando los mensajes
+    """
+    Preprocesa los datos según TRAIN_FIELD_MODE:
+    - "conversations": concatena los mensajes como antes.
+    - "input_answer": concatena 'input' y 'answer' como texto de entrada.
+    """
     texts = []
-    for conv_list in examples["conversations"]:
-        # Concatenar los mensajes usando 'value' si existe, si no 'content'
-        msg_texts = []
-        for msg in conv_list:
-            if "value" in msg:
-                msg_texts.append(str(msg["value"]))
-            elif "content" in msg:
-                msg_texts.append(str(msg["content"]))
-        full_text = " ".join(msg_texts) + tokenizer.eos_token
-        texts.append(full_text)
+    if TRAIN_FIELD_MODE == "conversations":
+        for conv_list in examples["conversations"]:
+            # Concatenar los mensajes usando 'value' si existe, si no 'content'
+            msg_texts = []
+            for msg in conv_list:
+                if "value" in msg:
+                    msg_texts.append(str(msg["value"]))
+                elif "content" in msg:
+                    msg_texts.append(str(msg["content"]))
+            full_text = " ".join(msg_texts) + tokenizer.eos_token
+            texts.append(full_text)
+    elif TRAIN_FIELD_MODE == "input_answer":
+        # Procesa cada ejemplo concatenando 'input' y 'answer'
+        inputs = examples.get("input", [])
+        answers = examples.get("answer", [])
+        for inp, ans in zip(inputs, answers):
+            full_text = f"{str(inp)} {str(ans)}{tokenizer.eos_token}"
+            texts.append(full_text)
+    else:
+        raise ValueError(f"Modo de campo de entrenamiento no soportado: {TRAIN_FIELD_MODE}")
     return tokenizer(
         texts,
         truncation=True,
