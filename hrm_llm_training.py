@@ -112,8 +112,7 @@ print("Cargando y preparando dataset sanjay920/goat-sharegpt...")
 
 # Cargar los splits del dataset Goat-ShareGPT
 raw_datasets = load_dataset(
-    "sanjay920/goat-sharegpt",
-    split="train"
+    "sanjay920/goat-sharegpt"
 )
 
 def tokenize_function(examples):
@@ -124,7 +123,12 @@ def tokenize_function(examples):
     """
     texts = []
     if TRAIN_FIELD_MODE == "conversations":
-        for conv_list in examples["conversations"]:
+        for conv_json_str in examples["conversations"]:
+            # Decodifica el string JSON
+            try:
+                conv_list = json.loads(conv_json_str)
+            except Exception as e:
+                conv_list = []
             # Concatenar los mensajes usando 'value' si existe, si no 'content'
             msg_texts = []
             for msg in conv_list:
