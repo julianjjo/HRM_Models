@@ -38,7 +38,7 @@ EARLY_STOPPING_PATIENCE = 2 # Stop if validation loss doesn't improve for 2 epoc
 SAVE_STEPS = 500  # Save a checkpoint every 500 global steps
 
 # HRM Model Hyperparameters
-MODEL_CONFIG = {"d_model": 512, "n_heads": 8, "d_ff": 2048, "dropout": 0.1}
+MODEL_CONFIG = {"n_embd": 512, "n_head": 8, "n_inner": 2048, "dropout": 0.1}
 MAX_HALT_STEPS = 8
 PONDER_WEIGHT = 1e-2
 PONDER_WEIGHT_DECAY = 0.98 # Decay ponder weight each epoch to focus on LM loss later
