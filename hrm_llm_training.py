@@ -168,7 +168,7 @@ class HRMText1(PreTrainedModel):
 # ==============================================================================
 
 # --- Parámetros de Depuración y Prueba ---
-DEBUG_MODE = True  # ¡¡¡ Poner en False para un entrenamiento completo !!!
+DEBUG_MODE = False  # ¡¡¡ Poner en False para un entrenamiento completo !!!
 NUM_DEBUG_SAMPLES = 1000  # Número de muestras para el dataset reducido
 DEBUG_BATCH_SIZE = 4   # Tamaño del lote en modo de depuración (muy pequeño)
 
@@ -177,9 +177,9 @@ HF_REPO_ID = "qingy2024/HRM-Text1"
 SEED = 42
 NUM_EPOCHS = 2
 BLOCK_SIZE = 512
-TRAIN_BATCH_SIZE = 16
+TRAIN_BATCH_SIZE = 185
 GRAD_ACCUM_STEPS = 1
-LEARNING_RATE_MAX = 1e-4
+LEARNING_RATE_MAX = 1e-3
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.01
 MIXED_PRECISION = False
@@ -502,13 +502,13 @@ if os.path.exists(BEST_MODEL_PATH):
         inference_model = torch.compile(inference_model)
         
     try:
-        prompt1 = "What is the capital of Spain?"
+        prompt1 = "42/6"
         full_response1 = chat_with_model(prompt1, inference_model, tokenizer, max_new_tokens=30)
         generated_part1 = full_response1[len(prompt1):].strip()
         print(f"\nPrompt: {prompt1}")
         print(f"Respuesta: {generated_part1}")
 
-        prompt2 = "The meaning of life is"
+        prompt2 = "1000*2345"
         full_response2 = chat_with_model(prompt2, inference_model, tokenizer, max_new_tokens=50)
         generated_part2 = full_response2[len(prompt2):].strip()
         print(f"\nPrompt: {prompt2}")
