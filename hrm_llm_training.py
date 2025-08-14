@@ -22,6 +22,9 @@ from tqdm.auto import tqdm
 
 from huggingface_hub import HfApi, HfFolder, hf_hub_download
 
+if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+    print("GPU compatible con TF32 detectada. Activando la precisión de matmul 'high'.")
+    torch.set_float32_matmul_precision('high')
 
 class HRMText1Config(PretrainedConfig):
     model_type = "hrm_text1" # Nombre para identificar tu arquitectura
@@ -174,12 +177,12 @@ HF_REPO_ID = "qingy2024/HRM-Text1"
 SEED = 42
 NUM_EPOCHS = 2
 BLOCK_SIZE = 512
-TRAIN_BATCH_SIZE = 174
+TRAIN_BATCH_SIZE = 180
 GRAD_ACCUM_STEPS = 1
 LEARNING_RATE_MAX = 5e-5
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.01
-MIXED_PRECISION = False
+MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 2
 SAVE_STEPS = 500
 UPDATE_README = True
