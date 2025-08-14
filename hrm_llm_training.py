@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script (con Modo de Depuración y Batch Size Condicional Corregido)
+HRM-Text1 Training Script con Aproximación de Gradiente de 1 Paso (sin BPTT)
 
 Inspiration taken from [SofiTesfay2010's script](https://colab.research.google.com/drive/1xZNYC-yhwdJxzbpwRekE_rDjTki5CvEv?usp=sharing)
 """
@@ -22,12 +22,17 @@ from tqdm.auto import tqdm
 
 from huggingface_hub import HfApi, HfFolder, hf_hub_download
 
+# Activar TF32 para GPUs compatibles (Ampere y más nuevas) para mejor rendimiento
 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
     print("GPU compatible con TF32 detectada. Activando la precisión de matmul 'high'.")
     torch.set_float32_matmul_precision('high')
 
+# ==============================================================================
+# --- INICIO DE LA DEFINICIÓN DEL MODELO ---
+# ==============================================================================
+
 class HRMText1Config(PretrainedConfig):
-    model_type = "hrm_text1" # Nombre para identificar tu arquitectura
+    model_type = "hrm_text1"
 
     def __init__(
         self,
@@ -53,10 +58,8 @@ class HRMText1Config(PretrainedConfig):
         self.ponder_loss_weight = ponder_loss_weight
         self.halt_bias_init = halt_bias_init
 
-# ---------------------------------------------------------
-# HRM Architecture
 class RMSNorm(nn.Module):
-    def __init__(self, n_embd, eps=1e-8):
+    def __init__(self, n_embd, eps=1e-6): # Usando un epsilon más seguro
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(n_embd))
@@ -101,46 +104,66 @@ class HRMInner(nn.Module):
         return z_H_new, z_L_new
 
 class HRMText1(PreTrainedModel):
+    config_class = HRMText1Config
+
     def __init__(self, config: HRMText1Config):
         super().__init__(config)
-        self.config = config
         self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_embeddings = nn.Embedding(config.block_size, config.n_embd)
         self.register_buffer("pos_ids", torch.arange(config.block_size).unsqueeze(0))
         self.inner_model = HRMInner(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.halt_head = nn.Sequential(nn.Linear(config.n_embd, 1), nn.Sigmoid())
-        self.max_steps = config.halt_max_steps
-        self.ponder_loss_weight = config.ponder_loss_weight
-
+        
         with torch.no_grad():
-            halt_bias_value = getattr(config, "halt_bias_init", -2.0)
-            self.halt_head[0].bias.fill_(halt_bias_value)
+            self.halt_head[0].bias.fill_(config.halt_bias_init)
 
     def forward(self, input_ids, labels=None, attention_mask=None):
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
+
         z_L = self.token_embeddings(input_ids) + self.pos_embeddings(self.pos_ids[:, :seq_len])
         z_H = torch.zeros_like(z_L)
+        
         key_padding_mask = (attention_mask == 0) if attention_mask is not None else None
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
+
         remainders = torch.ones((batch_size, seq_len), device=device)
         total_z_H = torch.zeros_like(z_H)
         n_updates = torch.zeros((batch_size, seq_len), device=device)
         eps = 1e-6
-        for step in range(self.max_steps):
-            p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
-            is_last_step = (step == self.max_steps - 1)
-            halt_now_prob = torch.ones_like(p_halt) if is_last_step else p_halt
-            contrib = remainders * halt_now_prob
-            total_z_H += contrib.unsqueeze(-1) * z_H
-            remainders = remainders * (1 - p_halt) if not is_last_step else torch.zeros_like(remainders)
-            if not is_last_step:
-                n_updates += remainders
-            if torch.all(remainders < eps):
-                break
-            z_H, z_L = self.inner_model(z_H, z_L, attn_mask=causal_mask, key_padding_mask=key_padding_mask)
 
+        # --- APROXIMACIÓN DE GRADIENTE DE 1 PASO (INICIO) ---
+        # Bucle principal sin gradientes para evitar BPTT
+        with torch.no_grad():
+            for step in range(self.config.halt_max_steps - 1):
+                z_H, z_L = z_H.detach(), z_L.detach()
+
+                p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
+                halt_now_prob = p_halt
+                contrib = remainders * halt_now_prob
+
+                total_z_H += contrib.unsqueeze(-1) * z_H
+                remainders = remainders * (1 - p_halt)
+                n_updates += remainders
+
+                if torch.all(remainders < eps):
+                    remainders.fill_(0.0)
+                    break
+                
+                z_H, z_L = self.inner_model(z_H, z_L, attn_mask=causal_mask, key_padding_mask=key_padding_mask)
+
+        # El ÚLTIMO paso CON gradientes
+        z_H, z_L = z_H.detach(), z_L.detach()
+
+        p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
+        halt_now_prob = torch.ones_like(p_halt) # En el último paso, la probabilidad de parar es 1
+        contrib = remainders * halt_now_prob
+        
+        total_z_H += contrib.unsqueeze(-1) * z_H
+        # No actualizamos z_H/z_L de nuevo, ya que la loss se basa en el estado final
+        # --- APROXIMACIÓN DE GRADIENTE DE 1 PASO (FIN) ---
+        
         logits = self.lm_head(total_z_H)
         loss = None
         if labels is not None:
@@ -148,29 +171,25 @@ class HRMText1(PreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
             lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
+            
             ponder_loss = torch.mean(n_updates)
-            loss = lm_loss + self.ponder_loss_weight * ponder_loss
-        return {"loss": loss, "logits": logits}
-    
-    # Función auxiliar para crear la máscara causal dinámicamente (necesaria para `generate`)
-    def _prepare_causal_attention_mask(self, attention_mask, input_shape, dtype):
-        bsz, seq_len = input_shape
-        # Crea la máscara triangular superior
-        causal_mask = torch.full((seq_len, seq_len), torch.finfo(dtype).min, device=attention_mask.device)
-        mask_cond = torch.arange(causal_mask.size(-1), device=attention_mask.device)
-        causal_mask.masked_fill_(mask_cond < (mask_cond + 1).view(causal_mask.size(-1), 1), 0)
-        causal_mask = causal_mask.to(dtype)
-        return causal_mask.unsqueeze(0).expand(bsz, 1, seq_len, seq_len)
-# ---------------------------------------------------------
+            loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
+            
+        from transformers.modeling_outputs import CausalLMOutputWithPast
+        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
 
 # ==============================================================================
-# --- INICIO DE LA CONFIGURACIÓN PRINCIPAL ---
+# --- FIN DE LA DEFINICIÓN DEL MODELO ---
+# ==============================================================================
+
+# ==============================================================================
+# --- INICIO DE LA CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
 
 # --- Parámetros de Depuración y Prueba ---
-DEBUG_MODE = False  # ¡¡¡ Poner en False para un entrenamiento completo !!!
-NUM_DEBUG_SAMPLES = 1000  # Número de muestras para el dataset reducido
-DEBUG_BATCH_SIZE = 4   # Tamaño del lote en modo de depuración (muy pequeño)
+DEBUG_MODE = False  # Poner en True para pruebas rápidas, False para entrenamiento real
+NUM_DEBUG_SAMPLES = 1000
+DEBUG_BATCH_SIZE = 4
 
 # --- Training Parameters ---
 HF_REPO_ID = "qingy2024/HRM-Text1"
@@ -179,23 +198,19 @@ NUM_EPOCHS = 2
 BLOCK_SIZE = 512
 TRAIN_BATCH_SIZE = 185
 GRAD_ACCUM_STEPS = 1
-LEARNING_RATE_MAX = 1e-3
+LEARNING_RATE_MAX = 2e-4  # Aumentado a un valor más efectivo ahora que BPTT está desactivado
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.01
-MIXED_PRECISION = True
+MIXED_PRECISION = True    # Reactivado para máximo rendimiento
 EARLY_STOPPING_PATIENCE = 2
 SAVE_STEPS = 500
 UPDATE_README = True
 
-# --- HRM Model Hyperparameters ---
-MODEL_CONFIG = {
+# --- HRM Model Hyperparameters (se usarán en el objeto de configuración) ---
+MODEL_PARAMS = {
     "n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1,
-    "vocab_size": None, "block_size": BLOCK_SIZE
+    "halt_max_steps": 8, "ponder_loss_weight": 1e-2, "halt_bias_init": -2.2
 }
-MAX_HALT_STEPS = 8
-PONDER_WEIGHT = 1e-2
-PONDER_WEIGHT_DECAY = 0.98
-HALT_BIAS_INIT = -2.2
 
 # --- Otros Parámetros ---
 T5_TOKENIZER_REPO = "t5-small"
@@ -205,7 +220,7 @@ BEST_MODEL_PATH = "best_model.bin"
 TRAIN_FIELD_MODE = "input_answer"
 
 # ==============================================================================
-# --- FIN DE LA CONFIGURACIÓN PRINCIPAL ---
+# --- FIN DE LA CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
 
 # Ajuste del BATCH_SIZE según el modo de depuración
@@ -241,7 +256,6 @@ if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
 tokenizer.padding_side = "left"
 print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
-MODEL_CONFIG["vocab_size"] = len(tokenizer)
 
 # Data Loading and Preprocessing
 print(f"Cargando dataset sanjay920/goat-sharegpt con el modo: {TRAIN_FIELD_MODE}")
@@ -249,14 +263,8 @@ raw_datasets = load_dataset("sanjay920/goat-sharegpt")
 
 if DEBUG_MODE:
     print(f"\n!!! MODO DE PRUEBA ACTIVO: Reduciendo el dataset a {NUM_DEBUG_SAMPLES} ejemplos. !!!\n")
-    if "train" in raw_datasets:
-        # Asegurarse de que haya suficientes muestras para la división
-        if len(raw_datasets["train"]) > NUM_DEBUG_SAMPLES:
-            raw_datasets["train"] = raw_datasets["train"].shuffle(seed=SEED).select(range(NUM_DEBUG_SAMPLES))
-        else:
-            print(f"Advertencia: NUM_DEBUG_SAMPLES ({NUM_DEBUG_SAMPLES}) es mayor que el dataset completo. Usando el dataset completo.")
-    else:
-        print("Advertencia: No se encontró el split 'train' para reducir su tamaño en modo DEBUG.")
+    if "train" in raw_datasets and len(raw_datasets["train"]) > NUM_DEBUG_SAMPLES:
+        raw_datasets["train"] = raw_datasets["train"].shuffle(seed=SEED).select(range(NUM_DEBUG_SAMPLES))
 
 def tokenize_function(examples):
     texts = []
@@ -268,7 +276,7 @@ def tokenize_function(examples):
 
 if "validation" not in raw_datasets:
     print("No se encontró split 'validation'. Creando partición (10%) desde 'train'...")
-    split = raw_datasets["train"].train_test_split(test_size=0.1, seed=SEED, stratify_by_column=None) # stratify_by_column puede dar error si no existe la columna
+    split = raw_datasets["train"].train_test_split(test_size=0.1, seed=SEED)
     raw_datasets["train"] = split["train"]
     raw_datasets["validation"] = split["test"]
 
@@ -281,32 +289,21 @@ for split_name in ["train", "validation"]:
 
 # DataLoaders
 num_workers = os.cpu_count() or 2
-# --- CAMBIO CLAVE ---
-# Usar drop_last=True solo si NO estamos en modo de depuración para evitar un DataLoader vacío
 train_loader = DataLoader(
-    tokenized_splits["train"],
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    drop_last=(not DEBUG_MODE), # ¡ESTA ES LA CORRECCIÓN!
-    num_workers=num_workers,
-    pin_memory=True
+    tokenized_splits["train"], batch_size=BATCH_SIZE, shuffle=True,
+    drop_last=(not DEBUG_MODE), num_workers=num_workers, pin_memory=True
 )
-val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False, num_workers=num_workers, pin_memory=True)
+val_loader = DataLoader(
+    tokenized_splits["validation"], batch_size=BATCH_SIZE, shuffle=False,
+    drop_last=False, num_workers=num_workers, pin_memory=True
+)
 
 # Model, Optimizer, Scheduler
-from types import SimpleNamespace
 config = HRMText1Config(
     vocab_size=len(tokenizer),
     block_size=BLOCK_SIZE,
-    n_embd=MODEL_CONFIG["n_embd"],
-    n_head=MODEL_CONFIG["n_head"],
-    d_ff=MODEL_CONFIG["d_ff"],
-    dropout=MODEL_CONFIG["dropout"],
-    halt_max_steps=MAX_HALT_STEPS,
-    ponder_loss_weight=PONDER_WEIGHT,
-    halt_bias_init=HALT_BIAS_INIT
+    **MODEL_PARAMS
 )
-
 model = HRMText1(config).to(device)
 
 if torch.__version__.startswith("2"):
@@ -314,14 +311,13 @@ if torch.__version__.startswith("2"):
     model = torch.compile(model)
 
 if DEBUG_MODE:
-    print("\n!!! MODO DE PRUEBA ACTIVO: Se ha activado la detección de anomalías en autograd. El entrenamiento será más lento. !!!\n")
+    print("\n!!! MODO DE PRUEBA ACTIVO: Se ha activado la detección de anomalías. El entrenamiento será más lento. !!!\n")
     torch.autograd.set_detect_anomaly(True)
 
 decay, no_decay = [], []
 for n, p in model.named_parameters():
     if not p.requires_grad: continue
-    if p.dim() == 1 or any(k in n.lower() for k in ["bias", "norm"]):
-        no_decay.append(p)
+    if p.dim() == 1 or any(k in n.lower() for k in ["bias", "norm"]): no_decay.append(p)
     else: decay.append(p)
 
 optimizer = AdamW(
@@ -334,8 +330,7 @@ if os.path.exists(LOCAL_CHECKPOINT_PATH):
     try:
         chk = torch.load(LOCAL_CHECKPOINT_PATH, map_location="cpu")
         optimizer.load_state_dict(chk["optimizer_state_dict"])
-        start_epoch = chk.get("epoch", 0)
-        global_step = chk.get("global_step", 0)
+        start_epoch, global_step = chk.get("epoch", 0), chk.get("global_step", 0)
         best_val_loss = chk.get("best_val_loss", float('inf'))
         print(f"Reanudando desde la Época {start_epoch}, paso global {global_step}.")
     except Exception as e:
@@ -351,24 +346,16 @@ scaler = torch.cuda.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == "
 patience_counter = 0
 for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
-    current_ponder_weight = PONDER_WEIGHT * (PONDER_WEIGHT_DECAY ** epoch)
     base_model = model._orig_mod if hasattr(model, '_orig_mod') else model
-    base_model.ponder_loss_weight = current_ponder_weight
+    base_model.config.ponder_loss_weight = PONDER_WEIGHT * (PONDER_WEIGHT_DECAY ** epoch)
 
-    if len(train_loader) == 0:
-        print(f"El DataLoader de entrenamiento está vacío para la época {epoch}. Saltando al siguiente paso.")
-        continue
-
-    progress = tqdm(train_loader, desc=f"Época {epoch} | Ponder W: {current_ponder_weight:.4f}")
+    progress = tqdm(train_loader, desc=f"Época {epoch} | Ponder W: {base_model.config.ponder_loss_weight:.4f}")
     for step, batch in enumerate(progress):
-        # ... (resto del bucle de entrenamiento, igual que antes) ...
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = input_ids
+        input_ids, attention_mask, labels = batch["input_ids"].to(device), batch["attention_mask"].to(device), batch["input_ids"].to(device)
 
         with torch.amp.autocast("cuda", enabled=(MIXED_PRECISION and device.type == "cuda")):
             outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
-            loss = outputs["loss"]
+            loss = outputs.loss
 
         if loss is None or not torch.isfinite(loss):
             print("Pérdida no finita, saltando lote.")
@@ -386,141 +373,87 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             scheduler.step()
             global_step += 1
 
-            if not DEBUG_MODE and global_step > 0 and global_step % SAVE_STEPS == 0:
-                print(f"\nGuardando checkpoint en el paso global {global_step}")
-                # ... Lógica de guardado de checkpoints ...
-
         progress.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
     # Validation
     model.eval()
     total_val_loss = 0.0
     if len(val_loader) > 0:
-      with torch.inference_mode():
-          for batch in val_loader:
-              input_ids = batch["input_ids"].to(device)
-              attention_mask = batch["attention_mask"].to(device)
-              out = model(input_ids, labels=input_ids, attention_mask=attention_mask)
-              if out.get("loss") is not None and torch.isfinite(out["loss"]):
-                  total_val_loss += out["loss"].item()
-      avg_val_loss = total_val_loss / len(val_loader)
-      val_perplexity = torch.exp(torch.tensor(avg_val_loss))
-      print(f"\nÉpoca {epoch} | Pérdida de Validación: {avg_val_loss:.4f} | Perplejidad: {val_perplexity:.2f}")
+        with torch.inference_mode():
+            for batch in val_loader:
+                input_ids, attention_mask, labels = batch["input_ids"].to(device), batch["attention_mask"].to(device), batch["input_ids"].to(device)
+                outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
+                if outputs.loss is not None and torch.isfinite(outputs.loss):
+                    total_val_loss += outputs.loss.item()
+        avg_val_loss = total_val_loss / len(val_loader)
+        val_perplexity = torch.exp(torch.tensor(avg_val_loss))
+        print(f"\nÉpoca {epoch} | Pérdida de Validación: {avg_val_loss:.4f} | Perplejidad: {val_perplexity:.2f}")
 
-      if avg_val_loss < best_val_loss:
-          best_val_loss = avg_val_loss
-          patience_counter = 0
-          print(f"Nueva mejor pérdida. Guardando modelo en '{BEST_MODEL_PATH}'")
-          model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-          torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
-      else:
-          patience_counter += 1
-          print(f"Validación no mejoró. Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            print(f"Nueva mejor pérdida. Guardando modelo en '{BEST_MODEL_PATH}'")
+            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+        else:
+            patience_counter += 1
+            print(f"Validación no mejoró. Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
     else:
         print("El DataLoader de validación está vacío. Saltando la validación.")
 
-
-    torch.save({
-        "epoch": epoch + 1, "optimizer_state_dict": optimizer.state_dict(),
-        "global_step": global_step, "best_val_loss": best_val_loss
-    }, LOCAL_CHECKPOINT_PATH)
+    torch.save({"epoch": epoch + 1, "optimizer_state_dict": optimizer.state_dict(),
+                "global_step": global_step, "best_val_loss": best_val_loss}, LOCAL_CHECKPOINT_PATH)
     
-    if not DEBUG_MODE and HF_TOKEN and os.path.exists(BEST_MODEL_PATH):
-        # ... (código para subir al hub) ...
-        pass
-
     if patience_counter >= EARLY_STOPPING_PATIENCE:
         print(f"Detención temprana en la época {epoch+1}.")
         break
 
 print("Entrenamiento finalizado.")
-# Exportar modelo y tokenizer en formato Hugging Face
-# ¡Asegúrate de guardar el modelo base, no el compilado, para compatibilidad!
 final_model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
 final_model_to_save.save_pretrained("output_model")
 tokenizer.save_pretrained("output_model")
 
 # ----------------------------
-# Chatting! (Código de inferencia se mantiene igual)
+# Chatting
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval()
     input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
-    attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
-
+    
+    # Usa el método .generate() de Hugging Face, que es más robusto y optimizado
     with torch.inference_mode():
-        for _ in range(max_new_tokens):
-            outputs = model(input_ids, attention_mask=attention_mask)
-            next_token_logits = outputs["logits"][:, -1, :]
-            
-            if temperature > 0:
-                next_token_logits = next_token_logits / temperature
-            
-            if top_k > 0:
-                top_k_val = min(top_k, next_token_logits.size(-1))
-                topk_vals, topk_idx = torch.topk(next_token_logits, k=top_k_val)
-                mask = torch.full_like(next_token_logits, float("-inf"))
-                mask.scatter_(1, topk_idx, topk_vals)
-                filtered_logits = mask
-            else:
-                filtered_logits = next_token_logits
-
-            probs = F.softmax(filtered_logits, dim=-1)
-            next_token_id = torch.multinomial(probs, num_samples=1)
-
-            input_ids = torch.cat([input_ids, next_token_id], dim=1)
-            attention_mask = torch.cat([attention_mask, torch.ones((1,1), device=device, dtype=torch.long)], dim=1)
-            
-            if tokenizer.eos_token_id is not None and next_token_id.item() == tokenizer.eos_token_id:
-                break
-
-    full_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        output_ids = model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=True,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+    
+    full_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
     return full_text
-
 
 print("\n--- Probando la Generación del Modelo ---")
 
-if os.path.exists(BEST_MODEL_PATH):
-    print("Cargando el mejor modelo para la generación...")
+if os.path.exists("output_model/pytorch_model.bin"):
+    print("Cargando el modelo desde la carpeta 'output_model' para la generación...")
     
-    inference_config = HRMText1Config(
-        vocab_size=len(tokenizer),
-        block_size=BLOCK_SIZE,
-        n_embd=MODEL_CONFIG["n_embd"],
-        n_head=MODEL_CONFIG["n_head"],
-        d_ff=MODEL_CONFIG["d_ff"],
-        dropout=MODEL_CONFIG["dropout"],
-        halt_max_steps=MAX_HALT_STEPS,
-        ponder_loss_weight=PONDER_WEIGHT,
-        halt_bias_init=HALT_BIAS_INIT
-    )
-    inference_model = HRMText1(inference_config).to(device)
-    
-    inference_model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
+    inference_model = HRMText1.from_pretrained("output_model").to(device)
     
     if torch.__version__.startswith("2"):
         print("Compilando el modelo para una inferencia más rápida...")
         inference_model = torch.compile(inference_model)
         
     try:
-        prompt1 = "42/6"
-        full_response1 = chat_with_model(prompt1, inference_model, tokenizer, max_new_tokens=30)
-        generated_part1 = full_response1[len(prompt1):].strip()
-        print(f"\nPrompt: {prompt1}")
-        print(f"Respuesta: {generated_part1}")
-
-        prompt2 = "1000*2345"
-        full_response2 = chat_with_model(prompt2, inference_model, tokenizer, max_new_tokens=50)
-        generated_part2 = full_response2[len(prompt2):].strip()
-        print(f"\nPrompt: {prompt2}")
-        print(f"Respuesta: {generated_part2}")
-        
-        prompt3 = "530991+6051993"
-        full_response3 = chat_with_model(prompt3, inference_model, tokenizer, max_new_tokens=20)
-        generated_part3 = full_response3[len(prompt3):].strip()
-        print(f"\nPrompt: {prompt3}")
-        print(f"Respuesta: {generated_part3}")
+        prompts = ["42/6", "1000*2345", "530991+6051993"]
+        for prompt in prompts:
+            full_response = chat_with_model(prompt, inference_model, tokenizer, max_new_tokens=50)
+            generated_part = full_response[len(prompt):].strip()
+            print(f"\nPrompt: {prompt}")
+            print(f"Respuesta: {generated_part}")
 
     except Exception as e:
         print(f"El test de generación falló: {e}")
 else:
-    print("El archivo del mejor modelo no fue encontrado. No se pudo ejecutar el test de generación.")
+    print("La carpeta 'output_model' no fue encontrada. No se pudo ejecutar el test de generación.")
