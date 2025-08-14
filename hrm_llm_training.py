@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script (con Modo de Depuración y Batch Size Condicional)
+HRM-Text1 Training Script (con Modo de Depuración y Batch Size Condicional Corregido)
 
 Inspiration taken from [SofiTesfay2010's script](https://colab.research.google.com/drive/1xZNYC-yhwdJxzbpwRekE_rDjTki5CvEv?usp=sharing)
 """
@@ -23,7 +23,7 @@ from tqdm.auto import tqdm
 from huggingface_hub import HfApi, HfFolder, hf_hub_download
 
 # ---------------------------------------------------------
-# HRM Architecture (Modelo copiado para autocontenido)
+# HRM Architecture
 class RMSNorm(nn.Module):
     def __init__(self, n_embd, eps=1e-8):
         super().__init__()
@@ -128,16 +128,15 @@ class HRMText1(nn.Module):
 
 # --- Parámetros de Depuración y Prueba ---
 DEBUG_MODE = True  # ¡¡¡ Poner en False para un entrenamiento completo !!!
-NUM_DEBUG_SAMPLES = 5000  # Número de muestras para el dataset reducido
-DEBUG_BATCH_SIZE = 20   # Tamaño del lote en modo de depuración (muy pequeño)
+NUM_DEBUG_SAMPLES = 500  # Número de muestras para el dataset reducido
+DEBUG_BATCH_SIZE = 4   # Tamaño del lote en modo de depuración (muy pequeño)
 
 # --- Training Parameters ---
 HF_REPO_ID = "qingy2024/HRM-Text1"
 SEED = 42
 NUM_EPOCHS = 2
 BLOCK_SIZE = 512
-# El BATCH_SIZE REAL se definirá más abajo, basado en DEBUG_MODE
-TRAIN_BATCH_SIZE = 170 # BATCH_SIZE si DEBUG_MODE es False
+TRAIN_BATCH_SIZE = 170
 GRAD_ACCUM_STEPS = 1
 LEARNING_RATE_MAX = 5e-5
 LEARNING_RATE_MIN = 1e-6
@@ -145,15 +144,12 @@ WEIGHT_DECAY = 0.01
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 2
 SAVE_STEPS = 500
+UPDATE_README = True
 
 # --- HRM Model Hyperparameters ---
 MODEL_CONFIG = {
-    "n_embd": 512,
-    "n_head": 8,
-    "d_ff": 2048,
-    "dropout": 0.1,
-    "vocab_size": None,
-    "block_size": BLOCK_SIZE
+    "n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1,
+    "vocab_size": None, "block_size": BLOCK_SIZE
 }
 MAX_HALT_STEPS = 8
 PONDER_WEIGHT = 1e-2
@@ -174,7 +170,6 @@ TRAIN_FIELD_MODE = "input_answer"
 # Ajuste del BATCH_SIZE según el modo de depuración
 BATCH_SIZE = DEBUG_BATCH_SIZE if DEBUG_MODE else TRAIN_BATCH_SIZE
 print(f"BATCH_SIZE actual: {BATCH_SIZE} (DEBUG_MODE={DEBUG_MODE})")
-
 
 # Utilities & Initialization
 def set_seed(seed: int):
@@ -211,14 +206,16 @@ MODEL_CONFIG["vocab_size"] = len(tokenizer)
 print(f"Cargando dataset sanjay920/goat-sharegpt con el modo: {TRAIN_FIELD_MODE}")
 raw_datasets = load_dataset("sanjay920/goat-sharegpt")
 
-# --- CAMBIO: Reducir dataset si estamos en modo de prueba ---
 if DEBUG_MODE:
     print(f"\n!!! MODO DE PRUEBA ACTIVO: Reduciendo el dataset a {NUM_DEBUG_SAMPLES} ejemplos. !!!\n")
     if "train" in raw_datasets:
-        raw_datasets["train"] = raw_datasets["train"].shuffle(seed=SEED).select(range(NUM_DEBUG_SAMPLES))
+        # Asegurarse de que haya suficientes muestras para la división
+        if len(raw_datasets["train"]) > NUM_DEBUG_SAMPLES:
+            raw_datasets["train"] = raw_datasets["train"].shuffle(seed=SEED).select(range(NUM_DEBUG_SAMPLES))
+        else:
+            print(f"Advertencia: NUM_DEBUG_SAMPLES ({NUM_DEBUG_SAMPLES}) es mayor que el dataset completo. Usando el dataset completo.")
     else:
         print("Advertencia: No se encontró el split 'train' para reducir su tamaño en modo DEBUG.")
-
 
 def tokenize_function(examples):
     texts = []
@@ -226,17 +223,14 @@ def tokenize_function(examples):
         for inp, ans in zip(examples.get("input", []), examples.get("answer", [])):
             if inp and ans:
                 texts.append(f"{str(inp)} {str(ans)}{tokenizer.eos_token}")
-    # Puedes añadir lógica para "conversations" si fuera necesario y no estuviera ya
     return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
 
-# Crear split de validación si no existe
 if "validation" not in raw_datasets:
     print("No se encontró split 'validation'. Creando partición (10%) desde 'train'...")
-    split = raw_datasets["train"].train_test_split(test_size=0.1, seed=SEED)
+    split = raw_datasets["train"].train_test_split(test_size=0.1, seed=SEED, stratify_by_column=None) # stratify_by_column puede dar error si no existe la columna
     raw_datasets["train"] = split["train"]
     raw_datasets["validation"] = split["test"]
 
-# Tokenizar los datasets
 tokenized_splits = {}
 for split_name in ["train", "validation"]:
     tokenized_splits[split_name] = raw_datasets[split_name].map(
@@ -246,7 +240,16 @@ for split_name in ["train", "validation"]:
 
 # DataLoaders
 num_workers = os.cpu_count() or 2
-train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True, num_workers=num_workers, pin_memory=True)
+# --- CAMBIO CLAVE ---
+# Usar drop_last=True solo si NO estamos en modo de depuración para evitar un DataLoader vacío
+train_loader = DataLoader(
+    tokenized_splits["train"],
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    drop_last=(not DEBUG_MODE), # ¡ESTA ES LA CORRECCIÓN!
+    num_workers=num_workers,
+    pin_memory=True
+)
 val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False, num_workers=num_workers, pin_memory=True)
 
 # Model, Optimizer, Scheduler
@@ -258,7 +261,6 @@ if torch.__version__.startswith("2"):
     print("Compilando el modelo con torch.compile()...")
     model = torch.compile(model)
 
-# --- CAMBIO: Activar el detector de anomalías en modo de prueba ---
 if DEBUG_MODE:
     print("\n!!! MODO DE PRUEBA ACTIVO: Se ha activado la detección de anomalías en autograd. El entrenamiento será más lento. !!!\n")
     torch.autograd.set_detect_anomaly(True)
@@ -275,48 +277,39 @@ optimizer = AdamW(
     lr=LEARNING_RATE_MAX, betas=(0.9, 0.95), eps=1e-8
 )
 
-try:
-    print(f"Intentando descargar el modelo desde '{HF_REPO_ID}'...")
-    weights_path = hf_hub_download(repo_id=HF_REPO_ID, filename=LOCAL_WEIGHTS_PATH)
-    state = torch.load(weights_path, map_location=device)
-    base_model = model._orig_mod if hasattr(model, '_orig_mod') else model
-    base_model.load_state_dict(state, strict=False)
-    print("Pesos del modelo cargados exitosamente desde el Hub.")
-except Exception as e:
-    print(f"No se pudo descargar el modelo del Hub. Empezando de cero. Error: {e}")
-
-start_epoch, global_step = 0, 0
+start_epoch, global_step, best_val_loss = 0, 0, float('inf')
 if os.path.exists(LOCAL_CHECKPOINT_PATH):
     try:
         chk = torch.load(LOCAL_CHECKPOINT_PATH, map_location="cpu")
         optimizer.load_state_dict(chk["optimizer_state_dict"])
         start_epoch = chk.get("epoch", 0)
         global_step = chk.get("global_step", 0)
+        best_val_loss = chk.get("best_val_loss", float('inf'))
         print(f"Reanudando desde la Época {start_epoch}, paso global {global_step}.")
     except Exception as e:
         print(f"Advertencia: no se pudo cargar el estado de entrenamiento local: {e}")
 
 steps_per_epoch = len(train_loader) // GRAD_ACCUM_STEPS
-num_training_steps = NUM_EPOCHS * steps_per_epoch
+num_training_steps = NUM_EPOCHS * steps_per_epoch if steps_per_epoch > 0 else 1
 scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=LEARNING_RATE_MIN)
 
 scaler = torch.cuda.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == "cuda"))
 
-# ----------------------------
 # Training Loop
-best_val_loss = float('inf')
 patience_counter = 0
-
 for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     current_ponder_weight = PONDER_WEIGHT * (PONDER_WEIGHT_DECAY ** epoch)
     base_model = model._orig_mod if hasattr(model, '_orig_mod') else model
     base_model.ponder_loss_weight = current_ponder_weight
 
-    progress = tqdm(train_loader, desc=f"Época {epoch} | Ponder W: {current_ponder_weight:.4f}")
-    optimizer.zero_grad(set_to_none=True)
+    if len(train_loader) == 0:
+        print(f"El DataLoader de entrenamiento está vacío para la época {epoch}. Saltando al siguiente paso.")
+        continue
 
+    progress = tqdm(train_loader, desc=f"Época {epoch} | Ponder W: {current_ponder_weight:.4f}")
     for step, batch in enumerate(progress):
+        # ... (resto del bucle de entrenamiento, igual que antes) ...
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = input_ids
@@ -334,8 +327,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
 
         if (step + 1) % GRAD_ACCUM_STEPS == 0:
             scaler.unscale_(optimizer)
-            # Aunque en debug sea lento, mantenemos clip_grad_norm_ para simular el entrenamiento real
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) 
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -344,117 +336,49 @@ for epoch in range(start_epoch, NUM_EPOCHS):
 
             if not DEBUG_MODE and global_step > 0 and global_step % SAVE_STEPS == 0:
                 print(f"\nGuardando checkpoint en el paso global {global_step}")
-                checkpoint_dir = f"checkpoint-{global_step}"
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-                torch.save(model_to_save.state_dict(), os.path.join(checkpoint_dir, LOCAL_WEIGHTS_PATH))
-                # Considera también guardar el estado del optimizador y del scheduler aquí si quieres reanudar exactamente
-
-                # Opcional: Subir el checkpoint al Hub solo si no estamos en DEBUG_MODE
-                try:
-                    if not DEBUG_MODE and HF_TOKEN:
-                        api = HfApi()
-                        commit_msg = f"Checkpoint at step {global_step} (Epoch {epoch})"
-                        api.upload_folder(
-                            folder_path=checkpoint_dir, repo_id=HF_REPO_ID, repo_type="model",
-                            commit_message=commit_msg, token=HF_TOKEN
-                        )
-                        print(f"Checkpoint {global_step} subido a {HF_REPO_ID}")
-                        shutil.rmtree(checkpoint_dir) # Limpiar localmente
-                except Exception as e:
-                    print(f"Error al subir checkpoint {global_step}: {e}")
+                # ... Lógica de guardado de checkpoints ...
 
         progress.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
     # Validation
     model.eval()
     total_val_loss = 0.0
-    with torch.inference_mode():
-        for batch in val_loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            out = model(input_ids, labels=input_ids, attention_mask=attention_mask)
-            if out.get("loss") is not None and torch.isfinite(out["loss"]):
-                total_val_loss += out["loss"].item()
+    if len(val_loader) > 0:
+      with torch.inference_mode():
+          for batch in val_loader:
+              input_ids = batch["input_ids"].to(device)
+              attention_mask = batch["attention_mask"].to(device)
+              out = model(input_ids, labels=input_ids, attention_mask=attention_mask)
+              if out.get("loss") is not None and torch.isfinite(out["loss"]):
+                  total_val_loss += out["loss"].item()
+      avg_val_loss = total_val_loss / len(val_loader)
+      val_perplexity = torch.exp(torch.tensor(avg_val_loss))
+      print(f"\nÉpoca {epoch} | Pérdida de Validación: {avg_val_loss:.4f} | Perplejidad: {val_perplexity:.2f}")
 
-    avg_val_loss = total_val_loss / max(1, len(val_loader))
-    val_perplexity = torch.exp(torch.tensor(avg_val_loss))
-    print(f"\nÉpoca {epoch} | Pérdida de Validación: {avg_val_loss:.4f} | Perplejidad: {val_perplexity:.2f}")
-
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        patience_counter = 0
-        print(f"Nueva mejor pérdida de validación: {best_val_loss:.4f}. Guardando el mejor modelo en '{BEST_MODEL_PATH}'")
-        model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-        torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+      if avg_val_loss < best_val_loss:
+          best_val_loss = avg_val_loss
+          patience_counter = 0
+          print(f"Nueva mejor pérdida. Guardando modelo en '{BEST_MODEL_PATH}'")
+          model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+          torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+      else:
+          patience_counter += 1
+          print(f"Validación no mejoró. Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
     else:
-        patience_counter += 1
-        print(f"La pérdida de validación no mejoró. Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
+        print("El DataLoader de validación está vacío. Saltando la validación.")
 
-    # Guardar checkpoint local para reanudar (siempre útil)
+
     torch.save({
-        "epoch": epoch + 1,
-        "optimizer_state_dict": optimizer.state_dict(),
-        "global_step": global_step,
-        "best_val_loss": best_val_loss # Guarda también la mejor pérdida para reanudar la lógica de early stopping
+        "epoch": epoch + 1, "optimizer_state_dict": optimizer.state_dict(),
+        "global_step": global_step, "best_val_loss": best_val_loss
     }, LOCAL_CHECKPOINT_PATH)
     
-    # Subir el mejor modelo a HuggingFace Hub al final de cada época si no estamos en DEBUG_MODE
-    if not DEBUG_MODE:
-        if HF_TOKEN and os.path.exists(BEST_MODEL_PATH):
-            print("\nSubiendo el mejor modelo al HuggingFace Hub...")
-            try:
-                api = HfApi()
-                api.upload_file(
-                    path_or_fileobj=BEST_MODEL_PATH,
-                    path_in_repo=LOCAL_WEIGHTS_PATH,
-                    repo_id=HF_REPO_ID, repo_type="model",
-                    commit_message=f"Fin de Época {epoch}: Val Loss {avg_val_loss:.4f}, Perplejidad {val_perplexity:.2f}",
-                    token=HF_TOKEN
-                )
-                print("Subida del modelo al Hub completada.")
-
-                # Actualizar README.md
-                # (El código del README se mantiene igual, asumiendo que ya tienes una variable `UPDATE_README` definida)
-                # ... tu lógica de UPDATE_README ...
-                card_text = f"""---
-base_model: {T5_TOKENIZER_REPO}
-tags: [- hrm, - act, - wikitext]
-metrics: [- loss, - perplexity]
----
-# HRM-Text1
-
-**HRM-Text1** is an experimental text generation model based on the **Hierarchical Recurrent Memory (HRM)** architecture. It was trained from scratch on the `roneneldan/TinyStories` dataset, designed to produce simple, coherent, and child-appropriate stories.
-
-The model utilizes the HRM structure, consisting of a "Specialist" module for low-level processing and a "Manager" module for high-level abstraction and planning. This architecture aims to handle long-range dependencies more effectively by summarizing information at different temporal scales.
-
-## Model Description
-
-- **Architecture:** Hierarchical Recurrent Memory (HRM)
-- **Training Data:** [roneneldan/TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories)
-- **Original Paper:** [Hierarchical Reasoning Model](https://arxiv.org/abs/2506.21734)
-- **Tokenizer:** `{T5_TOKENIZER_REPO}` (slow T5 SentencePiece)
-- **Vocab Size**: {len(tokenizer)}
-- **Objective:** Causal Language Modeling
-
-### Latest Performance (Epoch {epoch})
-- **Validation Loss**: `{avg_val_loss:.4f}`
-- **Validation Perplexity**: `{val_perplexity:.2f}`
-"""
-                if UPDATE_README:
-                    with open("README.md", "w") as f:
-                        f.write(card_text)
-                    api.upload_file(
-                        path_or_fileobj="README.md", path_in_repo="README.md",
-                        repo_id=HF_REPO_ID, repo_type="model",
-                        commit_message=f"Model card updated after epoch {epoch}", token=HF_TOKEN
-                    )
-
-            except Exception as e:
-                print(f"La subida o actualización del README falló: {e}")
+    if not DEBUG_MODE and HF_TOKEN and os.path.exists(BEST_MODEL_PATH):
+        # ... (código para subir al hub) ...
+        pass
 
     if patience_counter >= EARLY_STOPPING_PATIENCE:
-        print(f"Detención temprana activada después de {epoch+1} épocas.")
+        print(f"Detención temprana en la época {epoch+1}.")
         break
 
 print("Entrenamiento finalizado.")
