@@ -168,8 +168,8 @@ class HRMText1(PreTrainedModel):
 # ==============================================================================
 
 # --- Parámetros de Depuración y Prueba ---
-DEBUG_MODE = False  # ¡¡¡ Poner en False para un entrenamiento completo !!!
-NUM_DEBUG_SAMPLES = 500  # Número de muestras para el dataset reducido
+DEBUG_MODE = True  # ¡¡¡ Poner en False para un entrenamiento completo !!!
+NUM_DEBUG_SAMPLES = 1000  # Número de muestras para el dataset reducido
 DEBUG_BATCH_SIZE = 4   # Tamaño del lote en modo de depuración (muy pequeño)
 
 # --- Training Parameters ---
@@ -177,7 +177,7 @@ HF_REPO_ID = "qingy2024/HRM-Text1"
 SEED = 42
 NUM_EPOCHS = 2
 BLOCK_SIZE = 512
-TRAIN_BATCH_SIZE = 180
+TRAIN_BATCH_SIZE = 16
 GRAD_ACCUM_STEPS = 1
 LEARNING_RATE_MAX = 1e-4
 LEARNING_RATE_MIN = 1e-6
