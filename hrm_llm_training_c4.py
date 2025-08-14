@@ -124,7 +124,7 @@ DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 2000, 16
 DATASET_NAME = "allenai/c4"
 DATASET_CONFIG = "en.noblocklist"
 
-HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "YourUsername/HRM-Text1-C4", 1, 512, 128, 1
+HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "dreamwar/HRM-Text1-C4", 1, 512, 128, 1
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 5000, True # Guardar con menos frecuencia
 MODEL_PARAMS = {"n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1, "halt_max_steps": 8, "ponder_loss_weight": 1e-2, "halt_bias_init": -2.2}
