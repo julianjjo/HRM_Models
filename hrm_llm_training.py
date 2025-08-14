@@ -147,9 +147,11 @@ class HRMText1(nn.Module):
 # Training Parameters
 HF_REPO_ID = "qingy2024/HRM-Text1"
 SEED = 42
+DEBUG_MODE = True  # Cambia a True para modo depuración
+NUM_DEBUG_SAMPLES = 300  # Número de muestras para depuración
 NUM_EPOCHS = 2
 BLOCK_SIZE = 512
-BATCH_SIZE = 170
+BATCH_SIZE = 10
 GRAD_ACCUM_STEPS = 1 # Effective batch size = 140 * 1 = 140
 LEARNING_RATE_MAX = 2e-4
 LEARNING_RATE_MIN = 1e-6
@@ -222,6 +224,11 @@ MODEL_CONFIG["vocab_size"] = len(tokenizer)
 print(f"Cargando y preparando dataset sanjay920/goat-sharegpt con el modo: {TRAIN_FIELD_MODE}")
 
 raw_datasets = load_dataset("sanjay920/goat-sharegpt")
+
+# Modo depuración: limitar el split 'train'
+if DEBUG_MODE:
+    print(f"*** MODO DEPURACIÓN ACTIVADO: usando solo {NUM_DEBUG_SAMPLES} muestras del split 'train' ***")
+    raw_datasets["train"] = raw_datasets["train"].shuffle(seed=SEED).select(range(NUM_DEBUG_SAMPLES))
 
 def tokenize_function(examples):
     texts = []
@@ -332,6 +339,9 @@ scaler = torch.cuda.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == "
 # Training Loop
 best_val_loss = float('inf')
 patience_counter = 0
+
+# Habilita la detección de anomalías en PyTorch para depuración
+torch.autograd.set_detect_anomaly(True)
 
 for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
