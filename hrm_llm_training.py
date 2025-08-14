@@ -165,7 +165,7 @@ class HRMText1(PreTrainedModel):
 # ==============================================================================
 
 # --- Parámetros de Depuración y Prueba ---
-DEBUG_MODE = True  # ¡¡¡ Poner en False para un entrenamiento completo !!!
+DEBUG_MODE = False  # ¡¡¡ Poner en False para un entrenamiento completo !!!
 NUM_DEBUG_SAMPLES = 500  # Número de muestras para el dataset reducido
 DEBUG_BATCH_SIZE = 4   # Tamaño del lote en modo de depuración (muy pequeño)
 
