@@ -208,6 +208,7 @@ config = SimpleNamespace(
     vocab_size=len(tokenizer),
     block_size=BLOCK_SIZE,
     n_embd=MODEL_CONFIG["n_embd"],
+    d_model=MODEL_CONFIG["n_embd"],
     n_head=MODEL_CONFIG["n_head"],
     n_inner=MODEL_CONFIG["n_inner"],
     d_ff=MODEL_CONFIG["d_ff"] if "d_ff" in MODEL_CONFIG else MODEL_CONFIG["n_inner"],
