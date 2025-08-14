@@ -117,14 +117,14 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 2000, 16
+DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = False, 2000, 16
 
 DATASET_NAME = "allenai/c4"
 DATASET_CONFIG = "en.noblocklist"
 
 HF_REPO_ID = "dreamwar/HRM-Text1-C4"
 SEED = 42
-NUM_EPOCHS = 1
+NUM_EPOCHS = 2
 BLOCK_SIZE = 512
 TRAIN_BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 1
