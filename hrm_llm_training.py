@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 HRM-Text1 Training Script con Aproximación de Gradiente de 1 Paso (sin BPTT)
-MODIFICADO para ser compatible con NVIDIA CUDA y AMD ROCm.
+MODIFICADO para ser compatible con NVIDIA CUDA y AMD ROCm, con validación robusta.
 """
 
 import os, shutil, pathlib, random, json, datetime, math
@@ -27,7 +27,7 @@ if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
     torch.set_float32_matmul_precision('high')
 
 # ==============================================================================
-# --- DEFINICIÓN DEL MODELO (SIN CAMBIOS) ---
+# --- DEFINICIÓN DEL MODELO ---
 # ==============================================================================
 
 class HRMText1Config(PretrainedConfig):
@@ -81,7 +81,7 @@ class HRMText1(PreTrainedModel):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = False, 1000, 4
+DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 1000, 4 # MODO DEBUG ACTIVADO PARA PRUEBAS RÁPIDAS
 HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "qingy2024/HRM-Text1", 42, 2, 512, 185, 1
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 500, True
@@ -185,7 +185,6 @@ steps_per_epoch = len(train_loader) // GRAD_ACCUM_STEPS
 num_training_steps = NUM_EPOCHS * steps_per_epoch if steps_per_epoch > 0 else 1
 scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=LEARNING_RATE_MIN)
 
-# ### CORRECCIÓN FINAL: Usar la API simple de GradScaler ###
 scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type != 'cpu'))
 
 patience_counter = 0
@@ -205,31 +204,64 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); scaler.step(optimizer); scaler.update(); optimizer.zero_grad(set_to_none=True); scheduler.step(); global_step += 1
         progress.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
-    model.eval(); total_val_loss = 0.0
+    # ==============================================================================
+    # --- SECCIÓN DE VALIDACIÓN CORREGIDA ---
+    # ==============================================================================
+    model.eval()
+    total_val_loss = 0.0
+    val_batches = 0
     if len(val_loader) > 0:
+        print("\n--- Iniciando Validación ---")
         with torch.inference_mode():
-            for batch in val_loader:
+            for i, batch in enumerate(tqdm(val_loader, desc="Validando...")):
                 input_ids, attention_mask, labels = batch["input_ids"].to(device), batch["attention_mask"].to(device), batch["input_ids"].to(device)
                 outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
-                if outputs.loss is not None and torch.isfinite(outputs.loss): total_val_loss += outputs.loss.item()
-        avg_val_loss = total_val_loss / len(val_loader); val_perplexity = torch.exp(torch.tensor(avg_val_loss))
-        print(f"\nÉpoca {epoch} | Pérdida de Validación: {avg_val_loss:.4f} | Perplejidad: {val_perplexity:.2f}")
+                
+                if outputs.loss is not None and torch.isfinite(outputs.loss):
+                    batch_loss = outputs.loss.item()
+                    total_val_loss += batch_loss
+                    val_batches += 1
+                else:
+                    print(f"Advertencia: Pérdida no válida o nula en el lote de validación {i}")
 
-        if avg_val_loss < best_val_loss:
-            best_val_loss, patience_counter = avg_val_loss, 0
-            print(f"Nueva mejor pérdida. Guardando modelo en '{BEST_MODEL_PATH}'")
-            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+        if val_batches > 0:
+            avg_val_loss = total_val_loss / val_batches
+            val_perplexity = torch.exp(torch.tensor(avg_val_loss))
+            print(f"\n--- Resultados de Validación (Época {epoch}) ---")
+            print(f"Pérdida de Validación Promedio: {avg_val_loss:.4f} | Perplejidad: {val_perplexity:.2f}")
+            print(f"Pérdida total: {total_val_loss:.4f}, Lotes procesados: {val_batches}")
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                print(f"Nueva mejor pérdida. Guardando modelo en '{BEST_MODEL_PATH}'")
+                model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+                torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+            else:
+                patience_counter += 1
+                print(f"Validación no mejoró. Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
         else:
-            patience_counter += 1; print(f"Validación no mejoró. Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
-    else: print("El DataLoader de validación está vacío. Saltando la validación.")
+            print("\nAdvertencia: No se procesó ningún lote de validación válido. Saltando la lógica de validación.")
+    else:
+        print("El DataLoader de validación está vacío. Saltando la validación.")
+    # ==============================================================================
+    # --- FIN DE LA SECCIÓN DE VALIDACIÓN CORREGIDA ---
+    # ==============================================================================
 
     torch.save({"epoch": epoch + 1, "optimizer_state_dict": optimizer.state_dict(), "global_step": global_step, "best_val_loss": best_val_loss}, LOCAL_CHECKPOINT_PATH)
-    if patience_counter >= EARLY_STOPPING_PATIENCE: print(f"Detención temprana en la época {epoch+1}."); break
+    if patience_counter >= EARLY_STOPPING_PATIENCE:
+        print(f"Detención temprana en la época {epoch+1}.")
+        break
 
 print("Entrenamiento finalizado.")
-final_model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-final_model_to_save.save_pretrained("output_model"); tokenizer.save_pretrained("output_model")
+# --- CORRECCIÓN: Guardar el mejor modelo (o el último) en la carpeta 'output_model' ---
+model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+if os.path.exists(BEST_MODEL_PATH):
+    print(f"Cargando el mejor modelo guardado desde '{BEST_MODEL_PATH}' para el guardado final.")
+    model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
+
+model_to_save.save_pretrained("output_model")
+tokenizer.save_pretrained("output_model")
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval(); input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
@@ -239,12 +271,18 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperatur
 
 print("\n--- Probando la Generación del Modelo ---")
 if os.path.exists("output_model/pytorch_model.bin"):
-    print("Cargando el modelo desde la carpeta 'output_model' para la generación..."); inference_model = HRMText1.from_pretrained("output_model").to(device)
-    if torch.__version__.startswith("2"): print("Compilando el modelo para una inferencia más rápida..."); inference_model = torch.compile(inference_model)
+    print("Cargando el modelo desde la carpeta 'output_model' para la generación...")
+    inference_model = HRMText1.from_pretrained("output_model").to(device)
+    if torch.__version__.startswith("2"): 
+        print("Compilando el modelo de inferencia para una mayor rapidez...")
+        inference_model = torch.compile(inference_model)
     try:
         prompts = ["42/6", "1000*2345", "530991+6051993"]
         for prompt in prompts:
-            full_response = chat_with_model(prompt, inference_model, tokenizer, max_new_tokens=50); generated_part = full_response[len(prompt):].strip()
+            full_response = chat_with_model(prompt, inference_model, tokenizer, max_new_tokens=50)
+            generated_part = full_response[len(prompt):].strip()
             print(f"\nPrompt: {prompt}\nRespuesta: {generated_part}")
-    except Exception as e: print(f"El test de generación falló: {e}")
-else: print("La carpeta 'output_model' no fue encontrada. No se pudo ejecutar el test de generación.")
+    except Exception as e:
+        print(f"El test de generación falló: {e}")
+else:
+    print("La carpeta 'output_model' no fue encontrada. No se pudo ejecutar el test de generación.")
