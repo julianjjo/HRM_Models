@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 HRM-Text1 Training Script - ADAPTADO PARA EL DATASET C4
-VERSIÓN FINAL: Compatible con generación de texto y validación robusta.
+VERSIÓN FINAL: Compatible con streaming, generación de texto y validación robusta.
 """
 
 import os, shutil, pathlib, random, json, datetime, math, contextlib
-from typing import Optional
+from typing import Optional, List, Dict
 from dataclasses import dataclass
 
 import torch
@@ -72,8 +72,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         self.inner_model = HRMInner(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.halt_head = nn.Sequential(nn.Linear(config.n_embd, 1), nn.Sigmoid())
-        with torch.no_grad():
-            self.halt_head[0].bias.fill_(config.halt_bias_init)
+        with torch.no_grad(): self.halt_head[0].bias.fill_(config.halt_bias_init)
 
     def forward(self, input_ids, labels=None, attention_mask=None, past_key_values=None, **kwargs):
         batch_size, seq_len = input_ids.shape; device = input_ids.device
@@ -120,11 +119,9 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 2000, 16
 
-# --- Dataset Parameters ---
 DATASET_NAME = "allenai/c4"
 DATASET_CONFIG = "en.noblocklist"
 
-# --- Training Parameters (CORREGIDO Y SEPARADO) ---
 HF_REPO_ID = "dreamwar/HRM-Text1-C4"
 SEED = 42
 NUM_EPOCHS = 1
@@ -132,13 +129,11 @@ BLOCK_SIZE = 512
 TRAIN_BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 1
 
-# --- Hyperparameters ---
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS = True, 2, 5000
 MODEL_PARAMS = {"n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1, "halt_max_steps": 8, "ponder_loss_weight": 1e-2, "halt_bias_init": -2.2}
 PONDER_WEIGHT, PONDER_WEIGHT_DECAY = 1e-2, 0.9
 
-# --- Other Paths and Names ---
 T5_TOKENIZER_REPO = "t5-small"
 LOCAL_CHECKPOINT_PATH = "local_training_state.pt"
 BEST_MODEL_PATH = "best_model.bin"
@@ -194,9 +189,23 @@ for split_name in ["train", "validation"]:
         tokenize_function, batched=True, remove_columns=["text", "timestamp", "url"]
     )
 
+### SOLUCIÓN: Función collate_fn para manejar lotes de datasets en streaming ###
+def custom_collate_fn(batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
+    """
+    Convierte una lista de diccionarios (el lote) en un diccionario de tensores.
+    Esto es necesario para el modo streaming donde los datos llegan como listas de Python.
+    """
+    input_ids = [item['input_ids'] for item in batch]
+    attention_mask = [item['attention_mask'] for item in batch]
+    
+    return {
+        "input_ids": torch.tensor(input_ids, dtype=torch.long),
+        "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+    }
+
 num_workers = min(os.cpu_count() or 2, 8)
-train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
-val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
+train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True, collate_fn=custom_collate_fn)
+val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True, collate_fn=custom_collate_fn)
 
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
@@ -207,7 +216,6 @@ if torch.__version__.startswith("2") and not DEBUG_MODE:
 
 optimizer = AdamW(model.parameters(), lr=LEARNING_RATE_MAX, weight_decay=WEIGHT_DECAY)
 start_epoch, global_step, best_val_loss = 0, 0, float('inf')
-# ... Carga de checkpoint (opcional) ...
 
 if DEBUG_MODE:
     num_training_steps = (NUM_DEBUG_SAMPLES // BATCH_SIZE) * NUM_EPOCHS if BATCH_SIZE > 0 else 0
@@ -222,8 +230,9 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     progress = tqdm(train_loader, desc=f"Época {epoch}")
     for batch in progress:
-        input_ids = torch.tensor(batch["input_ids"]).to(device)
-        attention_mask = torch.tensor(batch["attention_mask"]).to(device)
+        # Ahora el lote ya viene como un tensor gracias a collate_fn
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
         labels = input_ids.clone()
 
         with torch.amp.autocast(device.type, dtype=torch.bfloat16 if device.type != 'cpu' else torch.float32, enabled=MIXED_PRECISION):
@@ -242,8 +251,8 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     total_val_loss, val_batches = 0.0, 0
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validando..."):
-            input_ids = torch.tensor(batch["input_ids"]).to(device)
-            attention_mask = torch.tensor(batch["attention_mask"]).to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
             labels = input_ids.clone()
             
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
