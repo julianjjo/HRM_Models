@@ -479,10 +479,17 @@ print("\n--- Probando la Generación del Modelo ---")
 if os.path.exists(BEST_MODEL_PATH):
     print("Cargando el mejor modelo para la generación...")
     
-    inference_config = SimpleNamespace(**MODEL_CONFIG,
+    inference_config = HRMText1Config(
+        vocab_size=len(tokenizer),
+        block_size=BLOCK_SIZE,
+        n_embd=MODEL_CONFIG["n_embd"],
+        n_head=MODEL_CONFIG["n_head"],
+        d_ff=MODEL_CONFIG["d_ff"],
+        dropout=MODEL_CONFIG["dropout"],
         halt_max_steps=MAX_HALT_STEPS,
         ponder_loss_weight=PONDER_WEIGHT,
-        halt_bias_init=HALT_BIAS_INIT)
+        halt_bias_init=HALT_BIAS_INIT
+    )
     inference_model = HRMText1(inference_config).to(device)
     
     inference_model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
