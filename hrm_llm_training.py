@@ -75,7 +75,6 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         with torch.no_grad():
             self.halt_head[0].bias.fill_(config.halt_bias_init)
 
-    # CORRECCIÓN: Se añade **kwargs para aceptar argumentos extra de .generate()
     def forward(self, input_ids, labels=None, attention_mask=None, past_key_values=None, **kwargs):
         batch_size, seq_len = input_ids.shape; device = input_ids.device
         z_L = self.token_embeddings(input_ids) + self.pos_embeddings(self.pos_ids[:, :seq_len])
@@ -127,7 +126,9 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 1000, 4
+# CAMBIAR A 'False' PARA UN ENTRENAMIENTO REAL
+DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = False, 1000, 4
+
 HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "qingy2024/HRM-Text1", 42, 2, 512, 185, 1
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 500, True
@@ -202,7 +203,7 @@ val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, s
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
 
-if torch.__version__.startswith("2"):
+if torch.__version__.startswith("2") and not DEBUG_MODE: # No compilar en modo debug para una mejor traza de errores
     print("Compilando el modelo con torch.compile()...")
     model = torch.compile(model)
 
@@ -244,7 +245,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         with torch.amp.autocast(device.type, dtype=torch.bfloat16 if device.type != 'cpu' else torch.float32, enabled=(MIXED_PRECISION and device.type != 'cpu')):
             outputs = model(input_ids, labels=labels, attention_mask=attention_mask); loss = outputs.loss
         if loss is None or not torch.isfinite(loss):
-            print("Pérdida no finita, saltando lote."); optimizer.zero_grad(set_to_none=True); continue
+            print(f"Pérdida no finita detectada en el paso {step}. Saltando lote."); optimizer.zero_grad(set_to_none=True); continue
         scaler.scale(loss / GRAD_ACCUM_STEPS).backward()
         if (step + 1) % GRAD_ACCUM_STEPS == 0:
             scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); scaler.step(optimizer); scaler.update(); optimizer.zero_grad(set_to_none=True); scheduler.step(); global_step += 1
@@ -255,7 +256,8 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     val_batches = 0
     if len(val_loader) > 0:
         print("\n--- Iniciando Validación ---")
-        with torch.inference_mode():
+        # Usar torch.no_grad() para la validación por ser más estable
+        with torch.no_grad():
             for i, batch in enumerate(tqdm(val_loader, desc="Validando...")):
                 input_ids, attention_mask, labels = batch["input_ids"].to(device), batch["attention_mask"].to(device), batch["input_ids"].to(device)
                 outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
@@ -264,9 +266,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                     batch_loss = outputs.loss.item()
                     total_val_loss += batch_loss
                     val_batches += 1
-                else:
-                    # Este print ahora es menos necesario, pero lo dejamos por si acaso
-                    pass 
 
         if val_batches > 0:
             avg_val_loss = total_val_loss / val_batches
@@ -285,7 +284,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                 patience_counter += 1
                 print(f"Validación no mejoró. Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
         else:
-            print("\nAdvertencia: No se procesó ningún lote de validación válido. Saltando la lógica de validación.")
+            print("\nAdvertencia: No se procesó ningún lote de validación válido. La pérdida podría ser NaN/inf en modo eval.")
     else:
         print("El DataLoader de validación está vacío. Saltando la validación.")
 
@@ -328,7 +327,7 @@ model_file_path = os.path.join(output_model_path, "model.safetensors")
 if os.path.exists(model_file_path):
     print(f"Archivo '{model_file_path}' encontrado. Cargando el modelo para la generación...")
     inference_model = HRMText1.from_pretrained(output_model_path).to(device)
-    if torch.__version__.startswith("2"): 
+    if torch.__version__.startswith("2") and not DEBUG_MODE:
         print("Compilando el modelo de inferencia para una mayor rapidez...")
         inference_model = torch.compile(inference_model)
     try:
