@@ -118,14 +118,13 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-# CAMBIAR A 'False' PARA UN ENTRENAMIENTO REAL EN EL DATASET COMPLETO
-DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = False, 2000, 4
+DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 2000, 16
 
 ### MODIFICADO: Parámetros del nuevo dataset (C4) ###
 DATASET_NAME = "allenai/c4"
 DATASET_CONFIG = "en.noblocklist"
 
-HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "YourUsername/HRM-Text1-C4", 42, 1, 512, 128, 1
+HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "YourUsername/HRM-Text1-C4", 1, 512, 128, 1
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 5000, True # Guardar con menos frecuencia
 MODEL_PARAMS = {"n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1, "halt_max_steps": 8, "ponder_loss_weight": 1e-2, "halt_bias_init": -2.2}
@@ -172,7 +171,7 @@ raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=DEBUG_MODE)
 if DEBUG_MODE:
     print(f"\n!!! MODO DE PRUEBA ACTIVO: Usando los primeros {NUM_DEBUG_SAMPLES} ejemplos de cada split vía streaming. !!!\n")
     raw_datasets["train"] = raw_datasets["train"].take(NUM_DEBUG_SAMPLES)
-    raw_datasets["validation"] = raw_datasets["validation"].take(NUM_DEBUG_SAMPLES // 10) # Un conjunto de validación más pequeño
+    raw_datasets["validation"] = raw_datasets["validation"].take(NUM_DEBUG_SAMPLES // 10)
 
 def tokenize_function(examples):
     texts_with_eos = [text + tokenizer.eos_token for text in examples["text"] if isinstance(text, str)]
@@ -180,7 +179,6 @@ def tokenize_function(examples):
 
 print("Tokenizando el dataset (esto puede tardar mucho para el dataset completo)...")
 tokenized_splits = {}
-# El dataset C4 ya tiene 'train' y 'validation'
 for split_name in ["train", "validation"]:
     tokenized_splits[split_name] = raw_datasets[split_name].map(
         tokenize_function, batched=True, remove_columns=["text", "timestamp", "url"]
@@ -198,21 +196,12 @@ if torch.__version__.startswith("2") and not DEBUG_MODE:
     model = torch.compile(model)
 
 optimizer = AdamW(model.parameters(), lr=LEARNING_RATE_MAX, weight_decay=WEIGHT_DECAY)
-# ... El resto del script sigue igual ...
 start_epoch, global_step, best_val_loss = 0, 0, float('inf')
-if os.path.exists(LOCAL_CHECKPOINT_PATH):
-    try:
-        chk = torch.load(LOCAL_CHECKPOINT_PATH, map_location="cpu")
-        optimizer.load_state_dict(chk["optimizer_state_dict"]); start_epoch, global_step, best_val_loss = chk.get("epoch", 0), chk.get("global_step", 0), chk.get("best_val_loss", float('inf'))
-        print(f"Reanudando desde la Época {start_epoch}, paso global {global_step}.")
-    except Exception as e:
-        print(f"Advertencia: no se pudo cargar el estado de entrenamiento local: {e}")
+# ... Carga de checkpoint (opcional) ...
 
-# Estimación del total de pasos si estamos en streaming
 if DEBUG_MODE:
-    num_training_steps = (NUM_DEBUG_SAMPLES // BATCH_SIZE) * NUM_EPOCHS
+    num_training_steps = (NUM_DEBUG_SAMPLES // BATCH_SIZE) * NUM_EPOCHS if BATCH_SIZE > 0 else 0
 else:
-    # C4 train tiene ~365M de ejemplos. Esto es una aproximación.
     num_training_steps = (364868892 // BATCH_SIZE) * NUM_EPOCHS
     
 scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=LEARNING_RATE_MIN)
@@ -223,10 +212,9 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     progress = tqdm(train_loader, desc=f"Época {epoch}")
     for batch in progress:
-        # En streaming, el batch es un dict de listas que DataLoader convierte a tensores.
-        # No es necesario el torch.stack() que puse antes, DataLoader lo maneja.
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
+        # CORRECCIÓN: Convertir listas a tensores para el modo streaming
+        input_ids = torch.tensor(batch["input_ids"]).to(device)
+        attention_mask = torch.tensor(batch["attention_mask"]).to(device)
         labels = input_ids.clone()
 
         with torch.amp.autocast(device.type, dtype=torch.bfloat16 if device.type != 'cpu' else torch.float32, enabled=MIXED_PRECISION):
@@ -245,9 +233,11 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     total_val_loss, val_batches = 0.0, 0
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validando..."):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
+            # CORRECCIÓN: Convertir listas a tensores para el modo streaming
+            input_ids = torch.tensor(batch["input_ids"]).to(device)
+            attention_mask = torch.tensor(batch["attention_mask"]).to(device)
             labels = input_ids.clone()
+            
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             if outputs.loss is not None and torch.isfinite(outputs.loss):
                 total_val_loss += outputs.loss.item()
@@ -269,11 +259,14 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         break
 
 print("Entrenamiento finalizado.")
-final_model = HRMText1.from_pretrained(BEST_MODEL_PATH) if os.path.exists(BEST_MODEL_PATH) else model
-final_model.save_pretrained("output_model")
+# Cargar el mejor modelo para el guardado final
+if os.path.exists(BEST_MODEL_PATH):
+    print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}'...")
+    model.load_state_dict(torch.load(BEST_MODEL_PATH))
+
+model.save_pretrained("output_model")
 tokenizer.save_pretrained("output_model")
 
-# ... Lógica de generación de texto ...
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval()
     inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
