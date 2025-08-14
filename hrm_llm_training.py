@@ -307,9 +307,12 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperatur
 
 print("\n--- Probando la Generación del Modelo ---")
 output_model_path = "output_model"
-model_file_path = os.path.join(output_model_path, "pytorch_model.bin")
+# MODIFICADO: Buscar model.safetensors en lugar de pytorch_model.bin
+model_file_path = os.path.join(output_model_path, "model.safetensors")
+
 if os.path.exists(model_file_path):
     print(f"Archivo '{model_file_path}' encontrado. Cargando el modelo para la generación...")
+    # from_pretrained carga automáticamente desde .safetensors si existe
     inference_model = HRMText1.from_pretrained(output_model_path).to(device)
     if torch.__version__.startswith("2"): 
         print("Compilando el modelo de inferencia para una mayor rapidez...")
