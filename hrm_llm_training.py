@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 HRM-Text1 Training Script con Aproximación de Gradiente de 1 Paso (sin BPTT)
-MODIFICADO para ser compatible con NVIDIA CUDA y AMD ROCm, con validación robusta.
+MODIFICADO para ser compatible con NVIDIA CUDA y AMD ROCm, con validación robusta y generación de texto.
 """
 
 import os, shutil, pathlib, random, json, datetime, math, contextlib
@@ -62,12 +62,20 @@ class HRMInner(nn.Module):
 
 class HRMText1(PreTrainedModel):
     config_class = HRMText1Config
-    def __init__(self, config: HRMText1Config):
-        super().__init__(config); self.token_embeddings, self.pos_embeddings = nn.Embedding(config.vocab_size, config.n_embd), nn.Embedding(config.block_size, config.n_embd); self.register_buffer("pos_ids", torch.arange(config.block_size).unsqueeze(0)); self.inner_model = HRMInner(config); self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False); self.halt_head = nn.Sequential(nn.Linear(config.n_embd, 1), nn.Sigmoid())
-        with torch.no_grad(): self.halt_head[0].bias.fill_(config.halt_bias_init)
+    main_input_name = "input_ids"
 
-    # ===================== FUNCIÓN FORWARD CORREGIDA =====================
-    def forward(self, input_ids, labels=None, attention_mask=None):
+    def __init__(self, config: HRMText1Config):
+        super().__init__(config)
+        self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
+        self.pos_embeddings = nn.Embedding(config.block_size, config.n_embd)
+        self.register_buffer("pos_ids", torch.arange(config.block_size).unsqueeze(0))
+        self.inner_model = HRMInner(config)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.halt_head = nn.Sequential(nn.Linear(config.n_embd, 1), nn.Sigmoid())
+        with torch.no_grad():
+            self.halt_head[0].bias.fill_(config.halt_bias_init)
+
+    def forward(self, input_ids, labels=None, attention_mask=None, past_key_values=None):
         batch_size, seq_len = input_ids.shape; device = input_ids.device
         z_L = self.token_embeddings(input_ids) + self.pos_embeddings(self.pos_ids[:, :seq_len])
         z_H = torch.zeros_like(z_L)
@@ -79,30 +87,23 @@ class HRMText1(PreTrainedModel):
         n_updates = torch.zeros((batch_size, seq_len), device=device)
         eps = 1e-6
 
-        # Usamos un contexto condicional: no_grad() solo si estamos entrenando.
-        # Si estamos en eval/inference, el contexto externo ya se encarga de ello.
         context_manager = torch.no_grad() if self.training else contextlib.nullcontext()
 
         with context_manager:
             for step in range(self.config.halt_max_steps - 1):
                 z_H, z_L = z_H.detach(), z_L.detach()
-
                 p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
                 contrib = remainders * p_halt
-
                 total_z_H += contrib.unsqueeze(-1) * z_H
                 remainders = remainders * (1 - p_halt)
                 n_updates += remainders
-
                 if torch.all(remainders < eps):
                     remainders.fill_(0.0)
                     break
-                
                 z_H, z_L = self.inner_model(z_H, z_L, attn_mask=causal_mask, key_padding_mask=key_padding_mask)
 
-        # El ÚLTIMO paso CON gradientes (en modo train)
         z_H, z_L = z_H.detach(), z_L.detach()
-        contrib = remainders # En el último paso, la contribución es todo lo que queda
+        contrib = remainders
         total_z_H += contrib.unsqueeze(-1) * z_H
         
         logits = self.lm_head(total_z_H)
@@ -112,12 +113,14 @@ class HRMText1(PreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
             lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
-            
-            ponder_loss = torch.mean(n_updates + remainders) # La pérdida de ponderación debe incluir el coste del último paso
+            ponder_loss = torch.mean(n_updates + remainders)
             loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
                 
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
+        return {"input_ids": input_ids, "attention_mask": kwargs.get("attention_mask")}
 
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
@@ -301,18 +304,27 @@ print("Guardado en 'output_model' completado.")
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval(); input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
+    # Es crucial pasar attention_mask a generate para que sepa dónde está el padding
+    attention_mask = torch.ones_like(input_ids)
     with torch.inference_mode():
-        output_ids = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, do_sample=True, pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+        output_ids = model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=True,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
 print("\n--- Probando la Generación del Modelo ---")
 output_model_path = "output_model"
-# MODIFICADO: Buscar model.safetensors en lugar de pytorch_model.bin
 model_file_path = os.path.join(output_model_path, "model.safetensors")
 
 if os.path.exists(model_file_path):
     print(f"Archivo '{model_file_path}' encontrado. Cargando el modelo para la generación...")
-    # from_pretrained carga automáticamente desde .safetensors si existe
     inference_model = HRMText1.from_pretrained(output_model_path).to(device)
     if torch.__version__.startswith("2"): 
         print("Compilando el modelo de inferencia para una mayor rapidez...")
