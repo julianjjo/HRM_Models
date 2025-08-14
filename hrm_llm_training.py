@@ -197,7 +197,6 @@ config = SimpleNamespace(
     n_embd=MODEL_CONFIG["n_embd"],
     n_head=MODEL_CONFIG["n_head"],
     n_inner=MODEL_CONFIG["n_inner"],
-    d_ff=MODEL_CONFIG["d_ff"],
     dropout=MODEL_CONFIG["dropout"],
     halt_max_steps=MAX_HALT_STEPS,
     ponder_loss_weight=PONDER_WEIGHT,
