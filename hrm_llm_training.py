@@ -4,7 +4,7 @@ HRM-Text1 Training Script con Aproximación de Gradiente de 1 Paso (sin BPTT)
 MODIFICADO para ser compatible con NVIDIA CUDA y AMD ROCm, con validación robusta.
 """
 
-import os, shutil, pathlib, random, json, datetime, math
+import os, shutil, pathlib, random, json, datetime, math, contextlib
 from typing import Optional
 from dataclasses import dataclass
 
@@ -65,23 +65,64 @@ class HRMText1(PreTrainedModel):
     def __init__(self, config: HRMText1Config):
         super().__init__(config); self.token_embeddings, self.pos_embeddings = nn.Embedding(config.vocab_size, config.n_embd), nn.Embedding(config.block_size, config.n_embd); self.register_buffer("pos_ids", torch.arange(config.block_size).unsqueeze(0)); self.inner_model = HRMInner(config); self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False); self.halt_head = nn.Sequential(nn.Linear(config.n_embd, 1), nn.Sigmoid())
         with torch.no_grad(): self.halt_head[0].bias.fill_(config.halt_bias_init)
+
+    # ===================== FUNCIÓN FORWARD CORREGIDA =====================
     def forward(self, input_ids, labels=None, attention_mask=None):
-        batch_size, seq_len = input_ids.shape; device = input_ids.device; z_L = self.token_embeddings(input_ids) + self.pos_embeddings(self.pos_ids[:, :seq_len]); z_H = torch.zeros_like(z_L); key_padding_mask = (attention_mask == 0) if attention_mask is not None else None; causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1); remainders = torch.ones((batch_size, seq_len), device=device); total_z_H = torch.zeros_like(z_H); n_updates = torch.zeros((batch_size, seq_len), device=device); eps = 1e-6
-        with torch.no_grad():
+        batch_size, seq_len = input_ids.shape; device = input_ids.device
+        z_L = self.token_embeddings(input_ids) + self.pos_embeddings(self.pos_ids[:, :seq_len])
+        z_H = torch.zeros_like(z_L)
+        key_padding_mask = (attention_mask == 0) if attention_mask is not None else None
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
+
+        remainders = torch.ones((batch_size, seq_len), device=device)
+        total_z_H = torch.zeros_like(z_H)
+        n_updates = torch.zeros((batch_size, seq_len), device=device)
+        eps = 1e-6
+
+        # Usamos un contexto condicional: no_grad() solo si estamos entrenando.
+        # Si estamos en eval/inference, el contexto externo ya se encarga de ello.
+        context_manager = torch.no_grad() if self.training else contextlib.nullcontext()
+
+        with context_manager:
             for step in range(self.config.halt_max_steps - 1):
-                z_H, z_L = z_H.detach(), z_L.detach(); p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps); halt_now_prob = p_halt; contrib = remainders * halt_now_prob; total_z_H += contrib.unsqueeze(-1) * z_H; remainders = remainders * (1 - p_halt); n_updates += remainders
-                if torch.all(remainders < eps): remainders.fill_(0.0); break
+                z_H, z_L = z_H.detach(), z_L.detach()
+
+                p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
+                contrib = remainders * p_halt
+
+                total_z_H += contrib.unsqueeze(-1) * z_H
+                remainders = remainders * (1 - p_halt)
+                n_updates += remainders
+
+                if torch.all(remainders < eps):
+                    remainders.fill_(0.0)
+                    break
+                
                 z_H, z_L = self.inner_model(z_H, z_L, attn_mask=causal_mask, key_padding_mask=key_padding_mask)
-        z_H, z_L = z_H.detach(), z_L.detach(); p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps); halt_now_prob = torch.ones_like(p_halt); contrib = remainders * halt_now_prob; total_z_H += contrib.unsqueeze(-1) * z_H; logits = self.lm_head(total_z_H); loss = None
+
+        # El ÚLTIMO paso CON gradientes (en modo train)
+        z_H, z_L = z_H.detach(), z_L.detach()
+        contrib = remainders # En el último paso, la contribución es todo lo que queda
+        total_z_H += contrib.unsqueeze(-1) * z_H
+        
+        logits = self.lm_head(total_z_H)
+        loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous(); shift_labels = labels[..., 1:].contiguous(); loss_fct = nn.CrossEntropyLoss(); lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1)); ponder_loss = torch.mean(n_updates); loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss()
+            lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
+            
+            ponder_loss = torch.mean(n_updates + remainders) # La pérdida de ponderación debe incluir el coste del último paso
+            loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
+                
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
 
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 1000, 4 # MODO DEBUG ACTIVADO PARA PRUEBAS RÁPIDAS
+DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 1000, 4
 HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "qingy2024/HRM-Text1", 42, 2, 512, 185, 1
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 500, True
@@ -204,9 +245,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); scaler.step(optimizer); scaler.update(); optimizer.zero_grad(set_to_none=True); scheduler.step(); global_step += 1
         progress.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
-    # ==============================================================================
-    # --- SECCIÓN DE VALIDACIÓN CORREGIDA ---
-    # ==============================================================================
     model.eval()
     total_val_loss = 0.0
     val_batches = 0
@@ -244,9 +282,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             print("\nAdvertencia: No se procesó ningún lote de validación válido. Saltando la lógica de validación.")
     else:
         print("El DataLoader de validación está vacío. Saltando la validación.")
-    # ==============================================================================
-    # --- FIN DE LA SECCIÓN DE VALIDACIÓN CORREGIDA ---
-    # ==============================================================================
 
     torch.save({"epoch": epoch + 1, "optimizer_state_dict": optimizer.state_dict(), "global_step": global_step, "best_val_loss": best_val_loss}, LOCAL_CHECKPOINT_PATH)
     if patience_counter >= EARLY_STOPPING_PATIENCE:
@@ -254,14 +289,15 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         break
 
 print("Entrenamiento finalizado.")
-# --- CORRECCIÓN: Guardar el mejor modelo (o el último) en la carpeta 'output_model' ---
 model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
 if os.path.exists(BEST_MODEL_PATH):
     print(f"Cargando el mejor modelo guardado desde '{BEST_MODEL_PATH}' para el guardado final.")
-    model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
+    model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
 
+print("Iniciando guardado en la carpeta 'output_model'...")
 model_to_save.save_pretrained("output_model")
 tokenizer.save_pretrained("output_model")
+print("Guardado en 'output_model' completado.")
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval(); input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
@@ -270,9 +306,11 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperatur
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
 print("\n--- Probando la Generación del Modelo ---")
-if os.path.exists("output_model/pytorch_model.bin"):
-    print("Cargando el modelo desde la carpeta 'output_model' para la generación...")
-    inference_model = HRMText1.from_pretrained("output_model").to(device)
+output_model_path = "output_model"
+model_file_path = os.path.join(output_model_path, "pytorch_model.bin")
+if os.path.exists(model_file_path):
+    print(f"Archivo '{model_file_path}' encontrado. Cargando el modelo para la generación...")
+    inference_model = HRMText1.from_pretrained(output_model_path).to(device)
     if torch.__version__.startswith("2"): 
         print("Compilando el modelo de inferencia para una mayor rapidez...")
         inference_model = torch.compile(inference_model)
@@ -285,4 +323,4 @@ if os.path.exists("output_model/pytorch_model.bin"):
     except Exception as e:
         print(f"El test de generación falló: {e}")
 else:
-    print("La carpeta 'output_model' no fue encontrada. No se pudo ejecutar el test de generación.")
+    print(f"La carpeta '{output_model_path}' o el archivo '{model_file_path}' no fueron encontrados. No se pudo ejecutar el test de generación.")
