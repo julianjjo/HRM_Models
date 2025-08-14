@@ -95,11 +95,23 @@ from hrm_text1_modeling import HRMText1
 # -----------------------------------
 # Data Loading and Preprocessing
 print("Loading and preparing dataset HuggingFaceH4/ultrachat_200k...")
-raw_datasets = load_dataset("HuggingFaceH4/ultrachat_200k")
+
+# Cargar los splits correctos del dataset
+raw_datasets = load_dataset(
+    "HuggingFaceH4/ultrachat_200k",
+    split=None
+)
 
 def tokenize_function(examples):
-    # Procesa cada documento usando la columna principal de texto ("text"), añade EOS, luego pad/trunca
-    texts = [text + tokenizer.eos_token for text in examples["text"] if text.strip()]
+    # Construye el texto de entrada concatenando prompt y los contenidos de messages
+    texts = []
+    prompts = examples.get("prompt", [])
+    messages_list = examples.get("messages", [])
+    for prompt, messages in zip(prompts, messages_list):
+        # Concatenar prompt + cada mensaje["content"] en orden
+        msg_contents = [msg.get("content", "") for msg in messages if isinstance(msg, dict) and "content" in msg]
+        full_text = prompt + " " + " ".join(msg_contents)
+        texts.append(full_text.strip() + tokenizer.eos_token)
     return tokenizer(
         texts,
         truncation=True,
@@ -108,14 +120,24 @@ def tokenize_function(examples):
         add_special_tokens=False, # EOS se añade manualmente
     )
 
-tokenized = raw_datasets.map(
-    tokenize_function, batched=True, num_proc=os.cpu_count(),
-    remove_columns=raw_datasets["train"].column_names,
-)
-tokenized.set_format("torch")
+# Tokenizar cada split relevante
+tokenized_splits = {}
+for split_name in ["train_sft", "test_sft", "train_gen", "test_gen"]:
+    if split_name in raw_datasets:
+        tokenized_splits[split_name] = raw_datasets[split_name].map(
+            tokenize_function,
+            batched=True,
+            num_proc=os.cpu_count(),
+            remove_columns=raw_datasets[split_name].column_names,
+        )
+        tokenized_splits[split_name].set_format("torch")
 
-train_loader = DataLoader(tokenized["train"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-val_loader = DataLoader(tokenized["validation"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
+# DataLoaders para cada split
+train_loader = DataLoader(tokenized_splits["train_sft"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+val_loader = DataLoader(tokenized_splits["test_sft"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
+# Si se desea usar los splits de generación para evaluación adicional:
+gen_train_loader = DataLoader(tokenized_splits["train_gen"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True) if "train_gen" in tokenized_splits else None
+gen_val_loader = DataLoader(tokenized_splits["test_gen"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False) if "test_gen" in tokenized_splits else None
 
 # --------------------------------
 # Model, Optimizer, Scheduler
