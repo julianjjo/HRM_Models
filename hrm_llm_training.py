@@ -38,7 +38,15 @@ EARLY_STOPPING_PATIENCE = 2 # Stop if validation loss doesn't improve for 2 epoc
 SAVE_STEPS = 500  # Save a checkpoint every 500 global steps
 
 # HRM Model Hyperparameters
-MODEL_CONFIG = {"n_embd": 512, "n_head": 8, "n_inner": 2048, "dropout": 0.1}
+# Se agregan vocab_size y block_size usando los valores correctos
+MODEL_CONFIG = {
+    "n_embd": 512,
+    "n_head": 8,
+    "n_inner": 2048,
+    "dropout": 0.1,
+    "vocab_size": None,    # Se asigna después de cargar el tokenizer
+    "block_size": BLOCK_SIZE
+}
 MAX_HALT_STEPS = 8
 PONDER_WEIGHT = 1e-2
 PONDER_WEIGHT_DECAY = 0.98 # Decay ponder weight each epoch to focus on LM loss later
@@ -55,7 +63,7 @@ UPDATE_README = True
 # ----------------------------
 # Selección del campo para entrenamiento
 # Opciones: "conversations" (por defecto), "input_answer"
-TRAIN_FIELD_MODE = "conversations"
+TRAIN_FIELD_MODE = "input_answer"
 
 # ----------------------------
 # Utilities & Initialization
@@ -93,6 +101,7 @@ if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
 tokenizer.padding_side = "left" # Important for causal modeling during generation
 print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}; eos={tokenizer.eos_token}; pad={tokenizer.pad_token}")
+MODEL_CONFIG["vocab_size"] = len(tokenizer)
 
 # Import model classes
 from hrm_text1_modeling import HRMText1
@@ -104,7 +113,7 @@ print("Cargando y preparando dataset sanjay920/goat-sharegpt...")
 # Cargar los splits del dataset Goat-ShareGPT
 raw_datasets = load_dataset(
     "sanjay920/goat-sharegpt",
-    split=None
+    split="train"
 )
 
 def tokenize_function(examples):
