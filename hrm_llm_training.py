@@ -81,7 +81,7 @@ class HRMText1(PreTrainedModel):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = False, 1000, 4
+DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 1000, 4
 HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "qingy2024/HRM-Text1", 42, 2, 512, 185, 1
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 500, True
