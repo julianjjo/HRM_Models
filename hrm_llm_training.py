@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 HRM-Text1 Training Script con Aproximación de Gradiente de 1 Paso (sin BPTT)
-MODIFICADO para ser compatible con NVIDIA CUDA y AMD ROCm, con validación robusta y generación de texto.
+VERSIÓN FINAL: Compatible con generación de texto y validación robusta.
 """
 
 import os, shutil, pathlib, random, json, datetime, math, contextlib
@@ -16,7 +16,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from datasets import load_dataset
-from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig
+from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin
 from tqdm.auto import tqdm
 
 from huggingface_hub import HfApi, HfFolder, hf_hub_download
@@ -60,7 +60,8 @@ class HRMInner(nn.Module):
     def forward(self, z_H, z_L, attn_mask=None, key_padding_mask=None):
         z_L_input = z_L + z_H; z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask); z_H_input = z_H + z_L_new; z_H_new = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask); return z_H_new, z_L_new
 
-class HRMText1(PreTrainedModel):
+# ===================== CLASE DE MODELO FINAL Y CORREGIDA =====================
+class HRMText1(PreTrainedModel, GenerationMixin):
     config_class = HRMText1Config
     main_input_name = "input_ids"
 
@@ -120,7 +121,8 @@ class HRMText1(PreTrainedModel):
         return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
-        return {"input_ids": input_ids, "attention_mask": kwargs.get("attention_mask")}
+        attention_mask = kwargs.get("attention_mask", None)
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
@@ -303,13 +305,12 @@ tokenizer.save_pretrained("output_model")
 print("Guardado en 'output_model' completado.")
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
-    model.eval(); input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
-    # Es crucial pasar attention_mask a generate para que sepa dónde está el padding
-    attention_mask = torch.ones_like(input_ids)
+    model.eval()
+    inputs = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
+    
     with torch.inference_mode():
         output_ids = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
+            **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
