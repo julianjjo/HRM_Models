@@ -188,13 +188,18 @@ else:
 
 # --------------------------------
 # Model, Optimizer, Scheduler
-config = {
-    "vocab_size": len(tokenizer), "block_size": BLOCK_SIZE,
-    "d_model": MODEL_CONFIG["d_model"], "n_heads": MODEL_CONFIG["n_heads"],
-    "d_ff": MODEL_CONFIG["d_ff"], "dropout": MODEL_CONFIG["dropout"],
-    "halt_max_steps": MAX_HALT_STEPS, "ponder_loss_weight": PONDER_WEIGHT,
-    "halt_bias_init": HALT_BIAS_INIT
-}
+from types import SimpleNamespace
+config = SimpleNamespace(
+    vocab_size=len(tokenizer),
+    block_size=BLOCK_SIZE,
+    d_model=MODEL_CONFIG["d_model"],
+    n_heads=MODEL_CONFIG["n_heads"],
+    d_ff=MODEL_CONFIG["d_ff"],
+    dropout=MODEL_CONFIG["dropout"],
+    halt_max_steps=MAX_HALT_STEPS,
+    ponder_loss_weight=PONDER_WEIGHT,
+    halt_bias_init=HALT_BIAS_INIT
+)
 model = HRMText1(config).to(device)
 
 decay, no_decay = [], []
