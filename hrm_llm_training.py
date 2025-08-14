@@ -144,19 +144,47 @@ def tokenize_function(examples):
 
 # Tokenizar los splits relevantes ('train' y 'validation')
 tokenized_splits = {}
-for split_name in ["train", "validation"]:
-    if split_name in raw_datasets:
-        tokenized_splits[split_name] = raw_datasets[split_name].map(
-            tokenize_function,
-            batched=True,
-            num_proc=os.cpu_count(),
-            remove_columns=raw_datasets[split_name].column_names,
-        )
-        tokenized_splits[split_name].set_format("torch")
 
-# DataLoaders para cada split
-train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
+if "validation" in raw_datasets:
+    # Si existe el split validation, tokenizar normalmente
+    for split_name in ["train", "validation"]:
+        if split_name in raw_datasets:
+            tokenized_splits[split_name] = raw_datasets[split_name].map(
+                tokenize_function,
+                batched=True,
+                num_proc=os.cpu_count(),
+                remove_columns=raw_datasets[split_name].column_names,
+            )
+            tokenized_splits[split_name].set_format("torch")
+    train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
+else:
+    # Si no existe validation, crear partición del split train
+    print("No se encontró split 'validation'. Creando partición de validación (10%) desde 'train'...")
+    train_dataset = raw_datasets["train"]
+    num_samples = len(train_dataset)
+    split_idx = int(num_samples * 0.9)
+    train_split = train_dataset.select(range(0, split_idx))
+    val_split = train_dataset.select(range(split_idx, num_samples))
+
+    tokenized_splits["train"] = train_split.map(
+        tokenize_function,
+        batched=True,
+        num_proc=os.cpu_count(),
+        remove_columns=train_split.column_names,
+    )
+    tokenized_splits["train"].set_format("torch")
+
+    tokenized_splits["validation"] = val_split.map(
+        tokenize_function,
+        batched=True,
+        num_proc=os.cpu_count(),
+        remove_columns=val_split.column_names,
+    )
+    tokenized_splits["validation"].set_format("torch")
+
+    train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
 
 # --------------------------------
 # Model, Optimizer, Scheduler
