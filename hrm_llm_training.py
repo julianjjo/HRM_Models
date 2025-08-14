@@ -94,18 +94,18 @@ from hrm_text1_modeling import HRMText1
 
 # -----------------------------------
 # Data Loading and Preprocessing
-print("Loading and preparing dataset tiiuae/falcon-refinedweb...")
-raw_datasets = load_dataset("tiiuae/falcon-refinedweb")
+print("Loading and preparing dataset HuggingFaceH4/ultrachat_200k...")
+raw_datasets = load_dataset("HuggingFaceH4/ultrachat_200k")
 
 def tokenize_function(examples):
-    # Process each document separately, filter empty lines, add EOS, then pad/truncate
-    texts = [text + tokenizer.eos_token for text in examples["content"] if text.strip()]
+    # Procesa cada documento usando la columna principal de texto ("text"), añade EOS, luego pad/trunca
+    texts = [text + tokenizer.eos_token for text in examples["text"] if text.strip()]
     return tokenizer(
         texts,
         truncation=True,
         max_length=BLOCK_SIZE,
         padding="max_length",
-        add_special_tokens=False, # EOS is added manually
+        add_special_tokens=False, # EOS se añade manualmente
     )
 
 tokenized = raw_datasets.map(
