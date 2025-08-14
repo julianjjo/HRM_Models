@@ -94,17 +94,27 @@ from hrm_text1_modeling import HRMText1
 
 # -----------------------------------
 # Data Loading and Preprocessing
-print("Cargando y preparando dataset wenknow/reddit_dataset_44...")
+print("Cargando y preparando dataset sanjay920/goat-sharegpt...")
 
-# Cargar los splits del nuevo dataset
+# Cargar los splits del dataset Goat-ShareGPT
 raw_datasets = load_dataset(
-    "wenknow/reddit_dataset_44",
+    "sanjay920/goat-sharegpt",
     split=None
 )
 
 def tokenize_function(examples):
-    # Procesa únicamente el campo 'text'
-    texts = [text + tokenizer.eos_token for text in examples["text"]]
+    # Procesa el campo 'conversations' concatenando los mensajes
+    texts = []
+    for conv_list in examples["conversations"]:
+        # Concatenar los mensajes usando 'value' si existe, si no 'content'
+        msg_texts = []
+        for msg in conv_list:
+            if "value" in msg:
+                msg_texts.append(str(msg["value"]))
+            elif "content" in msg:
+                msg_texts.append(str(msg["content"]))
+        full_text = " ".join(msg_texts) + tokenizer.eos_token
+        texts.append(full_text)
     return tokenizer(
         texts,
         truncation=True,
@@ -113,9 +123,9 @@ def tokenize_function(examples):
         add_special_tokens=False, # EOS se añade manualmente
     )
 
-# Tokenizar los splits relevantes ('train' y 'test')
+# Tokenizar los splits relevantes ('train' y 'validation')
 tokenized_splits = {}
-for split_name in ["train", "test"]:
+for split_name in ["train", "validation"]:
     if split_name in raw_datasets:
         tokenized_splits[split_name] = raw_datasets[split_name].map(
             tokenize_function,
@@ -127,10 +137,7 @@ for split_name in ["train", "test"]:
 
 # DataLoaders para cada split
 train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-val_loader = DataLoader(tokenized_splits["test"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
-# No hay splits de generación en este dataset
-gen_train_loader = None
-gen_val_loader = None
+val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
 
 # --------------------------------
 # Model, Optimizer, Scheduler
