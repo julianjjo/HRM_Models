@@ -120,17 +120,28 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = True, 2000, 16
 
-### MODIFICADO: Parámetros del nuevo dataset (C4) ###
+# --- Dataset Parameters ---
 DATASET_NAME = "allenai/c4"
 DATASET_CONFIG = "en.noblocklist"
 
-HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "dreamwar/HRM-Text1-C4", 1, 512, 128, 1
+# --- Training Parameters (CORREGIDO Y SEPARADO) ---
+HF_REPO_ID = "dreamwar/HRM-Text1-C4"
+SEED = 42
+NUM_EPOCHS = 1
+BLOCK_SIZE = 512
+TRAIN_BATCH_SIZE = 128
+GRAD_ACCUM_STEPS = 1
+
+# --- Hyperparameters ---
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
-MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 5000, True # Guardar con menos frecuencia
+MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS = True, 2, 5000
 MODEL_PARAMS = {"n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1, "halt_max_steps": 8, "ponder_loss_weight": 1e-2, "halt_bias_init": -2.2}
-T5_TOKENIZER_REPO, LOCAL_CHECKPOINT_PATH = "t5-small", "local_training_state.pt"
-BEST_MODEL_PATH = "best_model.bin"
 PONDER_WEIGHT, PONDER_WEIGHT_DECAY = 1e-2, 0.9
+
+# --- Other Paths and Names ---
+T5_TOKENIZER_REPO = "t5-small"
+LOCAL_CHECKPOINT_PATH = "local_training_state.pt"
+BEST_MODEL_PATH = "best_model.bin"
 
 # ==============================================================================
 # --- FIN DE LA CONFIGURACIÓN ---
@@ -158,7 +169,6 @@ if tokenizer.pad_token is None: tokenizer.add_special_tokens({"pad_token": "<pad
 tokenizer.padding_side = "left"
 print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
 
-### MODIFICADO: Lógica de carga y preprocesamiento de C4 ###
 print(f"Cargando dataset '{DATASET_NAME}' (config: '{DATASET_CONFIG}')")
 if not DEBUG_MODE:
     print("\n" + "="*80)
@@ -212,7 +222,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     progress = tqdm(train_loader, desc=f"Época {epoch}")
     for batch in progress:
-        # CORRECCIÓN: Convertir listas a tensores para el modo streaming
         input_ids = torch.tensor(batch["input_ids"]).to(device)
         attention_mask = torch.tensor(batch["attention_mask"]).to(device)
         labels = input_ids.clone()
@@ -233,7 +242,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     total_val_loss, val_batches = 0.0, 0
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validando..."):
-            # CORRECCIÓN: Convertir listas a tensores para el modo streaming
             input_ids = torch.tensor(batch["input_ids"]).to(device)
             attention_mask = torch.tensor(batch["attention_mask"]).to(device)
             labels = input_ids.clone()
@@ -259,7 +267,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         break
 
 print("Entrenamiento finalizado.")
-# Cargar el mejor modelo para el guardado final
 if os.path.exists(BEST_MODEL_PATH):
     print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}'...")
     model.load_state_dict(torch.load(BEST_MODEL_PATH))
