@@ -81,25 +81,14 @@ class HRMText1(PreTrainedModel):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-
-# --- Parámetros de Depuración y Prueba ---
 DEBUG_MODE, NUM_DEBUG_SAMPLES, DEBUG_BATCH_SIZE = False, 1000, 4
-
-# --- Training Parameters ---
 HF_REPO_ID, SEED, NUM_EPOCHS, BLOCK_SIZE, TRAIN_BATCH_SIZE, GRAD_ACCUM_STEPS = "qingy2024/HRM-Text1", 42, 2, 512, 185, 1
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 2e-4, 1e-6, 0.01
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE, SAVE_STEPS, UPDATE_README = True, 2, 500, True
-
-# --- HRM Model Hyperparameters ---
 MODEL_PARAMS = {"n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1, "halt_max_steps": 8, "ponder_loss_weight": 1e-2, "halt_bias_init": -2.2}
-
-# --- Otros Parámetros ---
 T5_TOKENIZER_REPO, LOCAL_CHECKPOINT_PATH, LOCAL_WEIGHTS_PATH = "t5-small", "local_training_state.pt", "pytorch_model.bin"
 BEST_MODEL_PATH, TRAIN_FIELD_MODE = "best_model.bin", "input_answer"
-
-# ### CORRECCIÓN 1: Definir PONDER_WEIGHT y PONDER_WEIGHT_DECAY ###
-PONDER_WEIGHT = 1e-2
-PONDER_WEIGHT_DECAY = 0.9
+PONDER_WEIGHT, PONDER_WEIGHT_DECAY = 1e-2, 0.9
 
 # ==============================================================================
 # --- FIN DE LA CONFIGURACIÓN ---
@@ -114,7 +103,6 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed); torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
 set_seed(SEED)
 
-# Lógica de detección de dispositivo para CUDA y ROCm
 if torch.cuda.is_available():
     device = torch.device("cuda")
     print("GPU NVIDIA (CUDA) detectada. Usando 'cuda'.")
@@ -197,36 +185,27 @@ steps_per_epoch = len(train_loader) // GRAD_ACCUM_STEPS
 num_training_steps = NUM_EPOCHS * steps_per_epoch if steps_per_epoch > 0 else 1
 scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=LEARNING_RATE_MIN)
 
-# ### CORRECCIÓN 3: Usar la nueva API de GradScaler ###
-scaler = torch.amp.GradScaler(device_type=device.type, enabled=(MIXED_PRECISION and device.type != 'cpu'))
+# ### CORRECCIÓN FINAL: Usar la API simple de GradScaler ###
+scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type != 'cpu'))
 
 patience_counter = 0
 for epoch in range(start_epoch, NUM_EPOCHS):
-    model.train()
-    base_model = model._orig_mod if hasattr(model, '_orig_mod') else model
+    model.train(); base_model = model._orig_mod if hasattr(model, '_orig_mod') else model
     base_model.config.ponder_loss_weight = PONDER_WEIGHT * (PONDER_WEIGHT_DECAY ** epoch)
 
     progress = tqdm(train_loader, desc=f"Época {epoch} | Ponder W: {base_model.config.ponder_loss_weight:.4f}")
     for step, batch in enumerate(progress):
         input_ids, attention_mask, labels = batch["input_ids"].to(device), batch["attention_mask"].to(device), batch["input_ids"].to(device)
-
         with torch.amp.autocast(device.type, dtype=torch.bfloat16 if device.type != 'cpu' else torch.float32, enabled=(MIXED_PRECISION and device.type != 'cpu')):
-            outputs = model(input_ids, labels=labels, attention_mask=attention_mask)
-            loss = outputs.loss
-
+            outputs = model(input_ids, labels=labels, attention_mask=attention_mask); loss = outputs.loss
         if loss is None or not torch.isfinite(loss):
             print("Pérdida no finita, saltando lote."); optimizer.zero_grad(set_to_none=True); continue
-
-        loss_to_backprop = loss / GRAD_ACCUM_STEPS
-        scaler.scale(loss_to_backprop).backward()
-
+        scaler.scale(loss / GRAD_ACCUM_STEPS).backward()
         if (step + 1) % GRAD_ACCUM_STEPS == 0:
             scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); scaler.step(optimizer); scaler.update(); optimizer.zero_grad(set_to_none=True); scheduler.step(); global_step += 1
-
         progress.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
-    model.eval()
-    total_val_loss = 0.0
+    model.eval(); total_val_loss = 0.0
     if len(val_loader) > 0:
         with torch.inference_mode():
             for batch in val_loader:
@@ -256,7 +235,7 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperatur
     model.eval(); input_ids = tokenizer.encode(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
     with torch.inference_mode():
         output_ids = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, do_sample=True, pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
-    full_text = tokenizer.decode(output_ids[0], skip_special_tokens=True); return full_text
+    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
 print("\n--- Probando la Generación del Modelo ---")
 if os.path.exists("output_model/pytorch_model.bin"):
