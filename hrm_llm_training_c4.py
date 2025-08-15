@@ -2,6 +2,7 @@
 """
 HRM-Text1 Training Script - ADAPTADO PARA EL DATASET C4
 VERSIÓN FINAL: Corregido el error de operación in-place, optimizado con streaming y generación.
+### CHECKPOINT ###: Añadida lógica para guardar y reanudar el entrenamiento desde checkpoints.
 """
 
 import os, random, contextlib
@@ -26,7 +27,7 @@ if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
     torch.set_float32_matmul_precision('high')
 
 # ==============================================================================
-# --- DEFINICIÓN DEL MODELO ---
+# --- DEFINICIÓN DEL MODELO (Sin cambios en esta sección) ---
 # ==============================================================================
 
 class HRMText1Config(PretrainedConfig):
@@ -81,25 +82,22 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
         remainders, total_z_H, n_updates = torch.ones((batch_size, seq_len), device=device), torch.zeros_like(z_H), torch.zeros((batch_size, seq_len), device=device)
         eps = 1e-6
-        
+
         for step in range(self.config.halt_max_steps):
             p_halt = self.halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
             is_last_step = step == (self.config.halt_max_steps - 1)
             halt_now_prob = p_halt if not is_last_step else torch.ones_like(p_halt)
-            
+
             contrib = remainders * halt_now_prob
-            
-            # --- SOLUCIÓN: Usar operaciones out-of-place ---
             total_z_H = total_z_H + contrib.unsqueeze(-1) * z_H
-            
+
             if is_last_step: break
-                
-            # --- SOLUCIÓN: Usar operaciones out-of-place ---
+
             remainders = remainders * (1 - p_halt)
             n_updates = n_updates + 1
-            
+
             if torch.all(remainders < eps): break
-            
+
             z_H, z_L = self.inner_model(z_H, z_L, attn_mask=causal_mask, key_padding_mask=key_padding_mask)
 
         logits, loss = self.lm_head(total_z_H), None
@@ -107,15 +105,16 @@ class HRMText1(PreTrainedModel, GenerationMixin):
             shift_logits, shift_labels = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
             lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
-            ponder_loss = torch.mean(n_updates) # Simplificado para estabilidad
+            ponder_loss = torch.mean(n_updates)
             loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
-                
+
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
         return {"input_ids": input_ids, "attention_mask": attention_mask}
+
 
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
@@ -127,7 +126,7 @@ DATASET_CONFIG = "en.noblocklist"
 
 HF_REPO_ID = "dreamwar/HRM-Text1-C4"
 SEED = 42
-NUM_EPOCHS = 2
+NUM_EPOCHS = 2 # Puedes aumentar esto. Si reanudas, entrenará hasta este nuevo número.
 BLOCK_SIZE = 512
 BATCH_SIZE = 64
 GRAD_ACCUM_STEPS = 2
@@ -137,7 +136,11 @@ MIXED_PRECISION, EARLY_STOPPING_PATIENCE = True, 2
 MODEL_PARAMS = {"n_embd": 512, "n_head": 8, "d_ff": 2048, "dropout": 0.1, "halt_max_steps": 8, "ponder_loss_weight": 1e-2, "halt_bias_init": -2.2}
 
 T5_TOKENIZER_REPO = "t5-small"
-BEST_MODEL_PATH = "best_model.bin"
+### CHECKPOINT ###: Directorio centralizado para todas las salidas.
+OUTPUT_DIR = "hrm_text1_c4_output"
+BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
+CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
+
 
 # ==============================================================================
 # --- INICIO DEL SCRIPT ---
@@ -147,6 +150,9 @@ def set_seed(seed: int):
     random.seed(seed); os.environ["PYTHONHASHSEED"] = str(seed); torch.manual_seed(seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed); torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
 set_seed(SEED)
+
+### CHECKPOINT ###: Crear el directorio de salida si no existe
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Dispositivo detectado: {device}")
@@ -177,7 +183,6 @@ raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
 
 def tokenize_function(examples):
     texts = [str(text) + tokenizer.eos_token for text in examples["text"] if isinstance(text, str) and len(text) > 50]
-    # SOLUCIÓN: Añadir add_special_tokens=False para evitar warnings de doble EOS token
     return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
 
 print("Applying tokenization function (on-the-fly)...")
@@ -195,10 +200,6 @@ config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODE
 model = HRMText1(config).to(device)
 print(f"Número de parámetros del modelo: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
-if torch.__version__.startswith("2"):
-    print("Compilando el modelo con torch.compile()...")
-    model = torch.compile(model)
-
 optimizer = AdamW(model.parameters(), lr=LEARNING_RATE_MAX, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95))
 num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
 print(f"Total de pasos de entrenamiento calculados: {num_training_steps}")
@@ -206,8 +207,38 @@ print(f"Total de pasos de entrenamiento calculados: {num_training_steps}")
 scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=LEARNING_RATE_MIN)
 scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
 
-best_val_loss, patience_counter = float('inf'), 0
-for epoch in range(NUM_EPOCHS):
+### CHECKPOINT ###: Sección para cargar el checkpoint si existe
+start_epoch = 0
+best_val_loss = float('inf')
+patience_counter = 0
+
+if os.path.exists(CHECKPOINT_PATH):
+    print(f"--- Reanudando entrenamiento desde el checkpoint: {CHECKPOINT_PATH} ---")
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+    
+    model_to_load = model._orig_mod if hasattr(model, '_orig_mod') else model
+    model_to_load.load_state_dict(checkpoint['model_state_dict'])
+    
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    scaler.load_state_dict(checkpoint['scaler_state_dict'])
+    
+    start_epoch = checkpoint['epoch']
+    best_val_loss = checkpoint['best_val_loss']
+    patience_counter = checkpoint.get('patience_counter', 0) # .get para compatibilidad con checkpoints antiguos
+    
+    print(f"Checkpoint cargado. Reanudando desde la época {start_epoch + 1}.")
+    print(f"Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
+else:
+    print("--- No se encontró checkpoint. Empezando entrenamiento desde cero. ---")
+
+
+if torch.__version__.startswith("2"):
+    print("Compilando el modelo con torch.compile()...")
+    model = torch.compile(model)
+
+### CHECKPOINT ###: El bucle ahora empieza desde start_epoch
+for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     optimizer.zero_grad()
     progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
@@ -250,14 +281,28 @@ for epoch in range(NUM_EPOCHS):
     if val_batches > 0:
         avg_val_loss = total_val_loss / val_batches
         print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
+        
+        model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+        
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
             torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
             patience_counter = 0
         else:
             patience_counter += 1
+            
+        ### CHECKPOINT ###: Guardar el estado del entrenamiento al final de cada época
+        print(f"Guardando checkpoint en {CHECKPOINT_PATH}...")
+        torch.save({
+            'epoch': epoch + 1,  # La próxima época a ejecutar
+            'model_state_dict': model_to_save.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scaler_state_dict': scaler.state_dict(),
+            'best_val_loss': best_val_loss,
+            'patience_counter': patience_counter,
+        }, CHECKPOINT_PATH)
     
     if patience_counter >= EARLY_STOPPING_PATIENCE:
         print("Detención temprana por falta de mejora en la validación.")
@@ -265,17 +310,15 @@ for epoch in range(NUM_EPOCHS):
 
 print("Entrenamiento finalizado.")
 
-output_dir = "hrm_text1_c4_output"
-os.makedirs(output_dir, exist_ok=True)
 model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
 
 if os.path.exists(BEST_MODEL_PATH):
     print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
     model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
 
-model_to_save.save_pretrained(output_dir)
-tokenizer.save_pretrained(output_dir)
-print(f"Modelo y tokenizador guardados en '{output_dir}'")
+model_to_save.save_pretrained(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
+print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval()
@@ -293,7 +336,7 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperatur
 
 print("\n--- Probando la Generación del Modelo Final ---")
 try:
-    inference_model = HRMText1.from_pretrained(output_dir).to(device)
+    inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
     if torch.__version__.startswith("2"): inference_model = torch.compile(inference_model)
     
     prompts = ["The cat sat on the", "Artificial intelligence is a field that", "To be, or not to be, that is the question:"]
