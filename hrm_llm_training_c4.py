@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 HRM-Text1 Training Script - ADAPTADO PARA EL DATASET C4
-VERSIÓN FINAL: Optimizado con streaming, subconjuntos de datos y generación.
+VERSIÓN FINAL: Corregido el error de operación in-place, optimizado con streaming y generación.
 """
 
 import os, random, contextlib
@@ -88,12 +88,15 @@ class HRMText1(PreTrainedModel, GenerationMixin):
             halt_now_prob = p_halt if not is_last_step else torch.ones_like(p_halt)
             
             contrib = remainders * halt_now_prob
-            total_z_H += contrib.unsqueeze(-1) * z_H
+            
+            # --- SOLUCIÓN: Usar operaciones out-of-place ---
+            total_z_H = total_z_H + contrib.unsqueeze(-1) * z_H
             
             if is_last_step: break
                 
-            remainders *= (1 - p_halt)
-            n_updates += 1 # Contamos cada paso de "ponderación"
+            # --- SOLUCIÓN: Usar operaciones out-of-place ---
+            remainders = remainders * (1 - p_halt)
+            n_updates = n_updates + 1
             
             if torch.all(remainders < eps): break
             
@@ -104,7 +107,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
             shift_logits, shift_labels = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
             lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
-            ponder_loss = torch.mean(n_updates * (1-remainders)) # Penaliza por más pasos
+            ponder_loss = torch.mean(n_updates) # Simplificado para estabilidad
             loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
                 
         from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -117,7 +120,6 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-# MEJORA: Define el porcentaje del dataset a utilizar (1.0 para prueba rápida, 100.0 para completo)
 DATASET_SUBSET_PERCENT = 30.0
 
 DATASET_NAME = "allenai/c4"
@@ -128,7 +130,7 @@ SEED = 42
 NUM_EPOCHS = 2
 BLOCK_SIZE = 512
 BATCH_SIZE = 64
-GRAD_ACCUM_STEPS = 2 # Grad_accum * batch_size = effective_batch_size (ej. 2 * 64 = 128)
+GRAD_ACCUM_STEPS = 2
 
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 3e-4, 1e-5, 0.05
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE = True, 2
@@ -159,7 +161,6 @@ tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legac
 if tokenizer.pad_token is None: tokenizer.add_special_tokens({"pad_token": "<pad>"})
 print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
 
-# --- MEJORA: Carga de datos optimizada con streaming y subconjuntos ---
 print(f"Loading dataset '{DATASET_NAME}' in streaming mode.")
 raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True)
 
@@ -176,7 +177,8 @@ raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
 
 def tokenize_function(examples):
     texts = [str(text) + tokenizer.eos_token for text in examples["text"] if isinstance(text, str) and len(text) > 50]
-    return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length")
+    # SOLUCIÓN: Añadir add_special_tokens=False para evitar warnings de doble EOS token
+    return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
 
 print("Applying tokenization function (on-the-fly)...")
 tokenized_splits = {}
@@ -189,8 +191,6 @@ num_workers = min(os.cpu_count() or 2, 8)
 train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
 val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
 
-# --- Fin de la sección de datos optimizada ---
-
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
 print(f"Número de parámetros del modelo: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -200,8 +200,6 @@ if torch.__version__.startswith("2"):
     model = torch.compile(model)
 
 optimizer = AdamW(model.parameters(), lr=LEARNING_RATE_MAX, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95))
-
-# MEJORA: Cálculo dinámico de pasos
 num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
 print(f"Total de pasos de entrenamiento calculados: {num_training_steps}")
     
@@ -255,7 +253,6 @@ for epoch in range(NUM_EPOCHS):
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-            # Desempaquetar el modelo si está compilado
             model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
             torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
             patience_counter = 0
@@ -268,7 +265,6 @@ for epoch in range(NUM_EPOCHS):
 
 print("Entrenamiento finalizado.")
 
-# --- Guardado y Generación ---
 output_dir = "hrm_text1_c4_output"
 os.makedirs(output_dir, exist_ok=True)
 model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
