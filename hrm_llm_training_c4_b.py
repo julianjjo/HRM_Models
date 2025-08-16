@@ -246,6 +246,18 @@ if os.path.exists(CHECKPOINT_PATH):
     best_val_loss = checkpoint['best_val_loss']
     patience_counter = checkpoint.get('patience_counter', 0) # .get para compatibilidad con checkpoints antiguos
     
+    # VERIFICAR SI EL DATASET CAMBIÓ Y REAJUSTAR SCHEDULER
+    checkpoint_training_steps = checkpoint.get('num_training_steps', 0)
+    if checkpoint_training_steps != num_training_steps:
+        print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
+        scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=LEARNING_RATE_MIN)
+        # Ajustar el paso actual proporcionalmente
+        current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
+        new_step = int(current_progress * num_training_steps)
+        for _ in range(new_step):
+            scheduler.step()
+        print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
+    
     print(f"Checkpoint cargado. Reanudando desde la época {start_epoch + 1}, paso {start_step}.")
     print(f"Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
 else:
@@ -295,6 +307,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                         'scaler_state_dict': scaler.state_dict(),
                         'best_val_loss': best_val_loss,
                         'patience_counter': patience_counter,
+                        'num_training_steps': num_training_steps,  # Guardar para verificar cambios
                     }, CHECKPOINT_PATH)
                     print(f"Checkpoint guardado en {CHECKPOINT_PATH}")
             
@@ -340,6 +353,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             'scaler_state_dict': scaler.state_dict(),
             'best_val_loss': best_val_loss,
             'patience_counter': patience_counter,
+            'num_training_steps': num_training_steps,  # Guardar para verificar cambios
         }, CHECKPOINT_PATH)
     
     if patience_counter >= EARLY_STOPPING_PATIENCE:
