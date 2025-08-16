@@ -120,7 +120,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-DATASET_SUBSET_PERCENT = 1.5
+DATASET_SUBSET_PERCENT = 5
 
 DATASET_NAME = "allenai/c4"
 DATASET_CONFIG = "multilingual"
