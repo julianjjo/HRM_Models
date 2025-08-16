@@ -120,10 +120,10 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT ---
 # ==============================================================================
-DATASET_SUBSET_PERCENT = 30.0
+DATASET_SUBSET_PERCENT = 1.5
 
 DATASET_NAME = "allenai/c4"
-DATASET_CONFIG = "en.noblocklist"
+DATASET_CONFIG = "multilingual"
 
 HF_REPO_ID = "dreamwar/HRM-Text1-C4-large" # <-- CAMBIO: Repositorio para el modelo grande
 SEED = 42
@@ -133,7 +133,7 @@ BLOCK_SIZE = 512
 # --- CAMBIOS PARA EL MODELO GRANDE ---
 # Se reduce el tamaño del lote y se aumenta la acumulación de gradiente para
 # manejar el aumento de uso de memoria VRAM.
-BATCH_SIZE = 32           # <-- CAMBIO: Reducido de 64 a 32
+BATCH_SIZE = 64           # <-- CAMBIO: Reducido de 64 a 32
 GRAD_ACCUM_STEPS = 4      # <-- CAMBIO: Aumentado de 2 a 4
 
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 3e-4, 1e-5, 0.05
