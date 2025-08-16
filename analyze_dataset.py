@@ -2,7 +2,7 @@ import datasets
 
 def main():
     # Cargar el dataset
-    dataset = datasets.load_dataset("sanjay920/goat-sharegpt")
+    dataset = datasets.load_dataset("cerebras/SlimPajama-627B")
     print("Splits disponibles y número de ejemplos:")
     for split in dataset.keys():
         print(f"  - {split}: {len(dataset[split])} ejemplos")
