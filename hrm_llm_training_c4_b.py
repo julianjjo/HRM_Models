@@ -225,8 +225,10 @@ scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'
 
 ### CHECKPOINT ###: Sección para cargar el checkpoint si existe
 start_epoch = 0
+start_step = 0
 best_val_loss = float('inf')
 patience_counter = 0
+CHECKPOINT_STEPS = 1000  # Guardar checkpoint cada 1000 pasos
 
 if os.path.exists(CHECKPOINT_PATH):
     print(f"--- Reanudando entrenamiento desde el checkpoint: {CHECKPOINT_PATH} ---")
@@ -240,10 +242,11 @@ if os.path.exists(CHECKPOINT_PATH):
     scaler.load_state_dict(checkpoint['scaler_state_dict'])
     
     start_epoch = checkpoint['epoch']
+    start_step = checkpoint.get('step', 0)  # .get para compatibilidad con checkpoints antiguos
     best_val_loss = checkpoint['best_val_loss']
     patience_counter = checkpoint.get('patience_counter', 0) # .get para compatibilidad con checkpoints antiguos
     
-    print(f"Checkpoint cargado. Reanudando desde la época {start_epoch + 1}.")
+    print(f"Checkpoint cargado. Reanudando desde la época {start_epoch + 1}, paso {start_step}.")
     print(f"Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
 else:
     print("--- No se encontró checkpoint. Empezando entrenamiento desde cero. ---")
@@ -254,6 +257,7 @@ if torch.__version__.startswith("2"):
     model = torch.compile(model)
 
 ### CHECKPOINT ###: El bucle ahora empieza desde start_epoch
+global_step = start_step
 for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     optimizer.zero_grad()
@@ -276,8 +280,25 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                 scaler.update()
                 optimizer.zero_grad()
                 scheduler.step()
+                global_step += 1
+                
+                # Guardar checkpoint cada CHECKPOINT_STEPS pasos
+                if global_step % CHECKPOINT_STEPS == 0:
+                    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+                    print(f"\nGuardando checkpoint en paso {global_step}...")
+                    torch.save({
+                        'epoch': epoch,
+                        'step': global_step,
+                        'model_state_dict': model_to_save.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'scaler_state_dict': scaler.state_dict(),
+                        'best_val_loss': best_val_loss,
+                        'patience_counter': patience_counter,
+                    }, CHECKPOINT_PATH)
+                    print(f"Checkpoint guardado en {CHECKPOINT_PATH}")
             
-            progress.set_postfix({"loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
+            progress.set_postfix({"loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}", "step": global_step})
 
     model.eval()
     total_val_loss, val_batches = 0.0, 0
@@ -309,9 +330,10 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             patience_counter += 1
             
         ### CHECKPOINT ###: Guardar el estado del entrenamiento al final de cada época
-        print(f"Guardando checkpoint en {CHECKPOINT_PATH}...")
+        print(f"Guardando checkpoint al final de época {epoch+1} en {CHECKPOINT_PATH}...")
         torch.save({
             'epoch': epoch + 1,  # La próxima época a ejecutar
+            'step': global_step,
             'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
