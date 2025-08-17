@@ -24,9 +24,9 @@ INSTRUCCIONES DE USO:
    - "mixed_es": Combinación enfocada en español
    
    Mezclas personalizadas (líneas 160-184):
-   - "high_quality": Enfocada en calidad (SlimPajama + Pile + OpenWebText)
+   - "high_quality": Enfocada en calidad (SlimPajama + Pile)
    - "multilingual_balanced": Multilingüe balanceado
-   - "experimental_full": Experimental con todos los datasets
+   - "experimental_stable": Experimental con datasets estables
 
 2. CONFIGURACIÓN DE PORCENTAJES:
    - DATASET_SUBSET_PERCENT (línea 156): Porcentaje del dataset total (1-100)
@@ -218,11 +218,10 @@ DATASET_SUBSET_PERCENT = 5
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
 CUSTOM_MIX_RATIOS = {
-    # Ejemplo de mezcla personalizada enfocada en calidad
+    # Ejemplo de mezcla personalizada enfocada en calidad (SIN OPENWEBTEXT)
     "high_quality": {
-        "slimpajama_en": 0.5,  # 50% SlimPajama inglés (alta calidad)
-        "pile": 0.3,           # 30% The Pile (diversidad)
-        "openwebtext": 0.2     # 20% OpenWebText (web content)
+        "slimpajama_en": 0.6,  # 60% SlimPajama inglés (alta calidad)
+        "pile": 0.4            # 40% The Pile (diversidad)
     },
     
     # Ejemplo de mezcla para contenido multilingüe balanceado
@@ -233,13 +232,19 @@ CUSTOM_MIX_RATIOS = {
         "slimpajama_es": 0.1   # 10% SlimPajama español
     },
     
-    # Ejemplo de mezcla experimental con todos los datasets
-    "experimental_full": {
-        "slimpajama": 0.25,    # 25% SlimPajama completo
-        "c4": 0.25,            # 25% C4 multilingüe
+    # Ejemplo de mezcla estable sin datasets problemáticos
+    "experimental_stable": {
+        "slimpajama": 0.35,    # 35% SlimPajama completo
+        "c4": 0.3,             # 30% C4 multilingüe
         "pile": 0.2,           # 20% The Pile
-        "openwebtext": 0.15,   # 15% OpenWebText
         "spanish": 0.15        # 15% Español
+    },
+    
+    # Mezcla segura solo con datasets verificados
+    "safe_mix": {
+        "c4": 0.4,             # 40% C4 multilingüe
+        "slimpajama_en": 0.4,  # 40% SlimPajama inglés
+        "spanish": 0.2         # 20% Español
     }
 }
 
@@ -257,7 +262,7 @@ DATASETS_CONFIG = {
         "description": "Common Crawl multilingüe"
     },
     "openwebtext": {
-        "name": "openwebtext",
+        "name": "Skylion007/openwebtext",
         "config": None,
         "train_samples": 8_013_769,
         "val_samples": None,  # Se usará split automático
@@ -314,12 +319,11 @@ DATASETS_CONFIG = {
         "val_samples": 200_000,
         "repo_suffix": "Mixed",
         "description": "Combinación de múltiples datasets",
-        "mix_ratios": {  # Proporción de cada dataset en la mezcla
-            "c4": 0.3,
-            "slimpajama_en": 0.3,
-            "openwebtext": 0.2,
-            "pile": 0.1,
-            "spanish": 0.1
+        "mix_ratios": {  # Proporción de cada dataset en la mezcla (SIN OPENWEBTEXT)
+            "c4": 0.35,
+            "slimpajama_en": 0.35,
+            "pile": 0.15,
+            "spanish": 0.15
         }
     },
     "mixed_es": {
