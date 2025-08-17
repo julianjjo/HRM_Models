@@ -4,7 +4,7 @@ import torch
 
 def chat_with_model(model, tokenizer, prompt, device="cpu"):
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    output = model.generate(**inputs, max_new_tokens=128, pad_token_id=tokenizer.eos_token_id)
+    output = model.generate(**inputs, max_new_tokens=512, pad_token_id=tokenizer.eos_token_id)
     response = tokenizer.decode(output[0], skip_special_tokens=True)
     # Remove prompt from response if present
     if response.startswith(prompt):
@@ -12,7 +12,7 @@ def chat_with_model(model, tokenizer, prompt, device="cpu"):
     return response
 
 def main():
-    model_path = "output_model"
+    model_path = "hrm_text1_c4_output-large"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Cargando modelo desde '{model_path}' en dispositivo '{device}'...")
     tokenizer = AutoTokenizer.from_pretrained(model_path)

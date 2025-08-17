@@ -4,9 +4,10 @@ HRM-Text1 Training Script - ADAPTADO PARA EL DATASET C4
 VERSIÓN FINAL: Corregido el error de operación in-place, optimizado con streaming y generación.
 ### CHECKPOINT ###: Añadida lógica para guardar y reanudar el entrenamiento desde checkpoints.
 ### VERSIÓN AMPLIADA ###: Aumentado el tamaño del modelo para mayor capacidad.
+### FIX DATALOADER ###: Solucionado el error de multiprocessing en DataLoader.
 """
 
-import os, random, contextlib
+import os, random, contextlib, multiprocessing as mp, atexit
 from typing import List, Dict
 
 import torch
@@ -20,7 +21,7 @@ from datasets import load_dataset
 from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin
 from tqdm.auto import tqdm
 
-from huggingface_hub import HfFolder
+from huggingface_hub import HfFolder, HfApi
 
 # Optimización específica para NVIDIA Ampere+
 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
@@ -133,8 +134,8 @@ BLOCK_SIZE = 512
 # --- CAMBIOS PARA EL MODELO GRANDE ---
 # Se reduce el tamaño del lote y se aumenta la acumulación de gradiente para
 # manejar el aumento de uso de memoria VRAM.
-BATCH_SIZE = 64           # <-- CAMBIO: Reducido de 64 a 32
-GRAD_ACCUM_STEPS = 4      # <-- CAMBIO: Aumentado de 2 a 4
+BATCH_SIZE = 40
+GRAD_ACCUM_STEPS = 2
 
 LEARNING_RATE_MAX, LEARNING_RATE_MIN, WEIGHT_DECAY = 3e-4, 1e-5, 0.05
 MIXED_PRECISION, EARLY_STOPPING_PATIENCE = True, 2
@@ -153,9 +154,53 @@ MODEL_PARAMS = {
 
 T5_TOKENIZER_REPO = "t5-small"
 ### CHECKPOINT ###: Directorio centralizado para todas las salidas.
-OUTPUT_DIR = "hrm_text1_c4_output-large" # <-- CAMBIO: Directorio para el modelo grande
+OUTPUT_DIR = "/content/drive/MyDrive/HRM/hrm_text1_c4_output-large" # <-- CAMBIO: Directorio para el modelo grande
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
+
+
+# ==============================================================================
+# --- FUNCIONES AUXILIARES PARA DATALOADER ---
+# ==============================================================================
+
+def get_dataloader_workers():
+    """Determina el número seguro de workers para DataLoader"""
+    try:
+        # Detectar si estamos en Google Colab
+        if 'google.colab' in str(get_ipython()):
+            print("Detectado entorno Google Colab. Usando num_workers=0 para evitar problemas de multiprocessing.")
+            return 0
+    except:
+        pass
+
+    try:
+        # Detectar si estamos en Jupyter/IPython
+        get_ipython()
+        print("Detectado entorno Jupyter/IPython. Usando num_workers=0 para mayor estabilidad.")
+        return 0
+    except:
+        pass
+
+    # Para sistemas normales, usar menos workers para evitar problemas
+    workers = min(2, mp.cpu_count())
+    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
+    return workers
+
+def cleanup_dataloaders():
+    """Función para limpiar DataLoaders al salir"""
+    global train_loader, val_loader
+    try:
+        if 'train_loader' in globals():
+            del train_loader
+        if 'val_loader' in globals():
+            del val_loader
+        torch.cuda.empty_cache()
+        print("DataLoaders limpiados correctamente.")
+    except:
+        pass
+
+# Registrar la función de limpieza
+atexit.register(cleanup_dataloaders)
 
 
 # ==============================================================================
@@ -208,9 +253,26 @@ for split_name in ["train", "validation"]:
         tokenize_function, batched=True, remove_columns=["text", "timestamp", "url"]
     ).with_format("torch")
 
-num_workers = min(os.cpu_count() or 2, 8)
-train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
-val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
+# ### FIX DATALOADER ###: Usar la función segura para determinar workers
+safe_num_workers = get_dataloader_workers()
+
+print(f"Creando DataLoaders con {safe_num_workers} workers...")
+train_loader = DataLoader(
+    tokenized_splits["train"],
+    batch_size=BATCH_SIZE,
+    num_workers=safe_num_workers,
+    pin_memory=True,
+    persistent_workers=False,
+    prefetch_factor=2 if safe_num_workers > 0 else None
+)
+val_loader = DataLoader(
+    tokenized_splits["validation"],
+    batch_size=BATCH_SIZE,
+    num_workers=safe_num_workers,
+    pin_memory=True,
+    persistent_workers=False,
+    prefetch_factor=2 if safe_num_workers > 0 else None
+)
 
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
@@ -219,7 +281,7 @@ print(f"Número de parámetros del modelo: {sum(p.numel() for p in model.paramet
 optimizer = AdamW(model.parameters(), lr=LEARNING_RATE_MAX, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95))
 num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
 print(f"Total de pasos de entrenamiento calculados: {num_training_steps}")
-    
+
 scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=LEARNING_RATE_MIN)
 scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
 
@@ -228,24 +290,24 @@ start_epoch = 0
 start_step = 0
 best_val_loss = float('inf')
 patience_counter = 0
-CHECKPOINT_STEPS = 1000  # Guardar checkpoint cada 1000 pasos
+CHECKPOINT_STEPS = 1000  # Guardar checkpoint cada 100 pasos
 
 if os.path.exists(CHECKPOINT_PATH):
     print(f"--- Reanudando entrenamiento desde el checkpoint: {CHECKPOINT_PATH} ---")
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-    
+
     model_to_load = model._orig_mod if hasattr(model, '_orig_mod') else model
     model_to_load.load_state_dict(checkpoint['model_state_dict'])
-    
+
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    
+
     start_epoch = checkpoint['epoch']
     start_step = checkpoint.get('step', 0)  # .get para compatibilidad con checkpoints antiguos
     best_val_loss = checkpoint['best_val_loss']
     patience_counter = checkpoint.get('patience_counter', 0) # .get para compatibilidad con checkpoints antiguos
-    
+
     # VERIFICAR SI EL DATASET CAMBIÓ Y REAJUSTAR SCHEDULER
     checkpoint_training_steps = checkpoint.get('num_training_steps', 0)
     if checkpoint_training_steps != num_training_steps:
@@ -257,7 +319,7 @@ if os.path.exists(CHECKPOINT_PATH):
         for _ in range(new_step):
             scheduler.step()
         print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
-    
+
     print(f"Checkpoint cargado. Reanudando desde la época {start_epoch + 1}, paso {start_step}.")
     print(f"Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
 else:
@@ -268,99 +330,119 @@ if torch.__version__.startswith("2"):
     print("Compilando el modelo con torch.compile()...")
     model = torch.compile(model)
 
-### CHECKPOINT ###: El bucle ahora empieza desde start_epoch
-global_step = start_step
-for epoch in range(start_epoch, NUM_EPOCHS):
-    model.train()
-    optimizer.zero_grad()
-    progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
-    for i, batch in enumerate(progress):
-        input_ids = batch["input_ids"].to(device, non_blocking=True)
-        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-        labels = input_ids.clone()
+def main_training():
+    """Función principal de entrenamiento con manejo de limpieza"""
+    global train_loader, val_loader, global_step, best_val_loss, patience_counter
 
-        with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss / GRAD_ACCUM_STEPS
-        
-        if loss is not None and torch.isfinite(loss):
-            scaler.scale(loss).backward()
-            if (i + 1) % GRAD_ACCUM_STEPS == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                scheduler.step()
-                global_step += 1
-                
-                # Guardar checkpoint cada CHECKPOINT_STEPS pasos
-                if global_step % CHECKPOINT_STEPS == 0:
-                    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-                    print(f"\nGuardando checkpoint en paso {global_step}...")
-                    torch.save({
-                        'epoch': epoch,
-                        'step': global_step,
-                        'model_state_dict': model_to_save.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'scaler_state_dict': scaler.state_dict(),
-                        'best_val_loss': best_val_loss,
-                        'patience_counter': patience_counter,
-                        'num_training_steps': num_training_steps,  # Guardar para verificar cambios
-                    }, CHECKPOINT_PATH)
-                    print(f"Checkpoint guardado en {CHECKPOINT_PATH}")
-            
-            progress.set_postfix({"loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}", "step": global_step})
+    try:
+        ### CHECKPOINT ###: El bucle ahora empieza desde start_epoch
+        global_step = start_step
+        for epoch in range(start_epoch, NUM_EPOCHS):
+            model.train()
+            optimizer.zero_grad()
+            progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
+            for i, batch in enumerate(progress):
+                input_ids = batch["input_ids"].to(device, non_blocking=True)
+                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+                labels = input_ids.clone()
 
-    model.eval()
-    total_val_loss, val_batches = 0.0, 0
-    with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validando..."):
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = input_ids.clone()
-            
-            with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs.loss / GRAD_ACCUM_STEPS
 
-            if outputs.loss is not None and torch.isfinite(outputs.loss):
-                total_val_loss += outputs.loss.item()
-                val_batches += 1
-    
-    if val_batches > 0:
-        avg_val_loss = total_val_loss / val_batches
-        print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
-        
-        model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-        
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            
-        ### CHECKPOINT ###: Guardar el estado del entrenamiento al final de cada época
-        print(f"Guardando checkpoint al final de época {epoch+1} en {CHECKPOINT_PATH}...")
-        torch.save({
-            'epoch': epoch + 1,  # La próxima época a ejecutar
-            'step': global_step,
-            'model_state_dict': model_to_save.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'scaler_state_dict': scaler.state_dict(),
-            'best_val_loss': best_val_loss,
-            'patience_counter': patience_counter,
-            'num_training_steps': num_training_steps,  # Guardar para verificar cambios
-        }, CHECKPOINT_PATH)
-    
-    if patience_counter >= EARLY_STOPPING_PATIENCE:
-        print("Detención temprana por falta de mejora en la validación.")
-        break
+                if loss is not None and torch.isfinite(loss):
+                    scaler.scale(loss).backward()
+                    if (i + 1) % GRAD_ACCUM_STEPS == 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad()
+                        scheduler.step()
+                        global_step += 1
 
-print("Entrenamiento finalizado.")
+                        # Guardar checkpoint cada CHECKPOINT_STEPS pasos
+                        if global_step % CHECKPOINT_STEPS == 0:
+                            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+                            print(f"\nGuardando checkpoint en paso {global_step}...")
+                            torch.save({
+                                'epoch': epoch,
+                                'step': global_step,
+                                'model_state_dict': model_to_save.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                                'scheduler_state_dict': scheduler.state_dict(),
+                                'scaler_state_dict': scaler.state_dict(),
+                                'best_val_loss': best_val_loss,
+                                'patience_counter': patience_counter,
+                                'num_training_steps': num_training_steps,  # Guardar para verificar cambios
+                            }, CHECKPOINT_PATH)
+                            print(f"Checkpoint guardado en {CHECKPOINT_PATH}")
+
+                    progress.set_postfix({"loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}", "step": global_step})
+
+            model.eval()
+            total_val_loss, val_batches = 0.0, 0
+            with torch.no_grad():
+                for batch in tqdm(val_loader, desc="Validando..."):
+                    input_ids = batch["input_ids"].to(device, non_blocking=True)
+                    attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+                    labels = input_ids.clone()
+
+                    with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
+                        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+                    if outputs.loss is not None and torch.isfinite(outputs.loss):
+                        total_val_loss += outputs.loss.item()
+                        val_batches += 1
+
+            if val_batches > 0:
+                avg_val_loss = total_val_loss / val_batches
+                print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
+
+                model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
+                    torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                ### CHECKPOINT ###: Guardar el estado del entrenamiento al final de cada época
+                print(f"Guardando checkpoint al final de época {epoch+1} en {CHECKPOINT_PATH}...")
+                torch.save({
+                    'epoch': epoch + 1,  # La próxima época a ejecutar
+                    'step': global_step,
+                    'model_state_dict': model_to_save.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'patience_counter': patience_counter,
+                    'num_training_steps': num_training_steps,  # Guardar para verificar cambios
+                }, CHECKPOINT_PATH)
+
+            if patience_counter >= EARLY_STOPPING_PATIENCE:
+                print("Detención temprana por falta de mejora en la validación.")
+                break
+
+        print("Entrenamiento finalizado.")
+
+    finally:
+        # Limpieza explícita al finalizar
+        try:
+            if 'train_loader' in globals():
+                del train_loader
+            if 'val_loader' in globals():
+                del val_loader
+            torch.cuda.empty_cache()
+            print("Limpieza post-entrenamiento completada.")
+        except:
+            pass
+
+# Ejecutar el entrenamiento
+main_training()
 
 model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
 
@@ -372,16 +454,17 @@ model_to_save.save_pretrained(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
+
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=60, temperature=0.7, top_k=50):
     model.eval()
     inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
     with torch.inference_mode(), torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
         output_ids = model.generate(
-            **inputs, 
-            max_new_tokens=max_new_tokens, 
-            temperature=temperature, 
-            top_k=top_k, 
-            do_sample=True, 
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=True,
             pad_token_id=tokenizer.eos_token_id
         )
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
@@ -390,10 +473,12 @@ print("\n--- Probando la Generación del Modelo Final ---")
 try:
     inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
     if torch.__version__.startswith("2"): inference_model = torch.compile(inference_model)
-    
+
     prompts = ["The cat sat on the", "Artificial intelligence is a field that", "To be, or not to be, that is the question:"]
     for prompt in prompts:
         response = chat_with_model(prompt, inference_model, tokenizer)
         print(f"\nPrompt: {prompt}\nRespuesta: {response}")
 except Exception as e:
     print(f"El test de generación falló: {e}")
+
+print("\n--- Script completado exitosamente ---")
