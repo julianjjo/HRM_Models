@@ -211,3 +211,4 @@ wandb/
 .github
 .roo
 hrm_text1_c4_output-large
+*.pub

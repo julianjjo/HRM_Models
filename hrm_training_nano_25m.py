@@ -746,7 +746,7 @@ NUM_EPOCHS = 2             # Menos épocas para modelo extra pequeño
 BLOCK_SIZE = 128         # Contexto ultra-reducido para minimizar memoria (128 tokens)
 
 # Configuración de entrenamiento para modelo extra pequeño (~50M parámetros)
-BATCH_SIZE = 650           # Batch mínimo para reducir memoria drasticamente
+BATCH_SIZE = 150           # Batch mínimo para reducir memoria drasticamente
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 2 mantenido
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
