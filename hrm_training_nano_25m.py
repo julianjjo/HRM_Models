@@ -573,7 +573,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 10.0   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 20.0   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -689,7 +689,7 @@ DATASETS_CONFIG = {
         "mix_ratios": {  # Proporción de cada dataset en la mezcla
             "c4": 0.35,
             "fineweb": 0.20,
-            "slimpajama_en": 0.35,
+            "slimpajama": 0.35,
             "spanish": 0.10
         }
     },
@@ -746,7 +746,7 @@ NUM_EPOCHS = 2             # Menos épocas para modelo extra pequeño
 BLOCK_SIZE = 128         # Contexto ultra-reducido para minimizar memoria (128 tokens)
 
 # Configuración de entrenamiento para modelo extra pequeño (~50M parámetros)
-BATCH_SIZE = 300           # Batch mínimo para reducir memoria drasticamente
+BATCH_SIZE = 650           # Batch mínimo para reducir memoria drasticamente
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 2 mantenido
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
@@ -1138,12 +1138,48 @@ print(f"   🏆 Mejor modelo: {BEST_MODEL_PATH}")
 print(f"   💾 Checkpoints: {CHECKPOINT_PATH}")
 print(f"   📝 Modelo final: {OUTPUT_DIR}/")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Dispositivo detectado: {device}")
+# Configuración distribuida
+def setup_distributed():
+    """Inicializar entrenamiento distribuido si está disponible"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        
+        # Inicializar proceso distribuido
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        
+        print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
+        return True, rank, world_size, local_rank
+    else:
+        print("📱 Single-node training mode")
+        return False, 0, 1, 0
 
-# Verificar memoria disponible
+# Configurar distributed training
+is_distributed, rank, world_size, local_rank = setup_distributed()
+
+# Configurar dispositivo
+if is_distributed:
+    device = torch.device(f"cuda:{local_rank}")
+    print(f"Dispositivo distribuido: {device} (rank {rank})")
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Dispositivo detectado: {device}")
+
+# Verificar memoria disponible y mostrar información detallada de GPUs
 if torch.cuda.is_available():
-    print(f"VRAM disponible: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    num_gpus = torch.cuda.device_count()
+    print(f"🔥 {num_gpus} GPU(s) detectada(s):")
+    
+    total_vram = 0
+    for i in range(num_gpus):
+        props = torch.cuda.get_device_properties(i)
+        vram_gb = props.total_memory / 1e9
+        total_vram += vram_gb
+        print(f"   GPU {i}: {props.name} - {vram_gb:.1f} GB VRAM")
+    
+    print(f"💾 VRAM total disponible: {total_vram:.1f} GB")
     torch.cuda.empty_cache()
 
 try:
@@ -1409,12 +1445,23 @@ def custom_collate_fn(batch):
     
     return default_collate(filtered_batch)
 
+# Configurar samplers distribuidos si es necesario
+train_sampler = None
+val_sampler = None
+
+if is_distributed and not is_iterable:
+    train_sampler = DistributedSampler(tokenized_splits["train"], num_replicas=world_size, rank=rank, shuffle=True)
+    val_sampler = DistributedSampler(tokenized_splits["validation"], num_replicas=world_size, rank=rank, shuffle=False)
+    train_shuffle = False  # Cuando usamos DistributedSampler, no podemos usar shuffle en DataLoader
+    print(f"🔗 DistributedSampler configurado para rank {rank}/{world_size}")
+
 train_loader = DataLoader(
     tokenized_splits["train"],
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
     shuffle=train_shuffle,
+    sampler=train_sampler,
     collate_fn=custom_collate_fn
 )
 
@@ -1424,12 +1471,18 @@ val_loader = DataLoader(
     num_workers=safe_num_workers,
     pin_memory=True,
     shuffle=False,
+    sampler=val_sampler,
     collate_fn=custom_collate_fn
 )
 
 # Crear modelo
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
+
+# Envolver modelo con DDP si está en modo distribuido
+if is_distributed:
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
 
 # Contar parámetros
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1516,6 +1569,11 @@ global_step = start_step
 for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     
+    # Configurar epoch para DistributedSampler si está en uso
+    if is_distributed and train_sampler is not None:
+        train_sampler.set_epoch(epoch)
+        print(f"📅 Epoch {epoch} configurado para DistributedSampler en rank {rank}")
+    
     progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
     
     for i, batch in enumerate(progress):
@@ -1578,23 +1636,35 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         avg_val_loss = total_val_loss / val_batches
         print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
         
-        model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-        
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
-            patience_counter = 0
-        else:
-            patience_counter += 1
+        # Solo rank 0 guarda checkpoints y modelos
+        if not is_distributed or rank == 0:
+            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
             
-        print(f"Guardando checkpoint al final de época {epoch+1}...")
-        torch.save({
-            'epoch': epoch + 1, 'step': global_step, 'model_state_dict': model_to_save.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
-            'scaler_state_dict': scaler.state_dict(), 'best_val_loss': best_val_loss,
-            'patience_counter': patience_counter,
-        }, CHECKPOINT_PATH)
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
+                torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                
+            print(f"Guardando checkpoint al final de época {epoch+1}...")
+            torch.save({
+                'epoch': epoch + 1, 'step': global_step, 'model_state_dict': model_to_save.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(), 'best_val_loss': best_val_loss,
+                'patience_counter': patience_counter,
+            }, CHECKPOINT_PATH)
+        
+        # Sincronizar best_val_loss y patience_counter entre todos los procesos
+        if is_distributed:
+            # Broadcast best_val_loss desde rank 0 a todos los procesos
+            best_val_loss_tensor = torch.tensor(best_val_loss, device=device)
+            patience_counter_tensor = torch.tensor(patience_counter, device=device, dtype=torch.int)
+            dist.broadcast(best_val_loss_tensor, src=0)
+            dist.broadcast(patience_counter_tensor, src=0)
+            best_val_loss = best_val_loss_tensor.item()
+            patience_counter = patience_counter_tensor.item()
     
     if patience_counter >= EARLY_STOPPING_PATIENCE:
         print("Detención temprana por falta de mejora en la validación.")
@@ -1602,27 +1672,31 @@ for epoch in range(start_epoch, NUM_EPOCHS):
 
 print("Entrenamiento finalizado.")
 
-model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-if os.path.exists(BEST_MODEL_PATH):
-    print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
-    model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
+# Solo el proceso principal (rank 0) debe guardar el modelo
+if not is_distributed or rank == 0:
+    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+    if os.path.exists(BEST_MODEL_PATH):
+        print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
+        model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
 
-# FIX: Added safe_serialization=False to handle the RuntimeError with tied weights
-model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
-tokenizer.save_pretrained(OUTPUT_DIR)
-print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
+    # FIX: Added safe_serialization=False to handle the RuntimeError with tied weights
+    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+    print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
-# Subir modelo a Hugging Face Hub
-if HF_TOKEN:
-    try:
-        print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
-        model_to_save.push_to_hub(HF_REPO_ID, token=HF_TOKEN, commit_message=f"Upload HRM-Text1 model", safe_serialization=False)
-        tokenizer.push_to_hub(HF_REPO_ID, token=HF_TOKEN, commit_message=f"Upload tokenizer")
-        print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
-    except Exception as e:
-        print(f"❌ Error al subir el modelo a Hugging Face: {e}")
+    # Subir modelo a Hugging Face Hub
+    if HF_TOKEN:
+        try:
+            print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
+            model_to_save.push_to_hub(HF_REPO_ID, token=HF_TOKEN, commit_message=f"Upload HRM-Text1 model", safe_serialization=False)
+            tokenizer.push_to_hub(HF_REPO_ID, token=HF_TOKEN, commit_message=f"Upload tokenizer")
+            print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
+        except Exception as e:
+            print(f"❌ Error al subir el modelo a Hugging Face: {e}")
+    else:
+        print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
 else:
-    print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+    print(f"🔇 Rank {rank}: Saltando guardado del modelo (solo rank 0 guarda)")
 
 # ==============================================================================
 # --- FUNCIÓN DE CHAT Y PRUEBAS ---
@@ -1640,24 +1714,33 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperatu
         )
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-print("\n--- Probando la Generación del Modelo Final ---")
-try:
-    inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
-    prompts = [
-        "The cat sat on the", "Artificial intelligence is a field that",
-        "To be, or not to be, that is the question:", "In a world where technology advances rapidly,",
-        "The future of humanity depends on"
-    ]
-    for prompt in prompts:
-        response = chat_with_model(prompt, inference_model, tokenizer)
-        print(f"\nPrompt: {prompt}\nRespuesta: {response}")
-except Exception as e:
-    print(f"El test de generación falló: {e}")
+# Solo rank 0 ejecuta las pruebas finales
+if not is_distributed or rank == 0:
+    print("\n--- Probando la Generación del Modelo Final ---")
+    try:
+        inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
+        prompts = [
+            "The cat sat on the", "Artificial intelligence is a field that",
+            "To be, or not to be, that is the question:", "In a world where technology advances rapidly,",
+            "The future of humanity depends on"
+        ]
+        for prompt in prompts:
+            response = chat_with_model(prompt, inference_model, tokenizer)
+            print(f"\nPrompt: {prompt}\nRespuesta: {response}")
+    except Exception as e:
+        print(f"El test de generación falló: {e}")
 
-print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
-print(f"Parámetros del modelo: {total_params:,}")
-print(f"Contexto máximo: {BLOCK_SIZE}")
-print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
-print(f"Modelo guardado en: {OUTPUT_DIR}")
+    print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
+    print(f"Parámetros del modelo: {total_params:,}")
+    print(f"Contexto máximo: {BLOCK_SIZE}")
+    print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
+    print(f"Modelo guardado en: {OUTPUT_DIR}")
+else:
+    print(f"🔇 Rank {rank}: Saltando pruebas de generación (solo rank 0 ejecuta)")
+
+# Limpiar procesos distribuidos
+if is_distributed:
+    print("🧹 Limpiando procesos distribuidos...")
+    dist.destroy_process_group()
 
 print("\n--- Script completado exitosamente ---")
