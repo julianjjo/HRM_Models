@@ -1485,7 +1485,9 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
     
     for i, batch in enumerate(progress):
-        if (i + 1) % GRAD_ACCUM_STEPS != 0 and i + 1 < len(train_loader):
+        # Para IterableDataset, usamos la estimación de pasos por época
+        loader_len = estimated_steps_per_epoch if is_iterable else len(train_loader)
+        if (i + 1) % GRAD_ACCUM_STEPS != 0 and i + 1 < loader_len:
              # Desactivar sync para DDP en pasos de acumulación
              if isinstance(model, DDP):
                  with model.no_sync():
@@ -1509,7 +1511,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         if loss is not None and torch.isfinite(loss):
             scaler.scale(loss).backward()
             
-            if (i + 1) % GRAD_ACCUM_STEPS == 0 or i + 1 == len(train_loader):
+            if (i + 1) % GRAD_ACCUM_STEPS == 0 or i + 1 == loader_len:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
