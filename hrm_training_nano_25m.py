@@ -1315,19 +1315,34 @@ def tokenize_function(examples):
         if isinstance(text, str) and len(text) > 100:
             texts.append(text + tokenizer.eos_token)
     
-    return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
+    # Tokenizar y devolver solo los campos necesarios para el entrenamiento
+    tokenized = tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
+    
+    # Para datasets streaming, devolver solo los campos del tokenizer
+    return {
+        'input_ids': tokenized['input_ids'],
+        'attention_mask': tokenized['attention_mask']
+    }
 
 print("Applying tokenization function...")
-# Detectar columnas a eliminar dinámicamente
-columns_to_remove = list(raw_datasets["train"].features.keys())
-print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
-
-tokenized_splits = raw_datasets.map(
-    tokenize_function,
-    batched=True,
-    remove_columns=columns_to_remove,
-    num_proc=max(1, mp.cpu_count() // 2)
-)
+# Para datasets streaming, necesitamos manejar las columnas de manera diferente
+if hasattr(raw_datasets["train"], 'features'):
+    # Dataset no streaming (tiene .features)
+    columns_to_remove = list(raw_datasets["train"].features.keys())
+    print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+    tokenized_splits = raw_datasets.map(
+        tokenize_function,
+        batched=True,
+        remove_columns=columns_to_remove,
+        num_proc=max(1, mp.cpu_count() // 2)
+    )
+else:
+    # Dataset streaming (IterableDataset)
+    print("Dataset streaming detectado - aplicando tokenización sin remove_columns")
+    tokenized_splits = {
+        "train": raw_datasets["train"].map(tokenize_function, batched=True),
+        "validation": raw_datasets["validation"].map(tokenize_function, batched=True)
+    }
 
 safe_num_workers = get_num_workers()
 print(f"Creando DataLoaders con {safe_num_workers} workers...")
