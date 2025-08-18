@@ -1325,8 +1325,14 @@ def tokenize_function(examples):
     }
 
 print("Applying tokenization function...")
+# Verificar que los datasets se cargaron correctamente
+if raw_datasets is None or raw_datasets.get("train") is None:
+    raise ValueError("❌ Error: Los datasets no se cargaron correctamente. raw_datasets['train'] es None.")
+
+print(f"Tipo de dataset: {type(raw_datasets['train'])}")
+
 # Para datasets streaming, necesitamos manejar las columnas de manera diferente
-if hasattr(raw_datasets["train"], 'features'):
+if hasattr(raw_datasets["train"], 'features') and raw_datasets["train"].features is not None:
     # Dataset no streaming (tiene .features)
     columns_to_remove = list(raw_datasets["train"].features.keys())
     print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
