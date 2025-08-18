@@ -1153,7 +1153,17 @@ def setup_distributed():
         print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
         return True, rank, world_size, local_rank
     else:
-        print("📱 Single-node training mode")
+        # Opción de auto-configuración para múltiples GPUs
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            print("⚠️  MÚLTIPLES GPUs DETECTADAS pero sin variables de entorno distribuidas")
+            print(f"   📋 GPUs disponibles: {torch.cuda.device_count()}")
+            print("   💡 Para usar TODAS las GPUs, ejecuta con:")
+            print(f"      torchrun --nproc_per_node={torch.cuda.device_count()} {__file__}")
+            print("   🔄 Continuando con entrenamiento single-GPU...")
+        elif torch.cuda.is_available():
+            print(f"📱 Single-GPU training mode (1 GPU detectada)")
+        else:
+            print("📱 CPU training mode (sin GPU detectada)")
         return False, 0, 1, 0
 
 # Configurar distributed training
