@@ -373,7 +373,9 @@ class HRMInner(nn.Module):
                 if torch.rand(1).item() < epsilon:
                     action = torch.randint(0, 2, (1,)).item()
                 else:
-                    action = torch.argmax(q_values, dim=-1).mode().values.item()
+                    # Average Q-values across batch and sequence dimensions, then select action
+                    avg_q_values = q_values.mean(dim=[0, 1])  # Shape: [2]
+                    action = torch.argmax(avg_q_values).item()
                 
                 # If action is halt (1), break
                 if action == 1:
