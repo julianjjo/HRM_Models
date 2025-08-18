@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO PEQUEÑO ~100M PARÁMETROS
-VERSIÓN COMPACTA: Configuración para ~100M parámetros con contexto estándar (512 tokens)
-- Arquitectura HRM eficiente (12 capas)
+HRM-Text1 Training Script - MODELO EXTRA PEQUEÑO ~50M PARÁMETROS
+VERSIÓN ULTRA-COMPACTA: Configuración para ~50M parámetros con contexto reducido (256 tokens)
+- Arquitectura HRM ultra-eficiente (8 capas)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones de memoria para recursos limitados
-- Configuración optimizada para modelos pequeños y entrenamiento rápido
+- Optimizaciones de memoria para recursos muy limitados
+- Configuración optimizada para entrenamiento rápido en hardware limitado
 """
 
 import os, random, contextlib, multiprocessing as mp, atexit, math
@@ -578,14 +578,14 @@ DATASET_SUBSET_PERCENT = 1.0   # Usar más datos para modelo pequeño (más efic
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
 CUSTOM_MIX_RATIOS = {
-    # Ejemplo de mezcla personalizada enfocada en calidad para modelo pequeño
+    # Ejemplo de mezcla personalizada enfocada en calidad para modelo extra pequeño
     "high_quality_small": {
         "c4": 0.5,             # 50% C4 (base sólida)
         "fineweb": 0.3,        # 30% FineWeb (alta calidad)
         "openwebtext": 0.2     # 20% OpenWebText (diversidad)
     },
     
-    # Ejemplo de mezcla balanceada para modelo pequeño
+    # Ejemplo de mezcla balanceada para modelo extra pequeño
     "balanced_small": {
         "c4": 0.4,             # 40% C4 (multilingüe)
         "slimpajama_en": 0.3,  # 30% SlimPajama inglés
@@ -599,7 +599,7 @@ CUSTOM_MIX_RATIOS = {
         "openwebtext": 0.4     # 40% OpenWebText
     },
     
-    # Mezcla enfocada en conversaciones para modelo pequeño
+    # Mezcla enfocada en conversaciones para modelo extra pequeño
     "conversation_small": {
         "human_conversations": 0.5,  # 50% Conversaciones humanas
         "c4": 0.3,                   # 30% C4 base
@@ -721,15 +721,15 @@ for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     DATASETS_CONFIG[custom_name] = {
         "name": "mixed",
         "config": None,
-        "train_samples": 50_000_000,   # Estimación para modelo pequeño (100M)
-        "val_samples": 250_000,
+        "train_samples": 25_000_000,   # Estimación reducida para modelo extra pequeño (50M)
+        "val_samples": 125_000,
         "repo_suffix": f"Custom-{custom_name.replace('_', '-').title()}",
-        "description": f"Mezcla personalizada para 100M: {custom_name.replace('_', ' ').title()}",
+        "description": f"Mezcla personalizada para 50M: {custom_name.replace('_', ' ').title()}",
         "mix_ratios": mix_ratios
     }
 
 # Mostrar datasets disponibles
-print("=== DATASETS DISPONIBLES PARA MODELO PEQUEÑO (100M) ===")
+print("=== DATASETS DISPONIBLES PARA MODELO EXTRA PEQUEÑO (50M) ===")
 for key, config in DATASETS_CONFIG.items():
     marker = " ← SELECCIONADO" if key == ACTIVE_DATASET else ""
     print(f"• {key}: {config['description']}{marker}")
@@ -740,14 +740,14 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-100M"
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-50M"
 SEED = 42
-NUM_EPOCHS = 2             # Menos épocas para modelo pequeño
-BLOCK_SIZE = 512   # Contexto estándar para modelo pequeño
+NUM_EPOCHS = 2             # Menos épocas para modelo extra pequeño
+BLOCK_SIZE = 256         # Contexto reducido para menos memoria (256 tokens)
 
-# Configuración de entrenamiento para modelo grande
-BATCH_SIZE = 8           # Tamaño óptimo para modelo pequeño (100M parámetros)
-GRAD_ACCUM_STEPS = 4    # Batch efectivo de 32 para modelo pequeño
+# Configuración de entrenamiento para modelo extra pequeño (~50M parámetros)
+BATCH_SIZE = 4           # Batch reducido para menos memoria
+GRAD_ACCUM_STEPS = 8     # Batch efectivo de 32 mantenido
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para modelos grandes
@@ -761,22 +761,22 @@ MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
-# --- CONFIGURACIÓN PARA MODELO BÁSICO (~100M PARÁMETROS) ---
-# Configuración optimizada para un modelo más pequeño y eficiente
+# --- CONFIGURACIÓN PARA MODELO EXTRA PEQUEÑO (~50M PARÁMETROS) ---
+# Configuración ultra-compacta para recursos muy limitados
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 512,                     # Dimensión más pequeña para modelo básico
-    "n_head": 8,                       # 8 cabezas de atención (512/8 = 64 dim por cabeza)
-    "n_layers": 12,                    # 12 capas HRM apiladas (modelo más pequeño)
-    "d_ff": 2048,                      # 4 * n_embd para FFN
+    "n_embd": 384,                     # Dimensión reducida para modelo extra pequeño
+    "n_head": 6,                       # 6 cabezas de atención (384/6 = 64 dim por cabeza)
+    "n_layers": 8,                     # Solo 8 capas HRM (muy compacto)
+    "d_ff": 1536,                      # 4 * n_embd para FFN (384 * 4)
     "dropout": 0.1,
-    "halt_max_steps": 8,               # Menos pasos para modelo pequeño
+    "halt_max_steps": 6,               # Menos pasos para modelo extra pequeño
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
-    "h_update_period": 3,              # H-module se actualiza cada 3 pasos (para modelo pequeño)
+    "h_update_period": 2,              # H-module se actualiza cada 2 pasos (más frecuente para compensar menos capas)
 }
 
 T5_TOKENIZER_REPO = "t5-small"
@@ -812,7 +812,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_small_100m_output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_small_50m_output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
