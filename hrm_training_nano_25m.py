@@ -1366,11 +1366,14 @@ def custom_collate_fn(batch):
     filtered_batch = []
     for item in batch:
         # Filtrar solo los campos necesarios: input_ids, attention_mask
-        filtered_item = {
-            key: value for key, value in item.items() 
-            if key in ['input_ids', 'attention_mask'] and 
-            isinstance(value, (torch.Tensor, list, int, float))
-        }
+        filtered_item = {}
+        for key in ['input_ids', 'attention_mask']:
+            if key in item and isinstance(item[key], (torch.Tensor, list, int, float)):
+                # Asegurar que las listas se conviertan a tensores
+                if isinstance(item[key], list):
+                    filtered_item[key] = torch.tensor(item[key])
+                else:
+                    filtered_item[key] = item[key]
         filtered_batch.append(filtered_item)
     
     return default_collate(filtered_batch)
