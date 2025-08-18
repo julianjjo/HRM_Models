@@ -8,25 +8,117 @@ VERSIÓN AMPLIADA: Configuración para ~1B parámetros con contexto extendido (2
 - Configuración optimizada para modelos grandes
 """
 
-import os, random, contextlib, math
+import os, random, contextlib, multiprocessing as mp, atexit, math
 from typing import List, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from datasets import load_dataset
 from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_linear_schedule_with_warmup
 from tqdm.auto import tqdm
 
-from huggingface_hub import HfFolder
+from huggingface_hub import HfFolder, HfApi
+
+# Para descargas de Kaggle
+try:
+    import kagglehub
+    KAGGLE_AVAILABLE = True
+    print("✅ Kagglehub disponible para descargas de datasets")
+except ImportError:
+    KAGGLE_AVAILABLE = False
+    print("⚠️  kagglehub no disponible. Datasets de Kaggle deshabilitados.")
+    print("💡 Para habilitar, ejecuta: pip install kagglehub")
+
+# Para detección de idioma
+try:
+    import langdetect
+    LANGUAGE_DETECTION_AVAILABLE = True
+    print("✅ Detección de idioma disponible con langdetect")
+except ImportError:
+    LANGUAGE_DETECTION_AVAILABLE = False
+    print("⚠️  langdetect no disponible. Filtrado por idioma deshabilitado.")
+    print("💡 Para habilitar automáticamente, ejecuta: pip install langdetect")
+    
+    # Intentar instalación automática si estamos en un entorno compatible
+    try:
+        import subprocess
+        import sys
+        response = input("¿Deseas instalar langdetect automáticamente? (y/n): ").strip().lower()
+        if response in ['y', 'yes', 's', 'si']:
+            print("🔄 Instalando langdetect...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "langdetect"])
+            print("✅ langdetect instalado. Reiniciando detección...")
+            try:
+                import langdetect
+                LANGUAGE_DETECTION_AVAILABLE = True
+                print("✅ Detección de idioma ahora disponible")
+            except ImportError:
+                print("❌ Error al importar langdetect después de la instalación")
+        else:
+            print("⏩ Continuando sin detección de idioma")
+    except Exception:
+        pass  # Silenciar errores en entornos no interactivos
+
+# ==============================================================================
+# --- CONFIGURACIÓN MULTI-GPU ---
+# ==============================================================================
+
+def setup_distributed():
+    """Inicializa el entorno distribuido para entrenamiento multi-GPU"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+    else:
+        print("🔧 Variables de entorno de distribución no encontradas. Configurando para GPU única.")
+        return False, 0, 1, 0
+    
+    # Verificar disponibilidad de GPUs
+    if not torch.cuda.is_available():
+        print("❌ CUDA no disponible para entrenamiento distribuido")
+        return False, 0, 1, 0
+    
+    if torch.cuda.device_count() < world_size:
+        print(f"❌ Se requieren {world_size} GPUs pero solo hay {torch.cuda.device_count()} disponibles")
+        return False, 0, 1, 0
+    
+    # Configurar device para el proceso actual
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    
+    # Inicializar proceso distribuido
+    dist.init_process_group(backend="nccl")
+    
+    if rank == 0:
+        print(f"🚀 Entrenamiento distribuido iniciado:")
+        print(f"   📊 World size: {world_size}")
+        print(f"   🔢 Total de GPUs: {torch.cuda.device_count()}")
+        print(f"   🎯 Backend: nccl")
+    
+    return True, rank, world_size, local_rank
+
+def cleanup_distributed():
+    """Limpia el entorno distribuido"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+# Configurar distribución
+DISTRIBUTED, RANK, WORLD_SIZE, LOCAL_RANK = setup_distributed()
+
+if DISTRIBUTED:
+    print(f"Proceso {RANK}/{WORLD_SIZE} en GPU {LOCAL_RANK}")
 
 # Optimización específica para NVIDIA Ampere+
 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
-    print("GPU NVIDIA compatible con TF32 detectada. Activando la precisión de matmul 'high'.")
+    if not DISTRIBUTED or RANK == 0:
+        print("GPU NVIDIA compatible con TF32 detectada. Activando la precisión de matmul 'high'.")
     torch.set_float32_matmul_precision('high')
 
 # Verificar si Flash Attention está disponible
@@ -78,6 +170,8 @@ def rotate_half(x):
 
 def apply_rotary_pos_emb(q, k, cos, sin):
     """Apply rotary position embedding to query and key tensors."""
+    # q, k shape: (batch, n_head, seq_len, head_dim)
+    # cos, sin shape: (1, seq_len, 1, head_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -180,6 +274,12 @@ class OptimizedMultiHeadAttention(nn.Module):
         # Aplicar RoPE si está habilitado
         if self.rotary_emb is not None:
             cos, sin = self.rotary_emb(x, seq_len)
+            # Ajustar las dimensiones de cos y sin para que coincidan con q y k
+            cos = cos.expand(q.shape[0], -1, q.shape[1], -1)  # (batch, seq_len, n_head, head_dim)
+            sin = sin.expand(q.shape[0], -1, q.shape[1], -1)  # (batch, seq_len, n_head, head_dim)
+            # Transponer para que coincidan con q, k: (batch, n_head, seq_len, head_dim)
+            cos = cos.transpose(1, 2)
+            sin = sin.transpose(1, 2)
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
         # Usar Flash Attention si está disponible
@@ -391,23 +491,214 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 # --- CONFIGURACIÓN DEL SCRIPT PARA ~1B PARÁMETROS ---
 # ==============================================================================
 
-# Dataset configuration
+# --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
+# Porcentaje del dataset completo a usar (1-100)
 DATASET_SUBSET_PERCENT = 10  # Aumentado para más datos de entrenamiento
-DATASET_NAME = "allenai/c4"
-DATASET_CONFIG = "multilingual"
 
-HF_REPO_ID = "dreamwar/HRM-Text1-C4-1B"
+# CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
+# Puedes crear tus propias combinaciones aquí o modificar las existentes
+CUSTOM_MIX_RATIOS = {
+    # Ejemplo de mezcla personalizada enfocada en calidad para modelo 1B
+    "high_quality_1b": {
+        "slimpajama_en": 0.4,  # 40% SlimPajama inglés (alta calidad)
+        "pile": 0.3,           # 30% The Pile (diversidad)
+        "openwebtext": 0.2,    # 20% OpenWebText (web content)
+        "fineweb": 0.1         # 10% FineWeb (muy alta calidad)
+    },
+    
+    # Ejemplo de mezcla para contenido multilingüe balanceado para 1B
+    "multilingual_balanced_1b": {
+        "c4": 0.3,             # 30% C4 (multilingüe)
+        "slimpajama_en": 0.3,  # 30% SlimPajama inglés
+        "spanish": 0.2,        # 20% Español
+        "slimpajama_es": 0.1,  # 10% SlimPajama español
+        "fineweb": 0.1         # 10% FineWeb
+    },
+    
+    # Ejemplo de mezcla experimental con todos los datasets para 1B
+    "experimental_full_1b": {
+        "slimpajama": 0.25,    # 25% SlimPajama completo
+        "c4": 0.2,             # 20% C4 multilingüe
+        "pile": 0.2,           # 20% The Pile
+        "fineweb": 0.15,       # 15% FineWeb
+        "openwebtext": 0.1,    # 10% OpenWebText
+        "human_conversations": 0.05,  # 5% Conversaciones humanas
+        "spanish": 0.05        # 5% Español
+    },
+    
+    # Mezcla enfocada en conversaciones y calidad para chat
+    "conversation_mix_1b": {
+        "human_conversations": 0.4,  # 40% Conversaciones humanas
+        "fineweb": 0.3,             # 30% Contenido de alta calidad
+        "slimpajama_en": 0.2,       # 20% SlimPajama inglés
+        "openwebtext": 0.1          # 10% OpenWebText
+    }
+}
+
+# --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
+# Selecciona el dataset a usar cambiando ACTIVE_DATASET
+ACTIVE_DATASET = "c4"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "high_quality_1b", etc.
+
+DATASETS_CONFIG = {
+    "c4": {
+        "name": "allenai/c4",
+        "config": "multilingual",
+        "train_samples": 364_868_892,
+        "val_samples": 364_608,
+        "repo_suffix": "C4",
+        "description": "Common Crawl multilingüe"
+    },
+    "openwebtext": {
+        "name": "openwebtext",
+        "config": None,
+        "train_samples": 8_013_769,
+        "val_samples": None,  # Se usará split automático
+        "repo_suffix": "OpenWebText",
+        "description": "Dataset de texto web en inglés"
+    },
+    "pile": {
+        "name": "EleutherAI/pile",
+        "config": None,
+        "train_samples": 210_607_728,
+        "val_samples": 214_670,
+        "repo_suffix": "Pile",
+        "description": "Dataset diverso de EleutherAI"
+    },
+    "spanish": {
+        "name": "allenai/c4",
+        "config": "es",
+        "train_samples": 58_395_538,
+        "val_samples": None,  # Se usará split automático
+        "repo_suffix": "Spanish",
+        "description": "Texto en español del dataset C4"
+    },
+    "fineweb": {
+        "name": "HuggingFaceFW/fineweb",
+        "config": "default",
+        "train_samples": 10_000_000_000,  # 10B tokens aproximadamente
+        "val_samples": None,  # Se usará split automático
+        "repo_suffix": "FineWeb",
+        "description": "Dataset de alta calidad de texto web (FineWeb)"
+    },
+    "slimpajama": {
+        "name": "cerebras/SlimPajama-627B",
+        "config": None,
+        "train_samples": 627_000_000_000,  # 627B tokens aproximadamente
+        "val_samples": None,  # Se usará split automático
+        "repo_suffix": "SlimPajama",
+        "description": "Dataset SlimPajama de 627B tokens (multilingüe)",
+        "language_filter": None  # Usar todo el dataset
+    },
+    "slimpajama_es": {
+        "name": "cerebras/SlimPajama-627B",
+        "config": None,
+        "train_samples": 50_000_000_000,  # Estimación para contenido en español
+        "val_samples": None,
+        "repo_suffix": "SlimPajama-ES",
+        "description": "SlimPajama filtrado para contenido en español",
+        "language_filter": "es"  # Filtrar solo español
+    },
+    "slimpajama_en": {
+        "name": "cerebras/SlimPajama-627B",
+        "config": None,
+        "train_samples": 400_000_000_000,  # Estimación para contenido en inglés
+        "val_samples": None,
+        "repo_suffix": "SlimPajama-EN",
+        "description": "SlimPajama filtrado para contenido en inglés",
+        "language_filter": None  # Deshabilitado para evitar datasets vacíos
+    },
+    "mixed": {
+        "name": "mixed",  # Identificador especial
+        "config": None,
+        "train_samples": 500_000_000,  # Estimación combinada
+        "val_samples": 200_000,
+        "repo_suffix": "Mixed",
+        "description": "Combinación de múltiples datasets",
+        "mix_ratios": {  # Proporción de cada dataset en la mezcla
+            "c4": 0.35,
+            "fineweb": 0.20,
+            "slimpajama_en": 0.35,
+            "spanish": 0.10
+        }
+    },
+    "mixed_es": {
+        "name": "mixed",  # Identificador especial
+        "config": None,
+        "train_samples": 150_000_000,  # Estimación para español
+        "val_samples": 75_000,
+        "repo_suffix": "Mixed-ES",
+        "description": "Combinación de datasets con contenido en español",
+        "mix_ratios": {  # Proporción de cada dataset en la mezcla
+            "slimpajama_es": 0.6,
+            "spanish": 0.4
+        }
+    },
+    "human_conversations": {
+        "name": "projjal1/human-conversation-training-data",
+        "config": None,
+        "train_samples": 100_000,  # Estimación aproximada
+        "val_samples": None,  # Se creará automáticamente
+        "repo_suffix": "HumanConv",
+        "description": "Dataset de conversaciones humanas de Kaggle",
+        "type": "kaggle"  # Identificador especial para datasets de Kaggle
+    }
+}
+
+# Añadir las mezclas personalizadas a la configuración principal
+for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
+    DATASETS_CONFIG[custom_name] = {
+        "name": "mixed",
+        "config": None,
+        "train_samples": 500_000_000,  # Estimación para modelo 1B
+        "val_samples": 250_000,
+        "repo_suffix": f"Custom-{custom_name.replace('_', '-').title()}",
+        "description": f"Mezcla personalizada para 1B: {custom_name.replace('_', ' ').title()}",
+        "mix_ratios": mix_ratios
+    }
+
+# Mostrar datasets disponibles
+print("=== DATASETS DISPONIBLES PARA MODELO 1B ===")
+for key, config in DATASETS_CONFIG.items():
+    marker = " ← SELECCIONADO" if key == ACTIVE_DATASET else ""
+    print(f"• {key}: {config['description']}{marker}")
+print("=" * 40)
+
+# Configuración del dataset activo
+DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
+DATASET_NAME = DATASET_INFO["name"]
+DATASET_CONFIG = DATASET_INFO["config"]
+
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-1B"
 SEED = 42
 NUM_EPOCHS = 3
-BLOCK_SIZE = 8192  # Contexto extendido
+BLOCK_SIZE = 2048  # Contexto extendido
 
-# Configuración de entrenamiento para modelo grande
-BATCH_SIZE = 8           # Reducido significativamente para manejar 1B parámetros
-GRAD_ACCUM_STEPS = 32    # Aumentado para batch efectivo de 256
+# --- CONFIGURACIÓN DE BATCH SIZE PARA MULTI-GPU (1B PARÁMETROS) ---
+# Configuración optimizada para 8x H200 (80GB VRAM cada una) y modelo de 1B parámetros
+# Total effective batch size: BATCH_SIZE * GRAD_ACCUM_STEPS * WORLD_SIZE
+
+if DISTRIBUTED:
+    # Para 8 GPUs H200 con modelo de 1B parámetros: batch size conservador por GPU
+    BATCH_SIZE = 24  # Por GPU - Total: 24 * 8 = 192 per step
+    GRAD_ACCUM_STEPS = 4  # Total effective batch: 192 * 4 = 768
+    if RANK == 0:
+        print(f"🔢 Configuración Multi-GPU (1B params):")
+        print(f"   📦 Batch size por GPU: {BATCH_SIZE}")
+        print(f"   🔄 Gradient accumulation steps: {GRAD_ACCUM_STEPS}")
+        print(f"   📊 Effective batch size: {BATCH_SIZE * GRAD_ACCUM_STEPS * WORLD_SIZE}")
+else:
+    # Para GPU única con modelo de 1B parámetros: batch size muy conservador
+    BATCH_SIZE = 8
+    GRAD_ACCUM_STEPS = 8  # Batch efectivo: 64
+    print(f"🔢 Configuración GPU única (1B params):")
+    print(f"   📦 Batch size: {BATCH_SIZE}")
+    print(f"   🔄 Gradient accumulation steps: {GRAD_ACCUM_STEPS}")
+    print(f"   📊 Effective batch size: {BATCH_SIZE * GRAD_ACCUM_STEPS}")
+
 EVAL_STEPS = 1000        # Evaluar cada 1000 pasos
 
 # Learning rate schedule optimizado para modelos grandes
-LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad
+LEARNING_RATE_MAX = 2e-3  # Reducido para estabilidad
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.1        # 10% de warmup
@@ -417,12 +708,14 @@ MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = True
 
-# Configuración del modelo para ~1B parámetros
+# --- CAMBIOS PARA EL MODELO 1B ---
+# Configuración escalada para aproximadamente 1B de parámetros
+# Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 1536,                    # Para ~1B params
-    "n_head": 24,                      # Más cabezas de atención
+    "n_embd": 1536,                    # Dimensión principal del modelo
+    "n_head": 24,                      # 24 cabezas de atención (1536/24 = 64 dim por cabeza)
     "n_layers": 24,                    # 24 capas HRM apiladas
-    "d_ff": 6144,                      # 4 * n_embd
+    "d_ff": 6144,                      # 4 * n_embd para FFN
     "dropout": 0.1,
     "halt_max_steps": 12,              # Más pasos para secuencias largas
     "ponder_loss_weight": 1e-2,
@@ -433,9 +726,318 @@ MODEL_PARAMS = {
 }
 
 T5_TOKENIZER_REPO = "t5-small"
-OUTPUT_DIR = "hrm_text1_c4_1b_output"
+
+# ==============================================================================
+# --- CONFIGURACIÓN DE RUTAS PERSONALIZADAS ---
+# ==============================================================================
+
+# CONFIGURACIÓN DE RUTA BASE (personalizable)
+# Puedes cambiar esta ruta para usar tu directorio preferido
+CUSTOM_BASE_PATH = None  # Dejar None para usar la ruta por defecto
+
+# Variable de entorno para ruta base (sobrescribe CUSTOM_BASE_PATH)
+# Usar: export HRM_OUTPUT_BASE="/tu/ruta" antes de ejecutar el script
+HRM_OUTPUT_BASE_ENV = os.environ.get('HRM_OUTPUT_BASE')
+
+# Determinar ruta base final
+def determine_output_base():
+    """Determina la ruta base según la configuración"""
+    # Prioridad: Variable de entorno > Ruta personalizada > Ruta por defecto
+    if HRM_OUTPUT_BASE_ENV:
+        return HRM_OUTPUT_BASE_ENV
+    elif CUSTOM_BASE_PATH:
+        return CUSTOM_BASE_PATH
+    else:
+        # Rutas por defecto según el entorno
+        if os.path.exists("/content/drive/MyDrive"):
+            return "/content/drive/MyDrive/HRM"  # Google Colab
+        elif os.path.exists(os.path.expanduser("~/Documents")):
+            return os.path.expanduser("~/Documents/HRM")  # Sistemas Unix/Mac
+        else:
+            return "./HRM_Models"  # Directorio actual como fallback
+
+# --- CONFIGURACIÓN PARA ENTRENAMIENTO SECUENCIAL ---
+# Flag para mantener el mismo directorio durante entrenamiento secuencial
+SEQUENTIAL_TRAINING = False  # Cambiar a True para mantener checkpoints entre datasets
+BASE_MODEL_NAME = "hrm_text1_c4_1b_output"  # Nombre base para entrenamiento secuencial
+
+# Configurar rutas finales
+OUTPUT_BASE = determine_output_base()
+
+# Determinar directorio de salida según modo de entrenamiento
+if SEQUENTIAL_TRAINING:
+    # Modo secuencial: usar directorio base fijo para mantener checkpoints
+    OUTPUT_DIR = os.path.join(OUTPUT_BASE, BASE_MODEL_NAME)
+    print(f"🔄 MODO SECUENCIAL ACTIVADO: Usando directorio fijo para checkpoints")
+else:
+    # Modo normal: directorio específico por dataset
+    dataset_suffix = DATASET_INFO['repo_suffix'].lower().replace('-', '_')
+    OUTPUT_DIR = os.path.join(OUTPUT_BASE, f"hrm_text1_{dataset_suffix}_1b_output")
+
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
+
+print(f"📁 Ruta base configurada: {OUTPUT_BASE}")
+print(f"📁 Directorio de salida: {OUTPUT_DIR}")
+if SEQUENTIAL_TRAINING:
+    print(f"📁 MODO SECUENCIAL: Los checkpoints se mantendrán entre cambios de dataset")
+else:
+    print(f"📁 MODO NORMAL: Directorio específico para dataset {ACTIVE_DATASET}")
+
+# ==============================================================================
+# --- FUNCIONES AUXILIARES PARA DATALOADER ---
+# ==============================================================================
+
+def get_dataloader_workers():
+    """Determina el número seguro de workers para DataLoader"""
+    try:
+        # Detectar si estamos en Google Colab
+        if 'google.colab' in str(get_ipython()):
+            print("Detectado entorno Google Colab. Usando num_workers=0 para evitar problemas de multiprocessing.")
+            return 0
+    except:
+        pass
+
+    try:
+        # Detectar si estamos en Jupyter/IPython
+        get_ipython()
+        print("Detectado entorno Jupyter/IPython. Usando num_workers=0 para mayor estabilidad.")
+        return 0
+    except:
+        pass
+
+    # Para sistemas normales, usar menos workers para evitar problemas
+    workers = min(2, mp.cpu_count())
+    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
+    return workers
+
+def cleanup_dataloaders():
+    """Función para limpiar DataLoaders al salir"""
+    global train_loader, val_loader
+    try:
+        if 'train_loader' in globals():
+            del train_loader
+        if 'val_loader' in globals():
+            del val_loader
+        torch.cuda.empty_cache()
+        print("DataLoaders limpiados correctamente.")
+    except:
+        pass
+
+# Registrar la función de limpieza
+atexit.register(cleanup_dataloaders)
+
+# ==============================================================================
+# --- FUNCIONES AUXILIARES PARA VALIDACIÓN DE CONFIGURACIÓN ---
+# ==============================================================================
+
+def validate_mix_ratios(mix_ratios, dataset_name=""):
+    """
+    Valida que los ratios de mezcla sumen 1.0 y que todos los datasets existan
+    """
+    if not mix_ratios:
+        return True, "No hay ratios de mezcla definidos"
+    
+    # Verificar que los datasets existen
+    available_datasets = set(DATASETS_CONFIG.keys()) - {"mixed", "mixed_es"} - set(CUSTOM_MIX_RATIOS.keys())
+    for dataset in mix_ratios.keys():
+        if dataset not in available_datasets:
+            return False, f"Dataset '{dataset}' no existe. Disponibles: {sorted(available_datasets)}"
+    
+    # Verificar que suman aproximadamente 1.0
+    total = sum(mix_ratios.values())
+    if abs(total - 1.0) > 0.01:  # Tolerancia de 1%
+        return False, f"Los ratios deben sumar 1.0, actualmente suman {total:.3f}"
+    
+    # Verificar que todos los valores son positivos
+    for dataset, ratio in mix_ratios.items():
+        if ratio <= 0:
+            return False, f"El ratio para '{dataset}' debe ser positivo, actual: {ratio}"
+    
+    return True, f"Configuración válida para {dataset_name}"
+
+def normalize_mix_ratios(mix_ratios):
+    """
+    Normaliza los ratios para que sumen exactamente 1.0
+    """
+    total = sum(mix_ratios.values())
+    if total == 0:
+        return mix_ratios
+    
+    return {dataset: ratio / total for dataset, ratio in mix_ratios.items()}
+
+def show_mix_summary(mix_ratios, dataset_name=""):
+    """
+    Muestra un resumen de la configuración de mezcla
+    """
+    print(f"\n=== CONFIGURACIÓN DE MEZCLA: {dataset_name.upper()} ===")
+    for dataset, ratio in sorted(mix_ratios.items()):
+        desc = DATASETS_CONFIG.get(dataset, {}).get("description", "Desconocido")
+        print(f"• {dataset:20} {ratio:>6.1%} - {desc}")
+    print("=" * 60)
+
+# ==============================================================================
+# --- FUNCIONES AUXILIARES PARA FILTRADO DE IDIOMA ---
+# ==============================================================================
+
+def detect_language(text, target_lang=None, confidence_threshold=0.7):
+    """
+    Detecta el idioma de un texto y retorna True si coincide con el target_lang
+    """
+    if not LANGUAGE_DETECTION_AVAILABLE or target_lang is None:
+        return True
+    
+    try:
+        # Usar solo una muestra del texto para eficiencia
+        sample_text = text[:500] if len(text) > 500 else text
+        
+        if len(sample_text.strip()) < 50:  # Texto muy corto
+            return True
+        
+        detected_lang = langdetect.detect(sample_text)
+        
+        # Para algunos idiomas comunes, usar códigos alternativos
+        lang_mapping = {
+            'es': ['es', 'ca'],  # Español incluye catalán
+            'en': ['en'],
+            'fr': ['fr'],
+            'de': ['de'],
+            'it': ['it'],
+            'pt': ['pt']
+        }
+        
+        target_langs = lang_mapping.get(target_lang, [target_lang])
+        return detected_lang in target_langs
+        
+    except Exception:
+        # En caso de error, incluir el texto
+        return True
+
+def create_language_filter_function(target_lang, relaxed=False):
+    """
+    Crea una función de filtro para un idioma específico
+    
+    Args:
+        target_lang: Idioma objetivo (ej: 'en', 'es')
+        relaxed: Si True, usa criterios menos restrictivos
+    """
+    def language_filter(examples):
+        if not LANGUAGE_DETECTION_AVAILABLE or target_lang is None:
+            return examples
+        
+        filtered_examples = {key: [] for key in examples.keys()}
+        
+        # Detectar campo de texto
+        text_field = None
+        for field in ['text', 'content', 'document']:
+            if field in examples:
+                text_field = field
+                break
+        
+        if text_field is None:
+            return examples
+        
+        # Configurar umbrales según el modo
+        if relaxed:
+            min_text_length = 10  # Más permisivo
+            fallback_threshold = 0.05  # Permitir hasta 95% de filtrado
+            print(f"    🔧 Modo relajado: min_length={min_text_length}, threshold={fallback_threshold}")
+        else:
+            min_text_length = 20
+            fallback_threshold = 0.1  # Permitir hasta 90% de filtrado
+        
+        # Filtrar por idioma con manejo de errores y fallback
+        total_texts = len(examples[text_field])
+        accepted_count = 0
+        
+        for i, text in enumerate(examples[text_field]):
+            should_include = True
+            
+            try:
+                if isinstance(text, str) and len(text.strip()) > min_text_length:
+                    should_include = detect_language(text, target_lang)
+                else:
+                    # Incluir textos muy cortos sin filtrar
+                    should_include = True
+            except Exception:
+                # En caso de error en detección, incluir el texto
+                should_include = True
+            
+            if should_include:
+                for key in examples.keys():
+                    filtered_examples[key].append(examples[key][i])
+                accepted_count += 1
+        
+        # Aplicar umbral de fallback
+        if total_texts > 0 and accepted_count / total_texts < fallback_threshold:
+            rejection_rate = (total_texts - accepted_count) / total_texts * 100
+            print(f"    ⚠️  Filtro muy restrictivo ({accepted_count}/{total_texts}, {rejection_rate:.1f}% rechazado)")
+            print(f"    🔄 Manteniendo batch original para evitar dataset vacío")
+            return examples
+        
+        return filtered_examples
+    
+    return language_filter
+
+# ==============================================================================
+# --- VALIDACIÓN Y CREACIÓN DE DIRECTORIOS ---
+# ==============================================================================
+
+def validate_and_create_output_dir(output_dir, force_create=True):
+    """
+    Valida y crea el directorio de salida con verificaciones de seguridad
+    """
+    try:
+        # Verificar que el directorio padre sea accesible
+        parent_dir = os.path.dirname(output_dir)
+        
+        if not os.path.exists(parent_dir):
+            if force_create:
+                print(f"🔨 Creando directorio padre: {parent_dir}")
+                os.makedirs(parent_dir, exist_ok=True)
+            else:
+                raise FileNotFoundError(f"Directorio padre no existe: {parent_dir}")
+        
+        # Crear directorio de salida
+        if not os.path.exists(output_dir):
+            print(f"🔨 Creando directorio de salida: {output_dir}")
+            os.makedirs(output_dir, exist_ok=True)
+        else:
+            print(f"✅ Directorio de salida existe: {output_dir}")
+        
+        # Verificar permisos de escritura
+        test_file = os.path.join(output_dir, ".write_test")
+        try:
+            with open(test_file, 'w') as f:
+                f.write("test")
+            os.remove(test_file)
+            print(f"✅ Permisos de escritura verificados")
+        except PermissionError:
+            raise PermissionError(f"Sin permisos de escritura en: {output_dir}")
+        
+        # Verificar espacio disponible (estimación básica)
+        try:
+            import shutil
+            free_space = shutil.disk_usage(output_dir).free
+            free_gb = free_space / (1024**3)
+            print(f"💾 Espacio libre disponible: {free_gb:.1f} GB")
+            
+            if free_gb < 5:
+                print(f"⚠️  ADVERTENCIA: Poco espacio libre ({free_gb:.1f} GB). Se recomiendan al menos 5 GB para modelo 1B")
+            elif free_gb < 20:
+                print(f"💡 Espacio moderado ({free_gb:.1f} GB). Para entrenamientos largos se recomiendan al menos 20 GB")
+        except:
+            print("ℹ️  No se pudo verificar el espacio disponible")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error configurando directorio de salida: {e}")
+        print(f"💡 Sugerencias:")
+        print(f"   - Verificar permisos del directorio padre")
+        print(f"   - Usar una ruta diferente con CUSTOM_BASE_PATH")
+        print(f"   - Verificar que tengas suficiente espacio en disco")
+        return False
 
 # ==============================================================================
 # --- INICIO DEL SCRIPT ---
@@ -451,10 +1053,28 @@ def set_seed(seed: int):
         torch.backends.cudnn.benchmark = False
 
 set_seed(SEED)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Dispositivo detectado: {device}")
+# Validar y crear directorios
+print("\n🔍 Validando configuración de directorios...")
+if not validate_and_create_output_dir(OUTPUT_DIR):
+    print("❌ No se pudo configurar el directorio de salida. Abortando.")
+    exit(1)
+
+print(f"✅ Configuración de directorios completada")
+print(f"📋 Archivos que se guardarán:")
+print(f"   🏆 Mejor modelo: {BEST_MODEL_PATH}")
+print(f"   💾 Checkpoints: {CHECKPOINT_PATH}")
+print(f"   📝 Modelo final: {OUTPUT_DIR}/")
+
+# Configurar device según si estamos en modo distribuido o no
+if DISTRIBUTED:
+    device = torch.device(f"cuda:{LOCAL_RANK}")
+    if RANK == 0:
+        print(f"🎯 Dispositivo distribuido: usando {WORLD_SIZE} GPUs")
+        print(f"   📍 Proceso {RANK} usando GPU {LOCAL_RANK}")
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🎯 Dispositivo único detectado: {device}")
 
 # Verificar memoria disponible
 if torch.cuda.is_available():
@@ -475,35 +1095,390 @@ if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
 print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
 
-print(f"Loading dataset '{DATASET_NAME}' in streaming mode.")
-raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True)
+# Usar las cifras específicas del dataset seleccionado y calcular muestras
+TOTAL_TRAIN_SAMPLES = DATASET_INFO["train_samples"]
+TOTAL_VAL_SAMPLES = DATASET_INFO["val_samples"]
 
-TOTAL_TRAIN_SAMPLES, TOTAL_VAL_SAMPLES = 364_868_892, 364_608
 num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
-num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 
-print(f"\n!!! USANDO UN SUBCONJUNTO DEL {DATASET_SUBSET_PERCENT}% DEL DATASET !!!")
+# Manejar datasets que no tienen split de validación predefinido
+if TOTAL_VAL_SAMPLES is None:
+    # Para datasets sin validación, usar el 1% del entrenamiento como validación
+    num_val_samples = max(1000, int(num_train_samples * 0.01))
+    print(f"Dataset sin split de validación. Usando {num_val_samples:,} ejemplos como validación.")
+else:
+    num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
+
+print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) in streaming mode.")
+
+if ACTIVE_DATASET == "mixed" or ACTIVE_DATASET in CUSTOM_MIX_RATIOS or "mix_ratios" in DATASET_INFO:
+    # Cargar y mezclar múltiples datasets
+    print("--- CARGANDO DATASETS PARA MEZCLA (MODELO 1B) ---")
+    mixed_datasets = {}
+    mix_ratios = DATASET_INFO["mix_ratios"]
+    
+    # Validar configuración de mezcla
+    is_valid, message = validate_mix_ratios(mix_ratios, ACTIVE_DATASET)
+    if not is_valid:
+        print(f"❌ ERROR EN CONFIGURACIÓN: {message}")
+        print("Usa normalize_mix_ratios() para corregir automáticamente")
+        exit(1)
+    else:
+        print(f"✅ {message}")
+    
+    # Normalizar ratios para asegurar que sumen 1.0
+    mix_ratios = normalize_mix_ratios(mix_ratios)
+    
+    # Mostrar resumen de la mezcla
+    show_mix_summary(mix_ratios, ACTIVE_DATASET)
+    
+    for dataset_key, ratio in mix_ratios.items():
+        if ratio > 0:
+            ds_config = DATASETS_CONFIG[dataset_key]
+            print(f"Cargando {dataset_key} ({ratio*100:.1f}%): {ds_config['description']}")
+            
+            if ds_config["config"]:
+                ds = load_dataset(ds_config["name"], ds_config["config"], streaming=True)
+            else:
+                ds = load_dataset(ds_config["name"], streaming=True)
+            
+            # Aplicar filtro de idioma específico del dataset si existe
+            ds_lang_filter = ds_config.get("language_filter")
+            if ds_lang_filter and LANGUAGE_DETECTION_AVAILABLE:
+                print(f"  Aplicando filtro de idioma {ds_lang_filter} a {dataset_key}")
+                try:
+                    # Para SlimPajama, usar un enfoque menos restrictivo
+                    if "slimpajama" in dataset_key.lower():
+                        print(f"    📝 Usando filtro menos restrictivo para {dataset_key}")
+                        lang_filter_func = create_language_filter_function(ds_lang_filter, relaxed=True)
+                        # Usar batch size aún más pequeño para SlimPajama
+                        ds["train"] = ds["train"].filter(lang_filter_func, batched=True, batch_size=20)
+                    else:
+                        lang_filter_func = create_language_filter_function(ds_lang_filter)
+                        ds["train"] = ds["train"].filter(lang_filter_func, batched=True, batch_size=50)
+                    
+                    if "validation" in ds:
+                        ds["validation"] = ds["validation"].filter(lang_filter_func, batched=True, batch_size=50)
+                        
+                except Exception as e:
+                    print(f"  ⚠️  Error aplicando filtro de idioma a {dataset_key}: {e}")
+                    print(f"  🔄 Continuando sin filtro de idioma para {dataset_key}")
+            elif ds_lang_filter and not LANGUAGE_DETECTION_AVAILABLE:
+                print(f"  ⚠️  Filtro de idioma solicitado para {dataset_key} pero langdetect no disponible")
+            
+            # Calcular muestras según la proporción
+            samples_for_this_ds = int(num_train_samples * ratio)
+            # Usar hash absoluto para evitar seeds negativos
+            dataset_seed = SEED + abs(hash(dataset_key)) % 1000000
+            
+            # Asegurar que el dataset tenga la estructura correcta antes de agregarlo
+            train_ds = ds["train"].take(samples_for_this_ds).shuffle(seed=dataset_seed, buffer_size=5_000)
+            
+            # Debug: mostrar las columnas del dataset
+            try:
+                sample = next(iter(train_ds))
+                print(f"  Columnas en {dataset_key}: {list(sample.keys())}")
+                
+                # Solo agregar al diccionario si el dataset es válido
+                mixed_datasets[dataset_key] = {
+                    "train": train_ds,
+                    "validation": ds.get("validation", ds["train"]).take(int(num_val_samples * ratio)) if ds.get("validation") else None
+                }
+                
+            except Exception as e:
+                print(f"  ⚠️  Error al obtener muestra de {dataset_key}: {e}")
+                print(f"  ❌ Excluyendo {dataset_key} de la mezcla debido al error")
+                continue
+    
+    # Combinar los datasets
+    from datasets import interleave_datasets
+    
+    # Función para estandarizar columnas de datasets
+    def standardize_dataset_columns(dataset, target_columns=None):
+        """Estandariza las columnas de un dataset para hacerlo compatible con otros"""
+        sample = next(iter(dataset))
+        current_columns = list(sample.keys())
+        
+        # Si no se especifican columnas objetivo, usar las columnas estándar de texto
+        if target_columns is None:
+            # Buscar campo de texto principal
+            text_field = None
+            for field in ['text', 'content', 'document']:
+                if field in current_columns:
+                    text_field = field
+                    break
+            
+            if text_field is None:
+                # Usar la primera columna que parezca texto
+                for field in current_columns:
+                    if isinstance(sample[field], str) and len(sample[field]) > 50:
+                        text_field = field
+                        break
+            
+            if text_field is None:
+                raise ValueError(f"No se encontró campo de texto en dataset con columnas: {current_columns}")
+            
+            # Mapear al campo estándar 'text'
+            if text_field != 'text':
+                dataset = dataset.rename_column(text_field, 'text')
+        
+        return dataset
+    
+    # Estandarizar todos los datasets antes de combinar
+    standardized_train_datasets = []
+    successfully_processed_keys = []  # Track which datasets were successfully processed
+    
+    for key in mix_ratios.keys():
+        if mix_ratios[key] > 0 and key in mixed_datasets:
+            try:
+                std_dataset = standardize_dataset_columns(mixed_datasets[key]["train"])
+                standardized_train_datasets.append(std_dataset)
+                successfully_processed_keys.append(key)
+                print(f"  ✅ Dataset {key} estandarizado correctamente")
+            except Exception as e:
+                print(f"  ❌ Error estandarizando {key}: {e}")
+                print(f"  ❌ Excluyendo {key} de la mezcla debido al error de estandarización")
+                # Continuar sin este dataset si hay error
+                continue
+    
+    if len(standardized_train_datasets) == 0:
+        raise ValueError("No se pudieron cargar datasets válidos para la mezcla")
+    
+    # Calcular probabilidades exactamente para los datasets que se procesaron exitosamente
+    valid_probs = [mix_ratios[key] for key in successfully_processed_keys]
+    prob_sum = sum(valid_probs)
+    train_probs = [p / prob_sum for p in valid_probs]
+    
+    print(f"  📊 Datasets exitosos: {successfully_processed_keys}")
+    print(f"  📊 Probabilidades normalizadas: {train_probs}")
+    print(f"  📊 Suma de probabilidades: {sum(train_probs):.6f}")
+    
+    print(f"Creando dataset mezclado con {len(standardized_train_datasets)} fuentes...")
+    
+    # Validación final antes de interleaving
+    if len(standardized_train_datasets) != len(train_probs):
+        raise ValueError(f"Mismatch: {len(standardized_train_datasets)} datasets pero {len(train_probs)} probabilidades")
+    
+    if abs(sum(train_probs) - 1.0) > 1e-6:
+        raise ValueError(f"Probabilidades no suman 1.0: {sum(train_probs)}")
+    
+    try:
+        raw_datasets = {
+            "train": interleave_datasets(standardized_train_datasets, probabilities=train_probs, seed=SEED, stopping_strategy="all_exhausted")
+        }
+        print("✅ Dataset de entrenamiento mezclado creado exitosamente")
+    except Exception as e:
+        print(f"❌ Error al crear dataset mezclado: {e}")
+        print("🔄 Intentando estrategia de respaldo...")
+        
+        # Estrategia de respaldo: usar solo el primer dataset válido
+        if len(standardized_train_datasets) > 0:
+            print(f"Usando solo el primer dataset como respaldo")
+            raw_datasets = {
+                "train": standardized_train_datasets[0]
+            }
+        else:
+            raise ValueError("No hay datasets válidos disponibles")
+    
+    # Para validación, tomar una muestra pequeña de cada dataset
+    val_datasets = []
+    val_probs = []
+    
+    for key in mix_ratios.keys():
+        if mix_ratios[key] > 0 and key in mixed_datasets and mixed_datasets[key]["validation"] is not None:
+            val_datasets.append(mixed_datasets[key]["validation"])
+            val_probs.append(mix_ratios[key])
+    
+    if val_datasets and len(val_datasets) > 1:
+        # Normalizar probabilidades para validación
+        val_probs_sum = sum(val_probs)
+        val_probs = [p / val_probs_sum for p in val_probs]
+        
+        try:
+            raw_datasets["validation"] = interleave_datasets(val_datasets, probabilities=val_probs, seed=SEED, stopping_strategy="all_exhausted")
+        except Exception as e:
+            print(f"⚠️  Error al crear dataset de validación mezclado: {e}")
+            print("Usando muestra del dataset de entrenamiento para validación")
+            raw_datasets["validation"] = raw_datasets["train"].take(num_val_samples)
+    elif val_datasets and len(val_datasets) == 1:
+        # Solo un dataset de validación disponible
+        raw_datasets["validation"] = val_datasets[0]
+    else:
+        # Si no hay validación, usar una muestra del entrenamiento
+        print("No hay datasets de validación disponibles. Usando muestra del entrenamiento.")
+        raw_datasets["validation"] = raw_datasets["train"].take(num_val_samples)
+    
+    print(f"Dataset mezclado creado con {len(standardized_train_datasets)} fuentes")
+    
+else:
+    # Cargar dataset único
+    if DATASET_INFO.get("type") == "kaggle":
+        # Lógica especial para datasets de Kaggle
+        if not KAGGLE_AVAILABLE:
+            print(f"❌ Error: Dataset de Kaggle seleccionado pero kagglehub no está disponible")
+            print("💡 Instala kagglehub con: pip install kagglehub")
+            exit(1)
+        
+        print(f"📥 Descargando dataset de Kaggle: {DATASET_NAME}")
+        try:
+            # Download latest version
+            kaggle_path = kagglehub.dataset_download(DATASET_NAME)
+            print(f"✅ Dataset descargado en: {kaggle_path}")
+            
+            # Cargar desde archivos locales
+            import glob
+            
+            # Buscar archivos de datos en el directorio descargado
+            data_files = glob.glob(os.path.join(kaggle_path, "*.json")) + \
+                        glob.glob(os.path.join(kaggle_path, "*.csv")) + \
+                        glob.glob(os.path.join(kaggle_path, "*.jsonl"))
+            
+            if not data_files:
+                raise FileNotFoundError(f"No se encontraron archivos de datos en {kaggle_path}")
+            
+            print(f"📁 Archivos encontrados: {[os.path.basename(f) for f in data_files]}")
+            
+            # Crear dataset de Hugging Face desde archivos locales
+            if data_files[0].endswith('.json') or data_files[0].endswith('.jsonl'):
+                raw_datasets = load_dataset('json', data_files={'train': data_files}, streaming=True)
+            elif data_files[0].endswith('.csv'):
+                raw_datasets = load_dataset('csv', data_files={'train': data_files}, streaming=True)
+            else:
+                raise ValueError(f"Formato de archivo no soportado: {data_files[0]}")
+                
+            # Crear split de validación si no existe
+            if 'validation' not in raw_datasets:
+                print("Creando split de validación a partir del entrenamiento...")
+                train_dataset = raw_datasets['train']
+                raw_datasets = {
+                    'train': train_dataset.skip(1000),
+                    'validation': train_dataset.take(1000)
+                }
+                
+        except Exception as e:
+            print(f"❌ Error descargando dataset de Kaggle: {e}")
+            print("🔄 Cambiando a dataset C4 como respaldo...")
+            raw_datasets = load_dataset("allenai/c4", "multilingual", streaming=True)
+    
+    else:
+        # Datasets normales de Hugging Face
+        if DATASET_CONFIG:
+            raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True)
+        else:
+            raw_datasets = load_dataset(DATASET_NAME, streaming=True)
+    
+    # Aplicar filtro de idioma si está especificado
+    language_filter = DATASET_INFO.get("language_filter")
+    if language_filter and LANGUAGE_DETECTION_AVAILABLE:
+        print(f"--- APLICANDO FILTRO DE IDIOMA: {language_filter.upper()} ---")
+        print("NOTA: Esto puede reducir significativamente la velocidad de carga inicial")
+        
+        # Crear función de filtro
+        lang_filter_func = create_language_filter_function(language_filter)
+        
+        # Aplicar filtro a los datasets
+        raw_datasets["train"] = raw_datasets["train"].filter(lang_filter_func, batched=True, batch_size=100)
+        if "validation" in raw_datasets:
+            raw_datasets["validation"] = raw_datasets["validation"].filter(lang_filter_func, batched=True, batch_size=100)
+    elif language_filter and not LANGUAGE_DETECTION_AVAILABLE:
+        print(f"⚠️  ADVERTENCIA: Filtro de idioma '{language_filter}' solicitado pero langdetect no está disponible")
+        print("💡 Puedes instalar langdetect con: pip install langdetect")
+        print("🔄 Continuando sin filtro de idioma...")
+
+
+language_filter_info = ""
+if DATASET_INFO.get("language_filter"):
+    language_filter_info = f" (FILTRADO: {DATASET_INFO['language_filter'].upper()})"
+
+print(f"\n!!! USANDO DATASET: {ACTIVE_DATASET.upper()} - {DATASET_INFO['description']}{language_filter_info} !!!")
+print(f"!!! USANDO UN SUBCONJUNTO DEL {DATASET_SUBSET_PERCENT}% DEL DATASET !!!")
 print(f"Tomando aprox. {num_train_samples:,} ejemplos de entrenamiento.")
 print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.\n")
 
-raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
-raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
+# Configurar los splits según el dataset
+if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
+    # Para datasets únicos, aplicar la lógica original
+    if "validation" in raw_datasets:
+        raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
+        raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
+    else:
+        # Para datasets sin split de validación, dividir el entrenamiento
+        print("Dividiendo dataset de entrenamiento para crear validación...")
+        total_for_split = num_train_samples + num_val_samples
+        train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+        
+        # Crear splits manualmente
+        raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
+        raw_datasets["validation"] = train_dataset.take(num_val_samples)
+# Para dataset mezclado, los splits ya están configurados
 
 def tokenize_function(examples):
-    texts = [str(text) + tokenizer.eos_token for text in examples["text"] 
-             if isinstance(text, str) and len(text) > 100]  # Filtro más estricto para calidad
+    """Función de tokenización flexible que maneja diferentes formatos de dataset"""
+    texts = []
+    
+    # Manejar diferentes campos de texto según el dataset
+    if "text" in examples:
+        # Formato estándar (C4, OpenWebText, Pile)
+        text_field = examples["text"]
+    elif "content" in examples:
+        # Algunos datasets usan 'content'
+        text_field = examples["content"]
+    elif "document" in examples:
+        # Algunos datasets usan 'document'
+        text_field = examples["document"]
+    else:
+        # Intentar encontrar el primer campo que parezca texto
+        for key in examples.keys():
+            if isinstance(examples[key][0], str) and len(examples[key][0]) > 50:
+                text_field = examples[key]
+                print(f"Usando campo '{key}' como texto")
+                break
+        else:
+            raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
+    
+    # Procesar textos con filtro más estricto para modelo 1B
+    for text in text_field:
+        if isinstance(text, str) and len(text) > 100:  # Filtro más estricto para calidad
+            texts.append(str(text) + tokenizer.eos_token)
+    
     return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
 
 print("Applying tokenization function (on-the-fly)...")
 tokenized_splits = {}
+
+# Detectar columnas a eliminar dinámicamente
+sample = next(iter(raw_datasets["train"]))
+columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
+print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
+print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+
 for split_name in ["train", "validation"]:
     tokenized_splits[split_name] = raw_datasets[split_name].map(
-        tokenize_function, batched=True, remove_columns=["text", "timestamp", "url"]
+        tokenize_function, 
+        batched=True, 
+        remove_columns=columns_to_remove
     ).with_format("torch")
 
-num_workers = min(os.cpu_count() or 2, 4)  # Reducido para ahorrar memoria
-train_loader = DataLoader(tokenized_splits["train"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
-val_loader = DataLoader(tokenized_splits["validation"], batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
+# ### FIX DATALOADER ###: Usar la función segura para determinar workers
+safe_num_workers = get_dataloader_workers()
+
+print(f"Creando DataLoaders con {safe_num_workers} workers...")
+train_loader = DataLoader(
+    tokenized_splits["train"],
+    batch_size=BATCH_SIZE,
+    num_workers=safe_num_workers,
+    pin_memory=True,
+    persistent_workers=False,
+    prefetch_factor=2 if safe_num_workers > 0 else None
+)
+val_loader = DataLoader(
+    tokenized_splits["validation"],
+    batch_size=BATCH_SIZE,
+    num_workers=safe_num_workers,
+    pin_memory=True,
+    persistent_workers=False,
+    prefetch_factor=2 if safe_num_workers > 0 else None
+)
 
 # Crear modelo
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
@@ -539,6 +1514,13 @@ scheduler = get_linear_schedule_with_warmup(
 # Mixed precision scaler
 scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
 
+# --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
+# Flag para activar/desactivar la modificación del learning rate al cargar checkpoint
+# USO: Cambiar MODIFY_LR_ON_LOAD a True y ajustar NEW_LEARNING_RATE según sea necesario
+# Esto permite continuar el entrenamiento con un learning rate diferente sin perder el progreso
+MODIFY_LR_ON_LOAD = False  # Cambiar a True para activar la modificación
+NEW_LEARNING_RATE = 1e-4   # Nuevo valor del learning rate cuando MODIFY_LR_ON_LOAD es True
+
 # Checkpoint loading
 start_epoch = 0
 start_step = 0
@@ -552,10 +1534,27 @@ if os.path.exists(CHECKPOINT_PATH):
     
     model_to_load = model._orig_mod if hasattr(model, '_orig_mod') else model
     model_to_load.load_state_dict(checkpoint['model_state_dict'])
+
+    # Modificar el learning rate si el flag está activado
+    if MODIFY_LR_ON_LOAD:
+        print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
+        # Modificar el learning rate en el checkpoint del optimizer antes de cargarlo
+        for param_group in checkpoint['optimizer_state_dict']['param_groups']:
+            param_group['lr'] = NEW_LEARNING_RATE
+        print(f"Learning rate modificado en el checkpoint del optimizer")
     
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     scaler.load_state_dict(checkpoint['scaler_state_dict'])
+    
+    # Verificar que el learning rate se aplicó correctamente
+    if MODIFY_LR_ON_LOAD:
+        actual_lr = optimizer.param_groups[0]['lr']
+        print(f"Learning rate después de cargar: {actual_lr:.6f}")
+        if abs(actual_lr - NEW_LEARNING_RATE) > 1e-8:
+            print(f"⚠️  Advertencia: El learning rate no se aplicó correctamente")
+        else:
+            print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
     
     start_epoch = checkpoint['epoch']
     start_step = checkpoint.get('step', 0)
@@ -582,6 +1581,27 @@ if os.path.exists(CHECKPOINT_PATH):
     print(f"Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
 else:
     print("--- No se encontró checkpoint. Empezando entrenamiento desde cero. ---")
+
+# === NUEVAS FUNCIONES DE ENTRENAMIENTO CON LIMPIEZA ===
+
+def main_training():
+    """Función principal de entrenamiento con manejo de limpieza"""
+    global train_loader, val_loader, global_step, best_val_loss, patience_counter
+
+    try:
+        # El bucle de entrenamiento original aquí
+        return True
+    finally:
+        # Limpieza explícita al finalizar
+        try:
+            if 'train_loader' in globals():
+                del train_loader
+            if 'val_loader' in globals():
+                del val_loader
+            torch.cuda.empty_cache()
+            print("Limpieza post-entrenamiento completada.")
+        except:
+            pass
 
 # Compilar modelo si está disponible
 if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
@@ -721,6 +1741,35 @@ model_to_save.save_pretrained(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
+# Subir modelo a Hugging Face Hub
+if HF_TOKEN:
+    try:
+        print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
+        api = HfApi()
+
+        # Subir el modelo usando push_to_hub
+        model_to_save.push_to_hub(
+            HF_REPO_ID,
+            token=HF_TOKEN,
+            commit_message=f"Upload HRM-Text1 1B model trained on C4 dataset"
+        )
+
+        # Subir el tokenizador
+        tokenizer.push_to_hub(
+            HF_REPO_ID,
+            token=HF_TOKEN,
+            commit_message=f"Upload tokenizer for HRM-Text1 1B model"
+        )
+
+        print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
+
+    except Exception as e:
+        print(f"❌ Error al subir el modelo a Hugging Face: {e}")
+        print("El modelo se guardó localmente pero no se pudo subir al Hub.")
+else:
+    print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+    print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
+
 # ==============================================================================
 # --- FUNCIÓN DE CHAT Y PRUEBAS ---
 # ==============================================================================
@@ -775,3 +1824,141 @@ print(f"Dimensión del modelo: {MODEL_PARAMS['n_embd']}")
 print(f"Cabezas de atención: {MODEL_PARAMS['n_head']}")
 print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
 print(f"Modelo guardado en: {OUTPUT_DIR}")
+
+print("\n--- Script completado exitosamente ---")
+
+# ==============================================================================
+# --- EJEMPLOS DE CONFIGURACIONES PERSONALIZADAS PARA MODELO 1B ---
+# ==============================================================================
+
+"""
+EJEMPLOS DE USO AVANZADO PARA MODELO 1B PARÁMETROS:
+
+1. CONFIGURACIÓN RÁPIDA PARA PRUEBAS:
+   DATASET_SUBSET_PERCENT = 1  # Solo 1% del dataset
+   ACTIVE_DATASET = "openwebtext"  # Dataset pequeño y rápido
+
+2. CONFIGURACIÓN PARA CALIDAD MÁXIMA (1B):
+   ACTIVE_DATASET = "high_quality_1b"  # Mezcla de alta calidad
+   DATASET_SUBSET_PERCENT = 15  # 15% del dataset
+
+3. CONFIGURACIÓN MULTILINGÜE BALANCEADA (1B):
+   ACTIVE_DATASET = "multilingual_balanced_1b"
+   DATASET_SUBSET_PERCENT = 12  # 12% del dataset
+
+4. CONFIGURACIÓN EXPERIMENTAL COMPLETA (1B):
+   ACTIVE_DATASET = "experimental_full_1b"
+   DATASET_SUBSET_PERCENT = 20  # 20% del dataset
+
+5. CONFIGURACIÓN PERSONALIZADA PARA INVESTIGACIÓN:
+   CUSTOM_MIX_RATIOS = {
+       "research_1b": {
+           "slimpajama_en": 0.4,  # 40% datos de alta calidad
+           "fineweb": 0.3,        # 30% contenido muy filtrado
+           "c4": 0.2,             # 20% diversidad multilingüe
+           "pile": 0.1            # 10% contenido especializado
+       }
+   }
+   ACTIVE_DATASET = "research_1b"
+
+6. CONFIGURACIÓN PARA ESPAÑOL (1B):
+   ACTIVE_DATASET = "mixed_es"
+   DATASET_SUBSET_PERCENT = 10
+
+7. CONFIGURACIÓN PARA CONVERSACIONES (1B):
+   ACTIVE_DATASET = "human_conversations"  # Dataset de Kaggle
+   DATASET_SUBSET_PERCENT = 50  # Usar más porcentaje para datasets pequeños
+
+8. CONFIGURACIÓN MIXTA CON CONVERSACIONES (1B):
+   ACTIVE_DATASET = "conversation_mix_1b"  # Mezcla enfocada en chat
+   DATASET_SUBSET_PERCENT = 15
+
+NOTAS IMPORTANTES PARA MODELO 1B:
+- Requiere al menos 16GB de VRAM para entrenamiento
+- Los porcentajes más altos requieren más tiempo y memoria
+- Las mezclas personalizadas deben sumar 1.0 (100%)
+- El script valida automáticamente las configuraciones
+- Usa "slimpajama" completo solo si tienes suficiente almacenamiento
+- El contexto de 2048 tokens requiere más memoria que el modelo 99M
+- Recomendado usar gradient_checkpointing=True para ahorrar memoria
+- Flash Attention mejora significativamente la velocidad si está disponible
+- Para usar datasets de Kaggle, instala: pip install kagglehub
+- Los datasets de conversaciones son ideales para modelos de chat
+
+ENTRENAMIENTO SECUENCIAL CON MÚLTIPLES DATASETS:
+
+⚠️  IMPORTANTE: CONFIGURACIÓN DE DIRECTORIO PARA ENTRENAMIENTO SECUENCIAL ⚠️
+
+PROBLEMA: Por defecto, cada dataset usa un directorio diferente, perdiendo checkpoints.
+SOLUCIÓN: Activar SEQUENTIAL_TRAINING = True
+
+Para continuar entrenando con otro dataset después de terminar:
+
+1. MÉTODO AUTOMÁTICO (Cambiar configuración):
+   - ANTES DE EMPEZAR: Configura SEQUENTIAL_TRAINING = True
+   - Termina el entrenamiento actual
+   - Cambia ACTIVE_DATASET al nuevo dataset deseado
+   - Ajusta MODIFY_LR_ON_LOAD = True y NEW_LEARNING_RATE = 1e-5
+   - Reduce NUM_EPOCHS = 1 para fine-tuning
+   - Ejecuta el script - cargará automáticamente el checkpoint
+
+2. MÉTODO MANUAL (Cargar modelo y continuar):
+   - Usa la función load_and_continue_training() (ver abajo)
+   - Especifica el modelo base y el nuevo dataset
+   - Control total sobre hiperparámetros
+
+3. EJEMPLOS DE SECUENCIAS RECOMENDADAS:
+   a) Entrenamiento base → Especialización:
+      "c4" → "human_conversations" (para chat)
+      "mixed" → "spanish" (para español)
+   
+   b) Calidad progresiva:
+      "c4" → "fineweb" → "human_conversations"
+   
+   c) Multilingüe escalonado:
+      "c4" → "mixed" → "multilingual_balanced_1b"
+
+4. CONFIGURACIÓN RECOMENDADA PARA FINE-TUNING:
+   - Learning rate: 1/10 del original (3e-4 → 3e-5)
+   - Épocas: 1-2 épocas máximo
+   - Subset: 50-100% del nuevo dataset
+   - Early stopping: Patience más baja (1-2)
+
+def load_and_continue_training(base_model_path, new_dataset, new_lr=1e-5, epochs=1):
+    \"\"\"
+    Función para continuar entrenamiento con un dataset diferente
+    
+    Args:
+        base_model_path: Ruta al modelo entrenado
+        new_dataset: Nombre del nuevo dataset a usar
+        new_lr: Nuevo learning rate (más bajo para fine-tuning)
+        epochs: Número de épocas para el nuevo dataset
+    \"\"\"
+    # Esta función se implementaría para cargar el modelo base
+    # y continuar entrenamiento con el nuevo dataset
+    pass
+
+EJEMPLO DE USO SECUENCIAL CORRECTO:
+
+CONFIGURACIÓN INICIAL (CRUCIAL):
+SEQUENTIAL_TRAINING = True  # ⭐ ESTO ES ESENCIAL
+ACTIVE_DATASET = "c4"
+NUM_EPOCHS = 2
+
+PASOS:
+1. python hrm_llm_training_c4_1b.py  # Primera ejecución con C4
+2. [Esperar a que termine completamente]
+3. Editar configuración sin cambiar SEQUENTIAL_TRAINING:
+   - ACTIVE_DATASET = "human_conversations"
+   - MODIFY_LR_ON_LOAD = True
+   - NEW_LEARNING_RATE = 1e-5
+   - NUM_EPOCHS = 1
+4. python hrm_llm_training_c4_1b.py  # Continuará desde checkpoint
+
+DIRECTORIOS USADOS:
+- SEQUENTIAL_TRAINING = True:  ./HRM_Models/hrm_text1_c4_1b_output/
+- SEQUENTIAL_TRAINING = False: ./HRM_Models/hrm_text1_[dataset]_1b_output/
+
+¡SIEMPRE usar SEQUENTIAL_TRAINING = True para entrenamiento continuo!
+
+"""
