@@ -758,11 +758,11 @@ BATCH_SIZE = 4           # Tamaño balanceado para modelo mediano (350M parámet
 GRAD_ACCUM_STEPS = 2    # Aumentado para batch efectivo de 256
 EVAL_STEPS = 1000        # Evaluar cada 1000 pasos
 
-# Learning rate schedule optimizado para modelos grandes
-LEARNING_RATE_MAX = 2e-3  # Reducido para estabilidad
-LEARNING_RATE_MIN = 1e-6
+# Learning rate schedule optimizado para datasets grandes con decaimiento suave
+LEARNING_RATE_MAX = 6e-4  # Reducido significativamente para datasets grandes
+LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
-WARMUP_RATIO = 0.1        # 10% de warmup
+WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -1681,11 +1681,14 @@ num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
 print(f"Total de pasos de entrenamiento (estimado): {num_training_steps:,}")
 print(f"Pasos de warmup: {num_warmup_steps:,}")
 
-# Scheduler con warmup
-scheduler = get_linear_schedule_with_warmup(
+# Scheduler coseno con warmup para decaimiento más suave
+from transformers import get_cosine_schedule_with_warmup
+
+scheduler = get_cosine_schedule_with_warmup(
     optimizer,
     num_warmup_steps=num_warmup_steps,
-    num_training_steps=num_training_steps
+    num_training_steps=num_training_steps,
+    num_cycles=0.5  # Media vuelta coseno para decaimiento más suave
 )
 
 # Mixed precision scaler
