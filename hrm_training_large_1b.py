@@ -71,38 +71,34 @@ except ImportError:
 # ==============================================================================
 
 def setup_distributed():
-    """Inicializa el entorno distribuido para entrenamiento multi-GPU"""
+    """Inicializar entrenamiento distribuido si está disponible"""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ["RANK"])
+        rank = int(os.environ['RANK'])
         world_size = int(os.environ['WORLD_SIZE'])
         local_rank = int(os.environ['LOCAL_RANK'])
+        
+        # Inicializar proceso distribuido
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        
+        print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
+        return True, rank, world_size, local_rank
     else:
-        print("🔧 Variables de entorno de distribución no encontradas. Configurando para GPU única.")
+        # Auto-configuración para múltiples GPUs usando DataParallel (más simple)
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            num_gpus = torch.cuda.device_count()
+            print(f"🚀 MÚLTIPLES GPUs DETECTADAS - USANDO DATAPARALLEL")
+            print(f"   📋 GPUs detectadas: {num_gpus}")
+            print(f"   🎯 Usando DataParallel para aprovechar todas las GPUs")
+            print(f"   💡 Para mejor rendimiento, considera usar: torchrun --nproc_per_node={num_gpus} {__file__}")
+            
+            # Retornar modo "pseudo-distribuido" que activará DataParallel
+            return True, 0, num_gpus, 0
+        elif torch.cuda.is_available():
+            print(f"📱 Single-GPU training mode (1 GPU detectada)")
+        else:
+            print("📱 CPU training mode (sin GPU detectada)")
         return False, 0, 1, 0
-    
-    # Verificar disponibilidad de GPUs
-    if not torch.cuda.is_available():
-        print("❌ CUDA no disponible para entrenamiento distribuido")
-        return False, 0, 1, 0
-    
-    if torch.cuda.device_count() < world_size:
-        print(f"❌ Se requieren {world_size} GPUs pero solo hay {torch.cuda.device_count()} disponibles")
-        return False, 0, 1, 0
-    
-    # Configurar device para el proceso actual
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-    
-    # Inicializar proceso distribuido
-    dist.init_process_group(backend="nccl")
-    
-    if rank == 0:
-        print(f"🚀 Entrenamiento distribuido iniciado:")
-        print(f"   📊 World size: {world_size}")
-        print(f"   🔢 Total de GPUs: {torch.cuda.device_count()}")
-        print(f"   🎯 Backend: nccl")
-    
-    return True, rank, world_size, local_rank
 
 def cleanup_distributed():
     """Limpia el entorno distribuido"""

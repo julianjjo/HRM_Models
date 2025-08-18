@@ -1146,8 +1146,47 @@ print(f"   🏆 Mejor modelo: {BEST_MODEL_PATH}")
 print(f"   💾 Checkpoints: {CHECKPOINT_PATH}")
 print(f"   📝 Modelo final: {OUTPUT_DIR}/")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Dispositivo detectado: {device}")
+# Configuración distribuida
+def setup_distributed():
+    """Inicializar entrenamiento distribuido si está disponible"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        
+        # Inicializar proceso distribuido
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        
+        print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
+        return True, rank, world_size, local_rank
+    else:
+        # Auto-configuración para múltiples GPUs usando DataParallel (más simple)
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            num_gpus = torch.cuda.device_count()
+            print(f"🚀 MÚLTIPLES GPUs DETECTADAS - USANDO DATAPARALLEL")
+            print(f"   📋 GPUs detectadas: {num_gpus}")
+            print(f"   🎯 Usando DataParallel para aprovechar todas las GPUs")
+            print(f"   💡 Para mejor rendimiento, considera usar: torchrun --nproc_per_node={num_gpus} {__file__}")
+            
+            # Retornar modo "pseudo-distribuido" que activará DataParallel
+            return True, 0, num_gpus, 0
+        elif torch.cuda.is_available():
+            print(f"📱 Single-GPU training mode (1 GPU detectada)")
+        else:
+            print("📱 CPU training mode (sin GPU detectada)")
+        return False, 0, 1, 0
+
+# Configurar distributed training
+is_distributed, rank, world_size, local_rank = setup_distributed()
+
+# Configurar dispositivo
+if is_distributed and 'RANK' in os.environ:
+    device = torch.device(f"cuda:{local_rank}")
+    print(f"Dispositivo distribuido: {device} (rank {rank})")
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Dispositivo detectado: {device}")
 
 # Verificar memoria disponible
 if torch.cuda.is_available():
@@ -1597,6 +1636,23 @@ val_loader = DataLoader(
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
 
+# Envolver modelo para multi-GPU
+if is_distributed:
+    if world_size > 1 and 'RANK' in os.environ:
+        # Entrenamiento distribuido real con torchrun
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
+    elif world_size > 1:
+        # Auto-inicialización multi-GPU con DataParallel
+        model = nn.DataParallel(model)
+        print(f"🔗 Modelo envuelto con DataParallel usando {torch.cuda.device_count()} GPUs")
+        print(f"   🎯 GPU principal: {device}")
+        print(f"   📋 GPUs utilizadas: {list(range(torch.cuda.device_count()))}")
+    else:
+        print(f"📱 Modelo en single-GPU mode: {device}")
+else:
+    print(f"📱 Modelo en single-GPU mode: {device}")
+
 # Contar parámetros
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Número de parámetros del modelo: {total_params:,}")
@@ -1754,6 +1810,10 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         ):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss / GRAD_ACCUM_STEPS
+            
+            # Para DataParallel, loss puede ser un tensor con múltiples valores
+            if hasattr(model, 'module') and loss.dim() > 0:
+                loss = loss.mean()
         
         # Backward pass
         if loss is not None and torch.isfinite(loss):
@@ -1810,16 +1870,27 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                 enabled=MIXED_PRECISION
             ):
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                
+                # Para DataParallel, loss puede ser un tensor con múltiples valores
+                val_loss = outputs.loss
+                if hasattr(model, 'module') and val_loss.dim() > 0:
+                    val_loss = val_loss.mean()
 
-            if outputs.loss is not None and torch.isfinite(outputs.loss):
-                total_val_loss += outputs.loss.item()
+            if val_loss is not None and torch.isfinite(val_loss):
+                total_val_loss += val_loss.item()
                 val_batches += 1
     
     if val_batches > 0:
         avg_val_loss = total_val_loss / val_batches
         print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
         
-        model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+        # Manejar tanto DDP (_orig_mod) como DataParallel (module)
+        if hasattr(model, '_orig_mod'):
+            model_to_save = model._orig_mod  # DDP
+        elif hasattr(model, 'module'):
+            model_to_save = model.module     # DataParallel
+        else:
+            model_to_save = model
         
         # Guardar mejor modelo
         if avg_val_loss < best_val_loss:
@@ -1852,7 +1923,13 @@ for epoch in range(start_epoch, NUM_EPOCHS):
 print("Entrenamiento finalizado.")
 
 # Guardar modelo final
-model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+# Manejar tanto DDP (_orig_mod) como DataParallel (module)
+if hasattr(model, '_orig_mod'):
+    model_to_save = model._orig_mod  # DDP
+elif hasattr(model, 'module'):
+    model_to_save = model.module     # DataParallel
+else:
+    model_to_save = model
 
 if os.path.exists(BEST_MODEL_PATH):
     print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
