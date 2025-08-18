@@ -14,10 +14,12 @@ from typing import List, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
+from torch.utils.data.dataloader import default_collate
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data.dataloader import default_collate
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_linear_schedule_with_warmup
 from tqdm.auto import tqdm
@@ -639,16 +641,16 @@ MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = True
 
-# --- CAMBIOS PARA EL MODELO 1B ---
-# Configuración escalada para aproximadamente 1B de parámetros
+# --- CONFIGURACIÓN PARA MODELO INTERMEDIO (~350M PARÁMETROS) ---
+# Configuración balanceada para un modelo de tamaño mediano
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 1536,                    # Dimensión principal del modelo
-    "n_head": 24,                      # 24 cabezas de atención (1536/24 = 64 dim por cabeza)
-    "n_layers": 24,                    # 24 capas HRM apiladas
-    "d_ff": 6144,                      # 4 * n_embd para FFN
+    "n_embd": 768,                     # Dimensión intermedia del modelo
+    "n_head": 12,                      # 12 cabezas de atención (768/12 = 64 dim por cabeza)
+    "n_layers": 16,                    # 16 capas HRM apiladas (modelo intermedio)
+    "d_ff": 3072,                      # 4 * n_embd para FFN
     "dropout": 0.1,
-    "halt_max_steps": 12,              # Más pasos para secuencias largas
+    "halt_max_steps": 10,              # Pasos intermedios
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
@@ -787,6 +789,43 @@ def show_mix_summary(mix_ratios, dataset_name=""):
         desc = DATASETS_CONFIG.get(dataset, {}).get("description", "Desconocido")
         print(f"• {dataset:20} {ratio:>6.1%} - {desc}")
     print("=" * 60)
+
+# ==============================================================================
+# --- FUNCIONES AUXILIARES PARA DATALOADER Y LIMPIEZA ---
+# ==============================================================================
+
+def get_num_workers():
+    """
+    Detecta automáticamente el número óptimo de workers para DataLoader
+    """
+    try:
+        # Detectar si estamos en Jupyter/IPython
+        get_ipython()
+        print("Detectado entorno Jupyter/IPython. Usando num_workers=0 para mayor estabilidad.")
+        return 0
+    except:
+        pass
+
+    # Para sistemas normales, usar menos workers para evitar problemas
+    workers = min(2, mp.cpu_count())
+    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
+    return workers
+
+def cleanup_dataloaders():
+    """Función para limpiar DataLoaders al salir"""
+    global train_loader, val_loader
+    try:
+        if 'train_loader' in globals():
+            del train_loader
+        if 'val_loader' in globals():
+            del val_loader
+        torch.cuda.empty_cache()
+        print("DataLoaders limpiados correctamente.")
+    except:
+        pass
+
+# Registrar la función de limpieza
+atexit.register(cleanup_dataloaders)
 
 # ==============================================================================
 # --- FUNCIONES AUXILIARES PARA FILTRADO DE IDIOMA ---
@@ -1365,7 +1404,7 @@ for split_name in ["train", "validation"]:
     ).with_format("torch")
 
 # ### FIX DATALOADER ###: Usar la función segura para determinar workers
-safe_num_workers = get_dataloader_workers()
+safe_num_workers = get_num_workers()
 
 # Función para verificar si es IterableDataset
 def is_iterable_dataset(dataset):
