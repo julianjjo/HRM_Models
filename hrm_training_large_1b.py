@@ -1207,7 +1207,17 @@ else:
 
 # Verificar memoria disponible
 if torch.cuda.is_available():
-    print(f"VRAM disponible: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    num_gpus = torch.cuda.device_count()
+    print(f"🔥 {num_gpus} GPU(s) detectada(s):")
+    
+    total_vram = 0
+    for i in range(num_gpus):
+        props = torch.cuda.get_device_properties(i)
+        vram_gb = props.total_memory / 1e9
+        total_vram += vram_gb
+        print(f"   GPU {i}: {props.name} - {vram_gb:.1f} GB VRAM")
+    
+    print(f"💾 VRAM total disponible: {total_vram:.1f} GB")
     torch.cuda.empty_cache()
 
 try:
