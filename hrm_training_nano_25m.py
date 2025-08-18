@@ -1153,13 +1153,16 @@ def setup_distributed():
         print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
         return True, rank, world_size, local_rank
     else:
-        # Opción de auto-configuración para múltiples GPUs
+        # Auto-configuración para múltiples GPUs usando DataParallel (más simple)
         if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            print("⚠️  MÚLTIPLES GPUs DETECTADAS pero sin variables de entorno distribuidas")
-            print(f"   📋 GPUs disponibles: {torch.cuda.device_count()}")
-            print("   💡 Para usar TODAS las GPUs, ejecuta con:")
-            print(f"      torchrun --nproc_per_node={torch.cuda.device_count()} {__file__}")
-            print("   🔄 Continuando con entrenamiento single-GPU...")
+            num_gpus = torch.cuda.device_count()
+            print(f"🚀 MÚLTIPLES GPUs DETECTADAS - USANDO DATAPARALLEL")
+            print(f"   📋 GPUs detectadas: {num_gpus}")
+            print(f"   🎯 Usando DataParallel para aprovechar todas las GPUs")
+            print(f"   💡 Para mejor rendimiento, considera usar: torchrun --nproc_per_node={num_gpus} {__file__}")
+            
+            # Retornar modo "pseudo-distribuido" que activará DataParallel
+            return True, 0, num_gpus, 0
         elif torch.cuda.is_available():
             print(f"📱 Single-GPU training mode (1 GPU detectada)")
         else:
@@ -1489,10 +1492,22 @@ val_loader = DataLoader(
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
 
-# Envolver modelo con DDP si está en modo distribuido
+# Envolver modelo para multi-GPU
 if is_distributed:
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-    print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
+    if world_size > 1 and 'RANK' in os.environ:
+        # Entrenamiento distribuido real con torchrun
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
+    elif world_size > 1:
+        # Auto-inicialización multi-GPU con DataParallel
+        model = nn.DataParallel(model)
+        print(f"🔗 Modelo envuelto con DataParallel usando {torch.cuda.device_count()} GPUs")
+        print(f"   🎯 GPU principal: {device}")
+        print(f"   📋 GPUs utilizadas: {list(range(torch.cuda.device_count()))}")
+    else:
+        print(f"📱 Modelo en single-GPU mode: {device}")
+else:
+    print(f"📱 Modelo en single-GPU mode: {device}")
 
 # Contar parámetros
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1547,7 +1562,13 @@ if os.path.exists(CHECKPOINT_PATH):
     print(f"--- Reanudando entrenamiento desde el checkpoint: {CHECKPOINT_PATH} ---")
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     
-    model_to_load = model._orig_mod if hasattr(model, '_orig_mod') else model
+    # Manejar tanto DDP (_orig_mod) como DataParallel (module)
+    if hasattr(model, '_orig_mod'):
+        model_to_load = model._orig_mod  # DDP
+    elif hasattr(model, 'module'):
+        model_to_load = model.module     # DataParallel
+    else:
+        model_to_load = model
     model_to_load.load_state_dict(checkpoint['model_state_dict'])
 
     if MODIFY_LR_ON_LOAD:
@@ -1589,18 +1610,6 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     for i, batch in enumerate(progress):
         # Para IterableDataset, usamos la estimación de pasos por época
         loader_len = estimated_steps_per_epoch if is_iterable else len(train_loader)
-        if (i + 1) % GRAD_ACCUM_STEPS != 0 and i + 1 < loader_len:
-             # Desactivar sync para DDP en pasos de acumulación
-             if isinstance(model, DDP):
-                 with model.no_sync():
-                     # Ejecutar forward y backward
-                     ... # El código de forward y backward va aquí
-             else:
-                 # Ejecutar forward y backward para modelo no DDP
-                 ... # El código de forward y backward va aquí
-        else:
-             # Ejecutar forward, backward y step del optimizador
-             ... # El código completo va aquí
 
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
@@ -1648,7 +1657,13 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         
         # Solo rank 0 guarda checkpoints y modelos
         if not is_distributed or rank == 0:
-            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+            # Manejar tanto DDP (_orig_mod) como DataParallel (module)
+            if hasattr(model, '_orig_mod'):
+                model_to_save = model._orig_mod  # DDP
+            elif hasattr(model, 'module'):
+                model_to_save = model.module     # DataParallel
+            else:
+                model_to_save = model
             
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -1684,7 +1699,13 @@ print("Entrenamiento finalizado.")
 
 # Solo el proceso principal (rank 0) debe guardar el modelo
 if not is_distributed or rank == 0:
-    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+    # Manejar tanto DDP (_orig_mod) como DataParallel (module)
+    if hasattr(model, '_orig_mod'):
+        model_to_save = model._orig_mod  # DDP
+    elif hasattr(model, 'module'):
+        model_to_save = model.module     # DataParallel
+    else:
+        model_to_save = model
     if os.path.exists(BEST_MODEL_PATH):
         print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
         model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
