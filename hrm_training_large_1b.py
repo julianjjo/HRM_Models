@@ -198,6 +198,7 @@ class HRMText1Config(PretrainedConfig):
                  rotary_embedding_base=10000,
                  use_flash_attention=True,   # NUEVO: Flash Attention
                  gradient_checkpointing=True, # NUEVO: Para ahorrar memoria
+                 h_update_period=5,          # NUEVO: H-module se actualiza cada 5 pasos
                  **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -214,6 +215,7 @@ class HRMText1Config(PretrainedConfig):
         self.rotary_embedding_base = rotary_embedding_base
         self.use_flash_attention = use_flash_attention
         self.gradient_checkpointing = gradient_checkpointing
+        self.h_update_period = h_update_period
 
 class RMSNorm(nn.Module):
     def __init__(self, n_embd, eps=1e-6):
@@ -340,17 +342,100 @@ class HRMBlock(nn.Module):
         return x
 
 class HRMInner(nn.Module):
+    """True HRM implementation with hierarchical temporal separation"""
     def __init__(self, config):
         super().__init__()
         self.H_module = HRMBlock(config)
         self.L_module = HRMBlock(config)
+        self.config = config
+        
+        # Q-learning components for adaptive computation
+        self.q_network = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 4),
+            nn.ReLU(),
+            nn.Linear(config.n_embd // 4, 2)  # [continue, halt]
+        )
+        
+        # Convergence threshold for L-module
+        self.convergence_threshold = 1e-3
+        self.max_l_steps = config.halt_max_steps
+        self.h_update_period = getattr(config, 'h_update_period', 5)  # T steps for large model
     
-    def forward(self, z_H, z_L, attn_mask=None, key_padding_mask=None):
-        z_L_input = z_L + z_H
-        z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
-        z_H_input = z_H + z_L_new
-        z_H_new = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
-        return z_H_new, z_L_new
+    def forward(self, z_H, z_L, step_count=0, attn_mask=None, key_padding_mask=None, training=True):
+        """Forward pass with proper HRM hierarchical reasoning"""
+        batch_size, seq_len, d_model = z_H.shape
+        device = z_H.device
+        
+        # Determine if this is an H-module update step
+        is_h_update_step = (step_count % self.h_update_period) == 0
+        
+        if is_h_update_step:
+            # H-module update: Run L-module to convergence, then update H-module
+            z_L_converged, l_steps, q_values = self._run_l_module_to_convergence(
+                z_H, z_L, attn_mask, key_padding_mask, training
+            )
+            
+            # Update H-module with converged L-module output
+            z_H_input = z_H + z_L_converged
+            z_H_new = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            
+            # Reset L-module (start fresh for next cycle)
+            z_L_new = torch.zeros_like(z_L)
+            
+            return z_H_new, z_L_new, {
+                'h_updated': True,
+                'l_steps': l_steps,
+                'q_values': q_values,
+                'convergence_achieved': True
+            }
+        else:
+            # L-module only step: Continue L-module processing
+            z_L_input = z_L + z_H.detach()  # Detach H to prevent gradients
+            z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            
+            return z_H, z_L_new, {
+                'h_updated': False,
+                'l_steps': 1,
+                'q_values': None,
+                'convergence_achieved': False
+            }
+    
+    def _run_l_module_to_convergence(self, z_H, z_L, attn_mask, key_padding_mask, training):
+        """Run L-module until convergence or max steps reached"""
+        z_L_current = z_L
+        z_L_prev = z_L
+        all_q_values = []
+        
+        for l_step in range(self.max_l_steps):
+            # L-module forward pass
+            z_L_input = z_L_current + z_H.detach()
+            z_L_next = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            
+            # Q-learning decision: should we continue or halt?
+            if training and l_step < self.max_l_steps - 1:
+                q_values = self.q_network(z_L_next)
+                all_q_values.append(q_values)
+                
+                # Epsilon-greedy exploration during training
+                epsilon = max(0.1, 1.0 - l_step * 0.1)
+                if torch.rand(1).item() < epsilon:
+                    action = torch.randint(0, 2, (1,)).item()
+                else:
+                    action = torch.argmax(q_values, dim=-1).mode().values.item()
+                
+                # If action is halt (1), break
+                if action == 1:
+                    break
+            
+            # Check convergence
+            diff = torch.norm(z_L_next - z_L_current, p=2, dim=-1).mean()
+            if diff < self.convergence_threshold:
+                break
+            
+            z_L_prev = z_L_current
+            z_L_current = z_L_next
+        
+        return z_L_current, l_step + 1, all_q_values
 
 class HRMText1(PreTrainedModel, GenerationMixin):
     config_class = HRMText1Config
@@ -428,39 +513,60 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         n_updates = torch.zeros((batch_size, seq_len), device=device)
         eps = 1e-6
         
-        # Procesamiento por capas con halt adaptativo
+        # True HRM processing with hierarchical temporal separation
+        step_count = 0
+        q_loss_accumulator = []
+        
         for layer_idx, (layer, halt_head) in enumerate(zip(self.layers, self.halt_heads)):
+            layer_remainders = torch.ones((batch_size, seq_len), device=device)
+            layer_total_z_H = torch.zeros_like(z_H)
+            layer_n_updates = torch.zeros((batch_size, seq_len), device=device)
+            
             for step in range(self.config.halt_max_steps):
-                # Calcular probabilidad de halt para esta capa
+                # Apply HRM layer with proper hierarchical separation
+                if self.gradient_checkpointing and self.training:
+                    # Need to wrap the layer call for checkpointing
+                    def layer_call(z_H_in, z_L_in, step_count_in):
+                        return layer(z_H_in, z_L_in, step_count=step_count_in, 
+                                   attn_mask=causal_mask, key_padding_mask=key_padding_mask, 
+                                   training=self.training)
+                    z_H, z_L, hrm_info = torch.utils.checkpoint.checkpoint(
+                        layer_call, z_H, z_L, step_count, use_reentrant=False
+                    )
+                else:
+                    z_H, z_L, hrm_info = layer(z_H, z_L, step_count=step_count,
+                                             attn_mask=causal_mask, key_padding_mask=key_padding_mask,
+                                             training=self.training)
+                
+                # Accumulate Q-learning losses for training
+                if hrm_info['q_values'] is not None:
+                    q_loss_accumulator.extend(hrm_info['q_values'])
+                
+                # Traditional ACT halt mechanism (for compatibility)
                 p_halt = halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
                 is_last_step = step == (self.config.halt_max_steps - 1)
                 halt_now_prob = p_halt if not is_last_step else torch.ones_like(p_halt)
                 
-                # Contribución ponderada
-                contrib = remainders * halt_now_prob
-                total_z_H = total_z_H + contrib.unsqueeze(-1) * z_H
+                # Weighted contribution
+                contrib = layer_remainders * halt_now_prob
+                layer_total_z_H = layer_total_z_H + contrib.unsqueeze(-1) * z_H
+                layer_n_updates = layer_n_updates + contrib
                 
                 if is_last_step:
                     break
                 
-                # Actualizar remainders y contar updates
-                remainders = remainders * (1 - p_halt)
-                n_updates = n_updates + 1
+                # Update remainders
+                layer_remainders = layer_remainders * (1 - p_halt)
+                step_count += 1
                 
-                # Early stopping si todos los tokens han decidido parar
-                if torch.all(remainders < eps):
+                # Early stopping if all tokens decided to halt
+                if torch.all(layer_remainders < eps):
                     break
-                
-                # Aplicar la capa HRM con gradient checkpointing si está habilitado
-                if self.gradient_checkpointing and self.training:
-                    z_H, z_L = torch.utils.checkpoint.checkpoint(
-                        layer, z_H, z_L, causal_mask, key_padding_mask, use_reentrant=False
-                    )
-                else:
-                    z_H, z_L = layer(z_H, z_L, attn_mask=causal_mask, key_padding_mask=key_padding_mask)
             
-            # Reiniciar para la siguiente capa (opcional, dependiendo del diseño)
-            remainders = torch.ones((batch_size, seq_len), device=device)
+            # Update z_H for next layer
+            z_H = layer_total_z_H
+            total_z_H = total_z_H + z_H  # Accumulate across layers
+            n_updates = n_updates + layer_n_updates
         
         # Normalización final y proyección
         total_z_H = self.final_norm(total_z_H)
@@ -477,8 +583,25 @@ class HRMText1(PreTrainedModel, GenerationMixin):
             # Pérdida de ponderación (ponder loss)
             ponder_loss = torch.mean(n_updates)
             
-            # Pérdida total
-            loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
+            # Q-learning loss para adaptive computation
+            q_learning_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            if q_loss_accumulator:
+                # Calcular recompensa basada en la pérdida de lenguaje (menor pérdida = mayor recompensa)
+                reward = -lm_loss.detach()  # Recompensa inversa a la pérdida
+                
+                # Q-learning loss: minimize TD error
+                for q_values in q_loss_accumulator:
+                    # Target Q-value basado en la recompensa
+                    target_q = reward.expand_as(q_values[..., 0])
+                    current_q = q_values[..., 1]  # Q-value for halt action
+                    q_learning_loss = q_learning_loss + F.mse_loss(current_q, target_q)
+                
+                q_learning_loss = q_learning_loss / len(q_loss_accumulator)
+            
+            # Pérdida total con Q-learning
+            loss = (lm_loss + 
+                   self.config.ponder_loss_weight * ponder_loss +
+                   0.01 * q_learning_loss)  # Small weight for Q-learning
         
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
@@ -723,6 +846,7 @@ MODEL_PARAMS = {
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
+    "h_update_period": 5,              # H-module se actualiza cada 5 pasos (para modelo grande)
 }
 
 T5_TOKENIZER_REPO = "t5-small"
