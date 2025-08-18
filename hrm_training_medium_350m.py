@@ -764,7 +764,7 @@ WARMUP_RATIO = 0.1        # 10% de warmup
 # Optimizaciones
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
-USE_GRADIENT_CHECKPOINTING = True
+USE_GRADIENT_CHECKPOINTING = False  # Temporarily disabled - HRM dynamic computation needs special handling
 
 # --- CONFIGURACIÓN PARA MODELO INTERMEDIO (~350M PARÁMETROS) ---
 # Configuración balanceada para un modelo de tamaño mediano
