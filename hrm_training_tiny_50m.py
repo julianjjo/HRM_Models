@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO EXTRA PEQUEÑO ~50M PARÁMETROS
-VERSIÓN ULTRA-COMPACTA: Configuración para ~50M parámetros con contexto reducido (256 tokens)
-- Arquitectura HRM ultra-eficiente (8 capas)
+HRM-Text1 Training Script - MODELO ULTRA-PEQUEÑO ~25M PARÁMETROS  
+VERSIÓN ULTRA-COMPACTA: Configuración para ~25M parámetros con contexto ultra-reducido (128 tokens)
+- Arquitectura HRM ultra-eficiente (6 capas, 256 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones de memoria para recursos muy limitados
-- Configuración optimizada para entrenamiento rápido en hardware limitado
+- Optimizaciones extremas de memoria para recursos muy limitados
+- Configuración optimizada para entrenamiento rápido en hardware básico
 """
 
 import os, random, contextlib, multiprocessing as mp, atexit, math
@@ -729,7 +729,7 @@ for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     }
 
 # Mostrar datasets disponibles
-print("=== DATASETS DISPONIBLES PARA MODELO EXTRA PEQUEÑO (50M) ===")
+print("=== DATASETS DISPONIBLES PARA MODELO ULTRA-PEQUEÑO (25M) ===")
 for key, config in DATASETS_CONFIG.items():
     marker = " ← SELECCIONADO" if key == ACTIVE_DATASET else ""
     print(f"• {key}: {config['description']}{marker}")
@@ -740,14 +740,14 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-50M"
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-25M"
 SEED = 42
 NUM_EPOCHS = 2             # Menos épocas para modelo extra pequeño
-BLOCK_SIZE = 256         # Contexto reducido para menos memoria (256 tokens)
+BLOCK_SIZE = 128         # Contexto ultra-reducido para minimizar memoria (128 tokens)
 
 # Configuración de entrenamiento para modelo extra pequeño (~50M parámetros)
-BATCH_SIZE = 4           # Batch reducido para menos memoria
-GRAD_ACCUM_STEPS = 8     # Batch efectivo de 32 mantenido
+BATCH_SIZE = 1           # Batch mínimo para reducir memoria drasticamente 
+GRAD_ACCUM_STEPS = 32    # Batch efectivo de 32 mantenido
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para modelos grandes
@@ -765,18 +765,18 @@ USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM com
 # Configuración ultra-compacta para recursos muy limitados
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 384,                     # Dimensión reducida para modelo extra pequeño
-    "n_head": 6,                       # 6 cabezas de atención (384/6 = 64 dim por cabeza)
-    "n_layers": 8,                     # Solo 8 capas HRM (muy compacto)
-    "d_ff": 1536,                      # 4 * n_embd para FFN (384 * 4)
+    "n_embd": 256,                     # Dimensión ultra-reducida (256)
+    "n_head": 4,                       # 4 cabezas de atención (256/4 = 64 dim por cabeza)
+    "n_layers": 6,                     # Solo 6 capas HRM (ultra-compacto)
+    "d_ff": 1024,                      # 4 * n_embd para FFN (256 * 4)
     "dropout": 0.1,
-    "halt_max_steps": 6,               # Menos pasos para modelo extra pequeño
+    "halt_max_steps": 4,               # Mínimos pasos para modelo ultra-pequeño
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
-    "h_update_period": 2,              # H-module se actualiza cada 2 pasos (más frecuente para compensar menos capas)
+    "h_update_period": 2,              # H-module se actualiza cada 2 pasos 
 }
 
 T5_TOKENIZER_REPO = "t5-small"
@@ -812,7 +812,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_small_50m_output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_tiny_25m_output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -1682,9 +1682,11 @@ def main_training():
             pass
 
 # Compilar modelo si está disponible
-if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
-    print("Compilando el modelo con torch.compile()...")
-    model = torch.compile(model)
+# Deshabilitado torch.compile para reducir uso de memoria
+# if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
+#     print("Compilando el modelo con torch.compile()...")
+#     model = torch.compile(model)
+print("torch.compile() deshabilitado para optimizar memoria")
 
 # ==============================================================================
 # --- BUCLE DE ENTRENAMIENTO ---
@@ -1725,6 +1727,10 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                 optimizer.zero_grad()
                 scheduler.step()
                 global_step += 1
+                
+                # Limpiar cache de GPU cada pocas iteraciones
+                if global_step % 10 == 0:
+                    torch.cuda.empty_cache()
                 
                 # Checkpoint periódico
                 if global_step % CHECKPOINT_STEPS == 0:
@@ -1876,8 +1882,9 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperatu
 print("\n--- Probando la Generación del Modelo Final ---")
 try:
     inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
-    if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
-        inference_model = torch.compile(inference_model)
+    # torch.compile deshabilitado para ahorrar memoria
+    # if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
+    #     inference_model = torch.compile(inference_model)
     
     prompts = [
         "The cat sat on the", 
