@@ -1618,6 +1618,10 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss / GRAD_ACCUM_STEPS
+            
+            # Para DataParallel, loss puede ser un tensor con múltiples valores
+            if hasattr(model, 'module') and loss.dim() > 0:
+                loss = loss.mean()
         
         if loss is not None and torch.isfinite(loss):
             scaler.scale(loss).backward()
@@ -1646,9 +1650,14 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             
             with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                
+                # Para DataParallel, loss puede ser un tensor con múltiples valores
+                val_loss = outputs.loss
+                if hasattr(model, 'module') and val_loss.dim() > 0:
+                    val_loss = val_loss.mean()
 
-            if outputs.loss is not None and torch.isfinite(outputs.loss):
-                total_val_loss += outputs.loss.item()
+            if val_loss is not None and torch.isfinite(val_loss):
+                total_val_loss += val_loss.item()
                 val_batches += 1
     
     if val_batches > 0:
