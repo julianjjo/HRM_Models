@@ -1315,6 +1315,10 @@ def tokenize_function(examples):
         if isinstance(text, str) and len(text) > 100:
             texts.append(text + tokenizer.eos_token)
     
+    # Si no se encontraron textos válidos, usar un texto de placeholder para evitar listas vacías
+    if not texts:
+        texts = [tokenizer.eos_token * 10]  # Texto de placeholder para evitar errores de índice
+    
     # Tokenizar y devolver solo los campos necesarios para el entrenamiento
     tokenized = tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
     

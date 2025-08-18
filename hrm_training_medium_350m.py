@@ -1488,71 +1488,90 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
 def tokenize_function(examples):
     """Función de tokenización flexible que maneja diferentes formatos de dataset"""
     texts = []
+    text_field_name = next((f for f in ['text', 'content', 'document'] if f in examples), None)
+    if not text_field_name:
+        raise ValueError(f"No se encontró campo de texto válido. Campos: {list(examples.keys())}")
     
-    # Manejar diferentes campos de texto según el dataset
-    if "text" in examples:
-        # Formato estándar (C4, OpenWebText, Pile)
-        text_field = examples["text"]
-    elif "content" in examples:
-        # Algunos datasets usan 'content'
-        text_field = examples["content"]
-    elif "document" in examples:
-        # Algunos datasets usan 'document'
-        text_field = examples["document"]
-    else:
-        # Intentar encontrar el primer campo que parezca texto
-        for key in examples.keys():
-            if isinstance(examples[key][0], str) and len(examples[key][0]) > 50:
-                text_field = examples[key]
-                print(f"Usando campo '{key}' como texto")
-                break
-        else:
-            raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
+    for text in examples[text_field_name]:
+        if isinstance(text, str) and len(text) > 100:
+            texts.append(text + tokenizer.eos_token)
     
-    # Procesar textos con filtro más estricto para modelo 1B
-    for text in text_field:
-        if isinstance(text, str) and len(text) > 100:  # Filtro más estricto para calidad
-            texts.append(str(text) + tokenizer.eos_token)
+    # Si no se encontraron textos válidos, usar un texto de placeholder para evitar listas vacías
+    if not texts:
+        texts = [tokenizer.eos_token * 10]  # Texto de placeholder para evitar errores de índice
     
-    return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
+    # Tokenizar y devolver solo los campos necesarios para el entrenamiento
+    tokenized = tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
+    
+    # Para datasets streaming, devolver solo los campos del tokenizer
+    return {
+        'input_ids': tokenized['input_ids'],
+        'attention_mask': tokenized['attention_mask']
+    }
 
-print("Applying tokenization function (on-the-fly)...")
-tokenized_splits = {}
+print("Applying tokenization function...")
+# Verificar que los datasets se cargaron correctamente
+if raw_datasets is None or raw_datasets.get("train") is None:
+    raise ValueError("❌ Error: Los datasets no se cargaron correctamente. raw_datasets['train'] es None.")
 
-# Detectar columnas a eliminar dinámicamente
-sample = next(iter(raw_datasets["train"]))
-columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
-print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
-print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+print(f"Tipo de dataset: {type(raw_datasets['train'])}")
 
-for split_name in ["train", "validation"]:
-    tokenized_splits[split_name] = raw_datasets[split_name].map(
-        tokenize_function, 
-        batched=True, 
-        remove_columns=columns_to_remove
-    ).with_format("torch")
+# Para datasets streaming, necesitamos manejar las columnas de manera diferente
+if hasattr(raw_datasets["train"], 'features') and raw_datasets["train"].features is not None:
+    # Dataset no streaming (tiene .features)
+    columns_to_remove = list(raw_datasets["train"].features.keys())
+    print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+    tokenized_splits = {}
+    for split_name in ["train", "validation"]:
+        tokenized_splits[split_name] = raw_datasets[split_name].map(
+            tokenize_function,
+            batched=True,
+            remove_columns=columns_to_remove,
+            num_proc=max(1, mp.cpu_count() // 2)
+        )
+else:
+    # Dataset streaming (IterableDataset)
+    print("Dataset streaming detectado - aplicando tokenización sin remove_columns")
+    tokenized_splits = {
+        "train": raw_datasets["train"].map(tokenize_function, batched=True),
+        "validation": raw_datasets["validation"].map(tokenize_function, batched=True)
+    }
 
-# ### FIX DATALOADER ###: Usar la función segura para determinar workers
 safe_num_workers = get_num_workers()
-
-# Función para verificar si es IterableDataset
-def is_iterable_dataset(dataset):
-    return isinstance(dataset, IterableDataset)
-
-# Detectar si los datasets son iterables
-train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
-val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
-
 print(f"Creando DataLoaders con {safe_num_workers} workers...")
+
+# Detectar si es IterableDataset para ajustar parámetros
+is_iterable = hasattr(tokenized_splits["train"], '__iter__') and not hasattr(tokenized_splits["train"], '__len__')
+train_shuffle = False if is_iterable else True
+
+print(f"Dataset iterable detectado: {is_iterable}, shuffle para entrenamiento: {train_shuffle}")
+
+# Función de collate personalizada para filtrar tipos no compatibles
+def custom_collate_fn(batch):
+    """Collate personalizado que filtra campos no compatibles con PyTorch"""
+    # Solo procesar los campos que necesitamos para el entrenamiento
+    filtered_batch = []
+    for item in batch:
+        # Filtrar solo los campos necesarios: input_ids, attention_mask
+        filtered_item = {}
+        for key in ['input_ids', 'attention_mask']:
+            if key in item and isinstance(item[key], (torch.Tensor, list, int, float)):
+                # Asegurar que las listas se conviertan a tensores
+                if isinstance(item[key], list):
+                    filtered_item[key] = torch.tensor(item[key])
+                else:
+                    filtered_item[key] = item[key]
+        filtered_batch.append(filtered_item)
+    
+    return default_collate(filtered_batch)
+
 train_loader = DataLoader(
     tokenized_splits["train"],
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
-    persistent_workers=False,
-    prefetch_factor=2 if safe_num_workers > 0 else None,
-    shuffle=False,  # False para datasets iterables
-    collate_fn=default_collate
+    shuffle=train_shuffle,
+    collate_fn=custom_collate_fn
 )
 
 val_loader = DataLoader(
@@ -1560,10 +1579,8 @@ val_loader = DataLoader(
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
-    persistent_workers=False,
-    prefetch_factor=2 if safe_num_workers > 0 else None,
     shuffle=False,
-    collate_fn=default_collate
+    collate_fn=custom_collate_fn
 )
 
 # Crear modelo
@@ -1585,10 +1602,18 @@ optimizer = AdamW(
 )
 
 # Calcular pasos de entrenamiento
-num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
+if is_iterable:
+    # Para IterableDataset, calculamos basado en las muestras objetivo
+    estimated_steps_per_epoch = num_train_samples // BATCH_SIZE
+    num_training_steps = estimated_steps_per_epoch * NUM_EPOCHS
+    print(f"Dataset iterable: calculando pasos estimados basado en {num_train_samples:,} muestras")
+else:
+    # Para datasets regulares, usar cálculo tradicional
+    num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
+
 num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
-print(f"Total de pasos de entrenamiento: {num_training_steps}")
-print(f"Pasos de warmup: {num_warmup_steps}")
+print(f"Total de pasos de entrenamiento (estimado): {num_training_steps:,}")
+print(f"Pasos de warmup: {num_warmup_steps:,}")
 
 # Scheduler con warmup
 scheduler = get_linear_schedule_with_warmup(
