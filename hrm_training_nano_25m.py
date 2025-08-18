@@ -1174,8 +1174,8 @@ if TOTAL_VAL_SAMPLES is None:
 else:
     num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 
-print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) (non-streaming).")
-print("⚠️ ADVERTENCIA: La carga no streaming puede tardar y consumir mucha RAM/disco.")
+print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) (streaming).")
+print("✅ MODO STREAMING: Carga eficiente de memoria activada.")
 
 if ACTIVE_DATASET == "mixed" or ACTIVE_DATASET in CUSTOM_MIX_RATIOS or "mix_ratios" in DATASET_INFO:
     # Cargar y mezclar múltiples datasets
@@ -1200,7 +1200,7 @@ if ACTIVE_DATASET == "mixed" or ACTIVE_DATASET in CUSTOM_MIX_RATIOS or "mix_rati
             print(f"Cargando {dataset_key} ({ratio*100:.1f}%): {ds_config['description']}")
 
             try:
-                ds = load_dataset(ds_config["name"], ds_config["config"] or None)
+                ds = load_dataset(ds_config["name"], ds_config["config"] or None, streaming=True)
             except Exception as e:
                 print(f"  ❌ Error cargando {dataset_key}: {e}. Omitiendo.")
                 continue
