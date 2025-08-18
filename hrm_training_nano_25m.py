@@ -1352,12 +1352,19 @@ else:
 
 safe_num_workers = get_num_workers()
 print(f"Creando DataLoaders con {safe_num_workers} workers...")
+
+# Detectar si es IterableDataset para ajustar parámetros
+is_iterable = hasattr(tokenized_splits["train"], '__iter__') and not hasattr(tokenized_splits["train"], '__len__')
+train_shuffle = False if is_iterable else True
+
+print(f"Dataset iterable detectado: {is_iterable}, shuffle para entrenamiento: {train_shuffle}")
+
 train_loader = DataLoader(
     tokenized_splits["train"],
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
-    shuffle=True,
+    shuffle=train_shuffle,
     collate_fn=default_collate
 )
 
