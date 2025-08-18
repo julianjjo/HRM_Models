@@ -482,6 +482,9 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         # Compartir pesos entre token embeddings y lm_head
         self.lm_head.weight = self.token_embeddings.weight
         
+        # Inicializar gradient checkpointing
+        self.gradient_checkpointing = config.gradient_checkpointing
+        
         # Habilitar gradient checkpointing si está configurado
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
