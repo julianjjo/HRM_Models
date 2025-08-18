@@ -1306,20 +1306,20 @@ else:
 
 def tokenize_function(examples):
     """Función de tokenización flexible que maneja diferentes formatos de dataset"""
-    texts = []
     text_field_name = next((f for f in ['text', 'content', 'document'] if f in examples), None)
     if not text_field_name:
         raise ValueError(f"No se encontró campo de texto válido. Campos: {list(examples.keys())}")
     
+    # Procesar cada ejemplo individualmente para mantener la correspondencia
+    texts = []
     for text in examples[text_field_name]:
         if isinstance(text, str) and len(text) > 100:
             texts.append(text + tokenizer.eos_token)
+        else:
+            # Si el texto no es válido, usar placeholder
+            texts.append(tokenizer.eos_token * 10)
     
-    # Si no se encontraron textos válidos, usar un texto de placeholder para evitar listas vacías
-    if not texts:
-        texts = [tokenizer.eos_token * 10]  # Texto de placeholder para evitar errores de índice
-    
-    # Tokenizar y devolver solo los campos necesarios para el entrenamiento
+    # Tokenizar todos los textos
     tokenized = tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
     
     # Para datasets streaming, devolver solo los campos del tokenizer
