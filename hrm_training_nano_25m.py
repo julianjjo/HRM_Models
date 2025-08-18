@@ -1180,65 +1180,92 @@ print("✅ MODO STREAMING: Carga eficiente de memoria activada.")
 if ACTIVE_DATASET == "mixed" or ACTIVE_DATASET in CUSTOM_MIX_RATIOS or "mix_ratios" in DATASET_INFO:
     # Cargar y mezclar múltiples datasets
     print("--- CARGANDO DATASETS PARA MEZCLA (MODELO PEQUEÑO 100M) ---")
-    list_of_train_datasets = []
-    list_of_val_datasets = []
-    mix_ratios = DATASET_INFO["mix_ratios"]
+    
+    try:
+        list_of_train_datasets = []
+        list_of_val_datasets = []
+        mix_ratios = DATASET_INFO["mix_ratios"]
 
-    is_valid, message = validate_mix_ratios(mix_ratios, ACTIVE_DATASET)
-    if not is_valid:
-        print(f"❌ ERROR EN CONFIGURACIÓN: {message}")
-        exit(1)
-    else:
-        print(f"✅ {message}")
+        is_valid, message = validate_mix_ratios(mix_ratios, ACTIVE_DATASET)
+        if not is_valid:
+            print(f"❌ ERROR EN CONFIGURACIÓN: {message}")
+            exit(1)
+        else:
+            print(f"✅ {message}")
 
-    mix_ratios = normalize_mix_ratios(mix_ratios)
-    show_mix_summary(mix_ratios, ACTIVE_DATASET)
+        mix_ratios = normalize_mix_ratios(mix_ratios)
+        show_mix_summary(mix_ratios, ACTIVE_DATASET)
 
-    for dataset_key, ratio in mix_ratios.items():
-        if ratio > 0:
-            ds_config = DATASETS_CONFIG[dataset_key]
-            print(f"Cargando {dataset_key} ({ratio*100:.1f}%): {ds_config['description']}")
+        for dataset_key, ratio in mix_ratios.items():
+            if ratio > 0:
+                ds_config = DATASETS_CONFIG[dataset_key]
+                print(f"Cargando {dataset_key} ({ratio*100:.1f}%): {ds_config['description']}")
 
-            try:
-                ds = load_dataset(ds_config["name"], ds_config["config"] or None, streaming=True)
-            except Exception as e:
-                print(f"  ❌ Error cargando {dataset_key}: {e}. Omitiendo.")
-                continue
+                try:
+                    ds = load_dataset(ds_config["name"], ds_config["config"] or None, streaming=True)
+                except Exception as e:
+                    print(f"  ❌ Error cargando {dataset_key}: {e}. Omitiendo.")
+                    continue
 
-            ds_lang_filter = ds_config.get("language_filter")
-            if ds_lang_filter and LANGUAGE_DETECTION_AVAILABLE:
-                print(f"  Aplicando filtro de idioma {ds_lang_filter} a {dataset_key}")
-                lang_filter_func = create_language_filter_function(ds_lang_filter, relaxed="slimpajama" in dataset_key.lower())
-                ds = ds.filter(lang_filter_func, batched=True, batch_size=100)
+                ds_lang_filter = ds_config.get("language_filter")
+                if ds_lang_filter and LANGUAGE_DETECTION_AVAILABLE:
+                    print(f"  Aplicando filtro de idioma {ds_lang_filter} a {dataset_key}")
+                    lang_filter_func = create_language_filter_function(ds_lang_filter, relaxed="slimpajama" in dataset_key.lower())
+                    ds = ds.filter(lang_filter_func, batched=True, batch_size=100)
 
-            # Usar hash absoluto para evitar seeds negativos
-            dataset_seed = SEED + abs(hash(dataset_key)) % 1000000
-            
-            # Sub-muestrear train (para streaming, usar take en lugar de select)
-            samples_for_this_ds = int(num_train_samples * ratio)
-            train_ds = ds["train"].shuffle(seed=dataset_seed).take(samples_for_this_ds)
-            list_of_train_datasets.append(train_ds)
+                # Usar hash absoluto para evitar seeds negativos
+                dataset_seed = SEED + abs(hash(dataset_key)) % 1000000
+                
+                # Sub-muestrear train (para streaming, usar take en lugar de select)
+                samples_for_this_ds = int(num_train_samples * ratio)
+                train_ds = ds["train"].shuffle(seed=dataset_seed).take(samples_for_this_ds)
+                list_of_train_datasets.append(train_ds)
 
-            # Sub-muestrear validation
-            val_samples_for_this_ds = int(num_val_samples * ratio)
-            if "validation" in ds:
-                 val_ds = ds["validation"].shuffle(seed=dataset_seed).take(val_samples_for_this_ds)
-                 list_of_val_datasets.append(val_ds)
+                # Sub-muestrear validation
+                val_samples_for_this_ds = int(num_val_samples * ratio)
+                if "validation" in ds:
+                     val_ds = ds["validation"].shuffle(seed=dataset_seed).take(val_samples_for_this_ds)
+                     list_of_val_datasets.append(val_ds)
 
-    if not list_of_train_datasets:
-        raise ValueError("No se pudieron cargar datasets válidos para la mezcla.")
+        if not list_of_train_datasets:
+            raise ValueError("No se pudieron cargar datasets válidos para la mezcla.")
 
-    raw_datasets = {
-        "train": concatenate_datasets(list_of_train_datasets).shuffle(seed=SEED),
-        "validation": concatenate_datasets(list_of_val_datasets).shuffle(seed=SEED) if list_of_val_datasets else None
-    }
+        raw_datasets = {
+            "train": concatenate_datasets(list_of_train_datasets).shuffle(seed=SEED),
+            "validation": concatenate_datasets(list_of_val_datasets).shuffle(seed=SEED) if list_of_val_datasets else None
+        }
 
-    if raw_datasets["validation"] is None:
-        print("Creando split de validación a partir de la mezcla de entrenamiento.")
-        split_ds = raw_datasets["train"].train_test_split(test_size=num_val_samples, seed=SEED)
-        raw_datasets = {"train": split_ds["train"], "validation": split_ds["test"]}
+        if raw_datasets["validation"] is None:
+            print("Creando split de validación a partir de la mezcla de entrenamiento.")
+            split_ds = raw_datasets["train"].train_test_split(test_size=num_val_samples, seed=SEED)
+            raw_datasets = {"train": split_ds["train"], "validation": split_ds["test"]}
 
-    print(f"Dataset mezclado creado con {len(list_of_train_datasets)} fuentes.")
+        print(f"Dataset mezclado creado con {len(list_of_train_datasets)} fuentes.")
+    
+    except Exception as e:
+        print(f"❌ Error cargando datasets mixtos: {e}")
+        print("🔄 Cambiando a dataset individual como fallback: C4")
+        # Fallback a C4 cuando falle la mezcla
+        raw_datasets = load_dataset("allenai/c4", "multilingual", streaming=True)
+        
+        # Aplicar sub-muestreo y splits para el fallback
+        language_filter = None  # C4 ya es multilingüe
+        if language_filter and LANGUAGE_DETECTION_AVAILABLE:
+            print(f"--- APLICANDO FILTRO DE IDIOMA: {language_filter.upper()} ---")
+            lang_filter_func = create_language_filter_function(language_filter)
+            raw_datasets = raw_datasets.filter(lang_filter_func, batched=True, batch_size=100)
+        
+        # Para datasets streaming con validación separada
+        if "validation" in raw_datasets and raw_datasets["validation"] is not None:
+            train_ds = raw_datasets["train"].shuffle(seed=SEED).take(num_train_samples)
+            val_ds = raw_datasets["validation"].shuffle(seed=SEED).take(num_val_samples)
+            raw_datasets = {"train": train_ds, "validation": val_ds}
+        else:
+            # Sin validación separada - crear split dinámico
+            train_ds = raw_datasets["train"].shuffle(seed=SEED)
+            val_ds = train_ds.take(num_val_samples)
+            train_ds = train_ds.skip(num_val_samples).take(num_train_samples)
+            raw_datasets = {"train": train_ds, "validation": val_ds}
 
 else:
     # Cargar dataset único
