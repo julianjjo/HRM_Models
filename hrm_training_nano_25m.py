@@ -1396,10 +1396,18 @@ optimizer = AdamW(
 )
 
 # Calcular pasos de entrenamiento
-num_training_steps = len(train_loader) * NUM_EPOCHS
+if is_iterable:
+    # Para IterableDataset, calculamos basado en las muestras objetivo
+    estimated_steps_per_epoch = num_train_samples // BATCH_SIZE
+    num_training_steps = estimated_steps_per_epoch * NUM_EPOCHS
+    print(f"Dataset iterable: calculando pasos estimados basado en {num_train_samples:,} muestras")
+else:
+    # Para datasets regulares, usar len(train_loader)
+    num_training_steps = len(train_loader) * NUM_EPOCHS
+
 num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
-print(f"Total de pasos de entrenamiento: {num_training_steps}")
-print(f"Pasos de warmup: {num_warmup_steps}")
+print(f"Total de pasos de entrenamiento (estimado): {num_training_steps:,}")
+print(f"Pasos de warmup: {num_warmup_steps:,}")
 
 # Scheduler con warmup
 scheduler = get_linear_schedule_with_warmup(
