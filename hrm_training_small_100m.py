@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - ESCALADO A ~1B PARÁMETROS
-VERSIÓN AMPLIADA: Configuración para ~1B parámetros con contexto extendido (2048/4096)
-- Arquitectura multi-capa HRM apilada (24 capas)
+HRM-Text1 Training Script - MODELO PEQUEÑO ~100M PARÁMETROS
+VERSIÓN COMPACTA: Configuración para ~100M parámetros con contexto estándar (512 tokens)
+- Arquitectura HRM eficiente (12 capas)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones de memoria y velocidad
-- Configuración optimizada para modelos grandes
+- Optimizaciones de memoria para recursos limitados
+- Configuración optimizada para modelos pequeños y entrenamiento rápido
 """
 
 import os, random, contextlib, multiprocessing as mp, atexit, math
@@ -138,7 +138,7 @@ class HRMText1Config(PretrainedConfig):
     def __init__(self, 
                  vocab_size=32128, 
                  block_size=2048,           # Aumentado para contexto extendido
-                 n_embd=1536,               # Para ~1B params
+                 n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
                  n_layers=24,               # NUEVO: múltiples capas HRM
                  d_ff=6144,                 # 4 * n_embd
@@ -563,50 +563,42 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 # ==============================================================================
-# --- CONFIGURACIÓN DEL SCRIPT PARA ~1B PARÁMETROS ---
+# --- CONFIGURACIÓN DEL SCRIPT PARA ~100M PARÁMETROS (MODELO PEQUEÑO) ---
 # ==============================================================================
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.1  # Aumentado para más datos de entrenamiento
+DATASET_SUBSET_PERCENT = 1.0   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
 CUSTOM_MIX_RATIOS = {
-    # Ejemplo de mezcla personalizada enfocada en calidad para modelo 1B
-    "high_quality_1b": {
-        "slimpajama_en": 0.4,  # 40% SlimPajama inglés (alta calidad)
-        "pile": 0.3,           # 30% The Pile (diversidad)
-        "openwebtext": 0.2,    # 20% OpenWebText (web content)
-        "fineweb": 0.1         # 10% FineWeb (muy alta calidad)
+    # Ejemplo de mezcla personalizada enfocada en calidad para modelo pequeño
+    "high_quality_small": {
+        "c4": 0.5,             # 50% C4 (base sólida)
+        "fineweb": 0.3,        # 30% FineWeb (alta calidad)
+        "openwebtext": 0.2     # 20% OpenWebText (diversidad)
     },
     
-    # Ejemplo de mezcla para contenido multilingüe balanceado para 1B
-    "multilingual_balanced_1b": {
-        "c4": 0.3,             # 30% C4 (multilingüe)
+    # Ejemplo de mezcla balanceada para modelo pequeño
+    "balanced_small": {
+        "c4": 0.4,             # 40% C4 (multilingüe)
         "slimpajama_en": 0.3,  # 30% SlimPajama inglés
-        "spanish": 0.2,        # 20% Español
-        "slimpajama_es": 0.1,  # 10% SlimPajama español
-        "fineweb": 0.1         # 10% FineWeb
+        "fineweb": 0.2,        # 20% FineWeb
+        "openwebtext": 0.1     # 10% OpenWebText
     },
     
-    # Ejemplo de mezcla experimental con todos los datasets para 1B
-    "experimental_full_1b": {
-        "slimpajama": 0.25,    # 25% SlimPajama completo
-        "c4": 0.2,             # 20% C4 multilingüe
-        "pile": 0.2,           # 20% The Pile
-        "fineweb": 0.15,       # 15% FineWeb
-        "openwebtext": 0.1,    # 10% OpenWebText
-        "human_conversations": 0.05,  # 5% Conversaciones humanas
-        "spanish": 0.05        # 5% Español
+    # Mezcla rápida para pruebas y desarrollo
+    "dev_small": {
+        "c4": 0.6,             # 60% C4 (rápido de cargar)
+        "openwebtext": 0.4     # 40% OpenWebText
     },
     
-    # Mezcla enfocada en conversaciones y calidad para chat
-    "conversation_mix_1b": {
-        "human_conversations": 0.4,  # 40% Conversaciones humanas
-        "fineweb": 0.3,             # 30% Contenido de alta calidad
-        "slimpajama_en": 0.2,       # 20% SlimPajama inglés
-        "openwebtext": 0.1          # 10% OpenWebText
+    # Mezcla enfocada en conversaciones para modelo pequeño
+    "conversation_small": {
+        "human_conversations": 0.5,  # 50% Conversaciones humanas
+        "c4": 0.3,                   # 30% C4 base
+        "fineweb": 0.2               # 20% Contenido de calidad
     }
 }
 
@@ -724,15 +716,15 @@ for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     DATASETS_CONFIG[custom_name] = {
         "name": "mixed",
         "config": None,
-        "train_samples": 500_000_000,  # Estimación para modelo 1B
+        "train_samples": 50_000_000,   # Estimación para modelo pequeño (100M)
         "val_samples": 250_000,
         "repo_suffix": f"Custom-{custom_name.replace('_', '-').title()}",
-        "description": f"Mezcla personalizada para 1B: {custom_name.replace('_', ' ').title()}",
+        "description": f"Mezcla personalizada para 100M: {custom_name.replace('_', ' ').title()}",
         "mix_ratios": mix_ratios
     }
 
 # Mostrar datasets disponibles
-print("=== DATASETS DISPONIBLES PARA MODELO 1B ===")
+print("=== DATASETS DISPONIBLES PARA MODELO PEQUEÑO (100M) ===")
 for key, config in DATASETS_CONFIG.items():
     marker = " ← SELECCIONADO" if key == ACTIVE_DATASET else ""
     print(f"• {key}: {config['description']}{marker}")
@@ -743,15 +735,15 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-1B"
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-100M"
 SEED = 42
-NUM_EPOCHS = 3
-BLOCK_SIZE = 2048  # Contexto extendido
+NUM_EPOCHS = 2             # Menos épocas para modelo pequeño
+BLOCK_SIZE = 512   # Contexto estándar para modelo pequeño
 
 # Configuración de entrenamiento para modelo grande
-BATCH_SIZE = 1           # Reducido significativamente para manejar 1B parámetros
-GRAD_ACCUM_STEPS = 2    # Aumentado para batch efectivo de 256
-EVAL_STEPS = 1000        # Evaluar cada 1000 pasos
+BATCH_SIZE = 8           # Tamaño óptimo para modelo pequeño (100M parámetros)
+GRAD_ACCUM_STEPS = 4    # Batch efectivo de 32 para modelo pequeño
+EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para modelos grandes
 LEARNING_RATE_MAX = 2e-3  # Reducido para estabilidad
@@ -815,7 +807,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_1b_output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_small_100m_output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -1098,7 +1090,7 @@ def validate_and_create_output_dir(output_dir, force_create=True):
             print(f"💾 Espacio libre disponible: {free_gb:.1f} GB")
             
             if free_gb < 5:
-                print(f"⚠️  ADVERTENCIA: Poco espacio libre ({free_gb:.1f} GB). Se recomiendan al menos 5 GB para modelo 1B")
+                print(f"⚠️  ADVERTENCIA: Poco espacio libre ({free_gb:.1f} GB). Se recomiendan al menos 2 GB para modelo pequeño (100M)")
             elif free_gb < 20:
                 print(f"💡 Espacio moderado ({free_gb:.1f} GB). Para entrenamientos largos se recomiendan al menos 20 GB")
         except:
@@ -1181,7 +1173,7 @@ print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) in stre
 
 if ACTIVE_DATASET == "mixed" or ACTIVE_DATASET in CUSTOM_MIX_RATIOS or "mix_ratios" in DATASET_INFO:
     # Cargar y mezclar múltiples datasets
-    print("--- CARGANDO DATASETS PARA MEZCLA (MODELO 1B) ---")
+    print("--- CARGANDO DATASETS PARA MEZCLA (MODELO PEQUEÑO 100M) ---")
     mixed_datasets = {}
     mix_ratios = DATASET_INFO["mix_ratios"]
     
@@ -1504,7 +1496,7 @@ def tokenize_function(examples):
         else:
             raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
     
-    # Procesar textos con filtro más estricto para modelo 1B
+    # Procesar textos con filtro optimizado para modelo pequeño
     for text in text_field:
         if isinstance(text, str) and len(text) > 100:  # Filtro más estricto para calidad
             texts.append(str(text) + tokenizer.eos_token)
@@ -1832,14 +1824,14 @@ if HF_TOKEN:
         model_to_save.push_to_hub(
             HF_REPO_ID,
             token=HF_TOKEN,
-            commit_message=f"Upload HRM-Text1 1B model trained on C4 dataset"
+            commit_message=f"Upload HRM-Text1 100M (small) model trained on C4 dataset"
         )
 
         # Subir el tokenizador
         tokenizer.push_to_hub(
             HF_REPO_ID,
             token=HF_TOKEN,
-            commit_message=f"Upload tokenizer for HRM-Text1 1B model"
+            commit_message=f"Upload tokenizer for HRM-Text1 100M (small) model"
         )
 
         print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")

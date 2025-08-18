@@ -743,13 +743,13 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-1B"
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-350M"
 SEED = 42
 NUM_EPOCHS = 3
-BLOCK_SIZE = 2048  # Contexto extendido
+BLOCK_SIZE = 1024  # Contexto balanceado para modelo mediano
 
 # Configuración de entrenamiento para modelo grande
-BATCH_SIZE = 1           # Reducido significativamente para manejar 1B parámetros
+BATCH_SIZE = 4           # Tamaño balanceado para modelo mediano (350M parámetros)
 GRAD_ACCUM_STEPS = 2    # Aumentado para batch efectivo de 256
 EVAL_STEPS = 1000        # Evaluar cada 1000 pasos
 
@@ -815,7 +815,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_1b_output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_medium_350m_output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
