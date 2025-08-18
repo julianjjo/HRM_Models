@@ -5,16 +5,16 @@ Script de lanzamiento distribuido para HRM-Text1 Multi-GPU Training
 
 Uso:
     # Para 8 GPUs en un solo nodo:
-    python launch_distributed.py --script hrm_llm_training_c4_b.py --gpus 8
+    python launch_distributed.py --script hrm_training_small_100m.py --gpus 8
 
     # Para múltiples nodos:
     # Nodo 0 (principal):
-    python launch_distributed.py --script hrm_llm_training_c4_b.py --gpus 8 --nodes 2 --node-rank 0 --master-addr IP_NODO_0
+    python launch_distributed.py --script hrm_training_small_100m.py --gpus 8 --nodes 2 --node-rank 0 --master-addr IP_NODO_0
     # Nodo 1:
-    python launch_distributed.py --script hrm_llm_training_c4_b.py --gpus 8 --nodes 2 --node-rank 1 --master-addr IP_NODO_0
+    python launch_distributed.py --script hrm_training_small_100m.py --gpus 8 --nodes 2 --node-rank 1 --master-addr IP_NODO_0
 
     # Con configuración personalizada:
-    python launch_distributed.py --script hrm_llm_training_c4_1b.py --gpus 8 --master-port 29500
+    python launch_distributed.py --script hrm_training_large_1b.py --gpus 8 --master-port 29500
 """
 
 import argparse

@@ -6,7 +6,7 @@ Guía completa para configurar dónde se guardan los checkpoints y modelos entre
 
 ### **Método 1: Editar Script Directamente** ⭐ RECOMENDADO
 ```python
-# En hrm_llm_training_c4_b.py, línea ~393
+# En hrm_training_small_100m.py, línea ~393
 CUSTOM_BASE_PATH = "/tu/ruta/personalizada"
 ```
 
@@ -14,11 +14,11 @@ CUSTOM_BASE_PATH = "/tu/ruta/personalizada"
 ```bash
 # En terminal (Linux/Mac)
 export HRM_OUTPUT_BASE="/tu/ruta/personalizada"
-python hrm_llm_training_c4_b.py
+python hrm_training_small_100m.py
 
 # En Windows
 set HRM_OUTPUT_BASE="D:\HRM_Models"
-python hrm_llm_training_c4_b.py
+python hrm_training_small_100m.py
 ```
 
 ### **Método 3: Por Defecto Automático** 🤖 AUTOMÁTICO

@@ -1946,14 +1946,14 @@ ACTIVE_DATASET = "c4"
 NUM_EPOCHS = 2
 
 PASOS:
-1. python hrm_llm_training_c4_1b.py  # Primera ejecución con C4
+1. python hrm_training_large_1b.py  # Primera ejecución con C4
 2. [Esperar a que termine completamente]
 3. Editar configuración sin cambiar SEQUENTIAL_TRAINING:
    - ACTIVE_DATASET = "human_conversations"
    - MODIFY_LR_ON_LOAD = True
    - NEW_LEARNING_RATE = 1e-5
    - NUM_EPOCHS = 1
-4. python hrm_llm_training_c4_1b.py  # Continuará desde checkpoint
+4. python hrm_training_large_1b.py  # Continuará desde checkpoint
 
 DIRECTORIOS USADOS:
 - SEQUENTIAL_TRAINING = True:  ./HRM_Models/hrm_text1_c4_1b_output/

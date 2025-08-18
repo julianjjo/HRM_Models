@@ -101,7 +101,7 @@ export HRM_OUTPUT_BASE="/path/to/output"
 export HF_TOKEN="your_huggingface_token"
 
 # Run training
-python hrm_llm_training_c4_b.py
+python hrm_training_small_100m.py
 ```
 
 ### Configuration Options

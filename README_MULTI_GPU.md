@@ -5,8 +5,8 @@
 Se ha implementado soporte completo para entrenamiento distribuido multi-GPU en los scripts HRM-Text1:
 
 ### ✅ **Scripts Actualizados:**
-- `hrm_llm_training_c4_b.py` - ✅ **COMPLETADO** - Soporte multi-GPU completo
-- `hrm_llm_training_c4_1b.py` - 🔄 **EN PROGRESO** - Configuración básica añadida
+- `hrm_training_small_100m.py` - ✅ **COMPLETADO** - Soporte multi-GPU completo
+- `hrm_training_large_1b.py` - 🔄 **EN PROGRESO** - Configuración básica añadida
 - `launch_distributed.py` - ✅ **NUEVO** - Script de lanzamiento distribuido
 
 ## 🎯 **Características Implementadas:**
@@ -40,23 +40,23 @@ Se ha implementado soporte completo para entrenamiento distribuido multi-GPU en 
 
 ```bash
 # Lanzar c4_b en 8 GPUs
-python launch_distributed.py --script hrm_llm_training_c4_b.py --gpus 8
+python launch_distributed.py --script hrm_training_small_100m.py --gpus 8
 
 # Lanzar c4_1b en 8 GPUs  
-python launch_distributed.py --script hrm_llm_training_c4_1b.py --gpus 8
+python launch_distributed.py --script hrm_training_large_1b.py --gpus 8
 
 # Con configuración personalizada
-python launch_distributed.py --script hrm_llm_training_c4_b.py --gpus 8 --master-port 29500 --verbose
+python launch_distributed.py --script hrm_training_small_100m.py --gpus 8 --master-port 29500 --verbose
 ```
 
 ### **Método 2: Torchrun Directo**
 
 ```bash
 # Para c4_b (modelo grande)
-torchrun --nproc_per_node=8 --nnodes=1 --master_port=29500 hrm_llm_training_c4_b.py
+torchrun --nproc_per_node=8 --nnodes=1 --master_port=29500 hrm_training_small_100m.py
 
 # Para c4_1b (modelo 1B parámetros)
-torchrun --nproc_per_node=8 --nnodes=1 --master_port=29500 hrm_llm_training_c4_1b.py
+torchrun --nproc_per_node=8 --nnodes=1 --master_port=29500 hrm_training_large_1b.py
 ```
 
 ### **Método 3: Variables de Entorno Manuales**
@@ -66,7 +66,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=1
 export NCCL_DEBUG=INFO
 
-python -m torch.distributed.run --nproc_per_node=8 hrm_llm_training_c4_b.py
+python -m torch.distributed.run --nproc_per_node=8 hrm_training_small_100m.py
 ```
 
 ## 📊 **Configuraciones de Rendimiento:**
@@ -134,8 +134,8 @@ python -m torch.distributed.run --nproc_per_node=8 hrm_llm_training_c4_b.py
 
 ## 🚧 **Estado del Proyecto:**
 
-- ✅ **hrm_llm_training_c4_b.py**: Completamente funcional para 8x H200
-- 🔄 **hrm_llm_training_c4_1b.py**: Configuración básica añadida, requiere completar integración
+- ✅ **hrm_training_small_100m.py**: Completamente funcional para 8x H200
+- 🔄 **hrm_training_large_1b.py**: Configuración básica añadida, requiere completar integración
 - ✅ **launch_distributed.py**: Script de lanzamiento completo
 - ✅ **Documentación**: Guía completa de uso
 

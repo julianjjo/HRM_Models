@@ -117,7 +117,7 @@ Ambas versiones buscan modelos en:
 ```python
 # Verificar que el archivo de entrenamiento esté presente
 import os
-print(os.path.exists('hrm_llm_training_c4_b.py'))
+print(os.path.exists('hrm_training_small_100m.py'))
 
 # Si no está, el chat usará modelos estándar de transformers
 ```
