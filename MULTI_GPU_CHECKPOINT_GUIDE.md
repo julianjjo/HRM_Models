@@ -145,12 +145,12 @@ def checkpoint_block(self, x, block_layers):
 
 ## 📊 Configuraciones por Tamaño de Modelo
 
-### Tiny Model (50M)
+### Nano Model (25M)
 ```python
 GRADIENT_CHECKPOINTING = False    # No necesario
-BATCH_SIZE = 4                   # Por GPU
+BATCH_SIZE = 1                   # Por GPU (mínimo)
 NUM_GPUS = 1                     # Suficiente
-MEMORY_USAGE = ~2-4GB            # Por GPU
+MEMORY_USAGE = ~1-3GB            # Por GPU
 ```
 
 ### Medium Model (350M) 
@@ -238,7 +238,7 @@ def monitor_memory_usage():
 ## 🎯 Estado Actual
 
 ### Modelos Actuales
-- ✅ **Tiny (50M)**: Gradient checkpointing deshabilitado - funcional
+- ✅ **Nano (25M)**: Gradient checkpointing deshabilitado - funcional, ultra-optimizado
 - ✅ **Medium (350M)**: Gradient checkpointing deshabilitado - pendiente prueba
 - ✅ **Large (1B)**: Gradient checkpointing deshabilitado - pendiente prueba
 

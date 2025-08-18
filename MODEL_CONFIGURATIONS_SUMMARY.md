@@ -6,25 +6,25 @@ This document summarizes the corrected configurations for each HRM model size, e
 
 ## 🎯 Model Configurations
 
-### 1. Tiny Model (~50M Parameters)
-**File**: `hrm_training_tiny_50m.py`
+### 1. Nano Model (~25M Parameters)
+**File**: `hrm_training_nano_25m.py`
 
 | Setting | Value | Reasoning |
 |---------|--------|-----------|
-| **Parameters** | ~50M | Ultra-efficient for very limited resources |
-| **n_embd** | 384 | Compact embedding dimension |
-| **n_head** | 6 | Reduced attention heads for efficiency |
-| **n_layers** | 8 | Minimal depth for fast training |
-| **d_ff** | 1536 | 4 * n_embd for FFN |
-| **Context Length** | 256 tokens | Reduced context for memory efficiency |
-| **Batch Size** | 4 | Low memory usage |
-| **Grad Accum Steps** | 8 | Effective batch size: 32 |
+| **Parameters** | ~25M | Ultra-efficient for extremely limited resources |
+| **n_embd** | 256 | Ultra-compact embedding dimension |
+| **n_head** | 4 | Minimal attention heads for efficiency |
+| **n_layers** | 6 | Ultra-minimal depth for fast training |
+| **d_ff** | 1024 | 4 * n_embd for FFN |
+| **Context Length** | 128 tokens | Ultra-reduced context for memory efficiency |
+| **Batch Size** | 1 | Minimal memory usage |
+| **Grad Accum Steps** | 32 | Effective batch size: 32 |
 | **Epochs** | 2 | Fast convergence |
 | **H-update Period** | 2 steps | Frequent H-updates to compensate smaller size |
 | **Dataset Subset** | 100% | Efficient processing |
 | **Eval Steps** | 500 | Frequent evaluation |
-| **Output Dir** | `hrm_text1_c4_small_50m_output` | Unique directory |
-| **HF Repo** | `HRM-Text1-{dataset}-50M` | Size-specific naming |
+| **Output Dir** | `hrm_text1_c4_tiny_25m_output` | Unique directory |
+| **HF Repo** | `HRM-Text1-{dataset}-25M` | Size-specific naming |
 
 ### 2. Medium Model (~350M Parameters)
 **File**: `hrm_training_medium_350m.py`
@@ -72,7 +72,7 @@ Each model now uses unique output directories to prevent conflicts:
 
 ```
 {OUTPUT_BASE}/
-├── hrm_text1_c4_small_50m_output/      # Tiny model (50M)
+├── hrm_text1_c4_tiny_25m_output/       # Nano model (25M)
 ├── hrm_text1_c4_medium_350m_output/    # Medium model (350M)
 └── hrm_text1_c4_1b_output/             # Large model (1B)
 ```
@@ -89,7 +89,7 @@ Each model now uses unique output directories to prevent conflicts:
 ### ✅ Corrections Applied:
 
 1. **Size-Appropriate Parameters**:
-   - Tiny: 384 embedding, 8 layers, 256 context
+   - Nano: 256 embedding, 6 layers, 128 context
    - Medium: 768 embedding, 16 layers, 1024 context
    - Large: 1536 embedding, 24 layers, 2048 context
 
@@ -117,7 +117,7 @@ Each model now uses unique output directories to prevent conflicts:
 
 ### For Development/Testing:
 ```bash
-python hrm_training_tiny_50m.py    # Ultra-fast iteration, minimal resources
+python hrm_training_nano_25m.py    # Ultra-fast iteration, minimal resources
 ```
 
 ### For Production/Research:
@@ -134,7 +134,7 @@ python hrm_training_large_1b.py     # Best performance, high resources
 
 | Model Size | VRAM | Training Time | Use Case |
 |------------|------|---------------|----------|
-| Tiny (50M) | ~2-4GB | ~1-2 hours | Development, testing, very constrained environments |
+| Nano (25M) | ~1-3GB | ~30min-1hour | Development, testing, extremely constrained environments |
 | Medium (350M) | ~8GB | ~6-8 hours | Research, balanced performance |
 | Large (1B) | ~16GB+ | ~12-24 hours | Production, maximum quality |
 
