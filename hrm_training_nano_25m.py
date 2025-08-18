@@ -1359,13 +1359,29 @@ train_shuffle = False if is_iterable else True
 
 print(f"Dataset iterable detectado: {is_iterable}, shuffle para entrenamiento: {train_shuffle}")
 
+# Función de collate personalizada para filtrar tipos no compatibles
+def custom_collate_fn(batch):
+    """Collate personalizado que filtra campos no compatibles con PyTorch"""
+    # Solo procesar los campos que necesitamos para el entrenamiento
+    filtered_batch = []
+    for item in batch:
+        # Filtrar solo los campos necesarios: input_ids, attention_mask
+        filtered_item = {
+            key: value for key, value in item.items() 
+            if key in ['input_ids', 'attention_mask'] and 
+            isinstance(value, (torch.Tensor, list, int, float))
+        }
+        filtered_batch.append(filtered_item)
+    
+    return default_collate(filtered_batch)
+
 train_loader = DataLoader(
     tokenized_splits["train"],
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
     shuffle=train_shuffle,
-    collate_fn=default_collate
+    collate_fn=custom_collate_fn
 )
 
 val_loader = DataLoader(
@@ -1374,7 +1390,7 @@ val_loader = DataLoader(
     num_workers=safe_num_workers,
     pin_memory=True,
     shuffle=False,
-    collate_fn=default_collate
+    collate_fn=custom_collate_fn
 )
 
 # Crear modelo
