@@ -28,6 +28,16 @@ from datasets import load_dataset
 
 from huggingface_hub import HfFolder, HfApi
 
+# TensorBoard para monitoreo de entrenamiento
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+    print("✅ TensorBoard disponible para monitoreo de entrenamiento")
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    print("⚠️  TensorBoard no disponible. Instala con: pip install tensorboard")
+    SummaryWriter = None
+
 # Para descargas de Kaggle
 try:
     import kagglehub
@@ -746,7 +756,7 @@ NUM_EPOCHS = 2             # Menos épocas para modelo micro
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 30        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+BATCH_SIZE = 60        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
@@ -818,6 +828,13 @@ CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
 print(f"📁 Ruta base configurada: {OUTPUT_BASE}")
 print(f"📁 Directorio de salida: {OUTPUT_DIR}")
+
+# Configurar TensorBoard
+TENSORBOARD_DIR = os.path.join(OUTPUT_DIR, "tensorboard_logs")
+if TENSORBOARD_AVAILABLE:
+    os.makedirs(TENSORBOARD_DIR, exist_ok=True)
+    print(f"📊 TensorBoard logs: {TENSORBOARD_DIR}")
+    print(f"💡 Para ver TensorBoard: tensorboard --logdir {TENSORBOARD_DIR}")
 
 # ==============================================================================
 # --- FUNCIONES AUXILIARES PARA DATALOADER ---
@@ -1661,6 +1678,31 @@ scheduler = get_cosine_schedule_with_warmup(
 # Mixed precision scaler
 scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
 
+# Inicializar TensorBoard Writer (solo en proceso principal)
+writer = None
+if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
+    writer = SummaryWriter(log_dir=TENSORBOARD_DIR)
+    print(f"📊 TensorBoard Writer inicializado")
+    
+    # Log hyperparameters
+    hyperparams = {
+        'model/n_embd': MODEL_PARAMS['n_embd'],
+        'model/n_layers': MODEL_PARAMS['n_layers'],
+        'model/n_head': MODEL_PARAMS['n_head'],
+        'model/d_ff': MODEL_PARAMS['d_ff'],
+        'model/block_size': BLOCK_SIZE,
+        'train/batch_size': BATCH_SIZE,
+        'train/grad_accum_steps': GRAD_ACCUM_STEPS,
+        'train/learning_rate_max': LEARNING_RATE_MAX,
+        'train/warmup_ratio': WARMUP_RATIO,
+        'train/num_epochs': NUM_EPOCHS,
+        'model/total_params': total_params,
+    }
+    
+    # Log hyperparams como texto
+    hyperparams_text = "\n".join([f"{k}: {v}" for k, v in hyperparams.items()])
+    writer.add_text("Hyperparameters", hyperparams_text, 0)
+
 # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
 # Flag para activar/desactivar la modificación del learning rate al cargar checkpoint
 # USO: Cambiar MODIFY_LR_ON_LOAD a True y ajustar NEW_LEARNING_RATE según sea necesario
@@ -1809,6 +1851,13 @@ def main_training():
                         "lr": f"{current_lr:.2e}", 
                         "step": global_step
                     })
+                    
+                    # Log a TensorBoard (solo proceso principal y cada N pasos)
+                    if writer is not None and global_step % 10 == 0:
+                        train_loss = loss.item() * GRAD_ACCUM_STEPS
+                        writer.add_scalar('train/loss', train_loss, global_step)
+                        writer.add_scalar('train/learning_rate', current_lr, global_step)
+                        writer.add_scalar('train/epoch', epoch + (i / len(progress)), global_step)
 
             # Validación al final de cada época
             model.eval()
@@ -1840,6 +1889,12 @@ def main_training():
                 avg_val_loss = total_val_loss / val_batches
                 print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
                 
+                # Log validation metrics a TensorBoard
+                if writer is not None:
+                    writer.add_scalar('validation/loss', avg_val_loss, global_step)
+                    writer.add_scalar('validation/best_loss', best_val_loss, global_step)
+                    writer.add_scalar('validation/patience_counter', patience_counter, global_step)
+                
                 # Manejar tanto DDP (_orig_mod) como DataParallel (module)
                 if hasattr(model, '_orig_mod'):
                     model_to_save = model._orig_mod  # DDP
@@ -1854,6 +1909,10 @@ def main_training():
                     print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
                     torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
                     patience_counter = 0
+                    
+                    # Log mejora del modelo a TensorBoard
+                    if writer is not None:
+                        writer.add_scalar('model/new_best_loss', best_val_loss, global_step)
                 else:
                     patience_counter += 1
                     
@@ -1877,6 +1936,12 @@ def main_training():
                 break
         
         print("Entrenamiento finalizado.")
+        
+        # Cerrar TensorBoard Writer
+        if writer is not None:
+            writer.close()
+            print("📊 TensorBoard Writer cerrado")
+            
         return True
         
     finally:
