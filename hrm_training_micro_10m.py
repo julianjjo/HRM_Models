@@ -1599,6 +1599,11 @@ tokenized_splits = {}
 # Configuración para multi-GPU (necesario antes del loop de tokenización)
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
 is_multi_gpu = num_gpus > 1
+safe_num_workers = get_num_workers()
+
+# Función para verificar si es IterableDataset (necesaria en el loop)
+def is_iterable_dataset(dataset):
+    return isinstance(dataset, IterableDataset)
 
 # Detectar columnas a eliminar dinámicamente
 sample = next(iter(raw_datasets["train"]))
@@ -1626,13 +1631,10 @@ for split_name in ["train", "validation"]:
         desc=f"Tokenizando {split_name} para C4 streaming"
     ).with_format("torch")
 
-# ### FIX DATALOADER ###: Usar la función segura para determinar workers
-safe_num_workers = get_num_workers()
+# ### FIX DATALOADER ###: Variables ya definidas arriba
 
 
-# Función para verificar si es IterableDataset
-def is_iterable_dataset(dataset):
-    return isinstance(dataset, IterableDataset)
+# Función is_iterable_dataset ya definida arriba
 
 # Detectar si los datasets son iterables
 train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
