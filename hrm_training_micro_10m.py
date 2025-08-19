@@ -841,7 +841,7 @@ if TENSORBOARD_AVAILABLE:
 # ==============================================================================
 
 def get_dataloader_workers():
-    """Determina el número seguro de workers para DataLoader"""
+    """Determina el número óptimo de workers para DataLoader basado en entorno y configuración"""
     try:
         # Detectar si estamos en Google Colab
         if 'google.colab' in str(get_ipython()):
@@ -858,10 +858,21 @@ def get_dataloader_workers():
     except:
         pass
 
-    # Para sistemas normales, usar menos workers para evitar problemas
-    workers = min(2, mp.cpu_count())
-    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
-    return workers
+    # Para sistemas normales, calcular workers óptimos para multi-GPU
+    total_cpus = mp.cpu_count()
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    
+    if num_gpus > 1:
+        # Multi-GPU: Más workers para saturar múltiples GPUs
+        # Regla empírica: 2-4 workers por GPU, limitado por CPUs disponibles
+        optimal_workers = min(num_gpus * 3, total_cpus - 2, 16)  # Máximo 16 workers
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers para máximo throughput.")
+    else:
+        # Single-GPU: Configuración conservadora
+        optimal_workers = min(4, total_cpus // 2)
+        print(f"Single-GPU. Usando {optimal_workers} workers para DataLoader.")
+    
+    return optimal_workers
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
@@ -1601,16 +1612,34 @@ def is_iterable_dataset(dataset):
 train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
 val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
 
-print(f"Creando DataLoaders con {safe_num_workers} workers...")
+print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
+
+# Configuración optimizada para multi-GPU
+num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+is_multi_gpu = num_gpus > 1
+
+# Configurar prefetch y persistent_workers para multi-GPU
+if is_multi_gpu and safe_num_workers > 0:
+    prefetch_factor = 4  # Más prefetch para multi-GPU
+    persistent_workers = True  # Mantener workers vivos entre epochs
+    pin_memory_device = "cuda"  # Pin to specific CUDA device
+    print(f"🚀 Configuración Multi-GPU: prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers}")
+else:
+    prefetch_factor = 2 if safe_num_workers > 0 else None
+    persistent_workers = safe_num_workers > 0
+    pin_memory_device = None
+
 train_loader = DataLoader(
     tokenized_splits["train"],
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
-    persistent_workers=False,
-    prefetch_factor=2 if safe_num_workers > 0 else None,
+    pin_memory_device=pin_memory_device,
+    persistent_workers=persistent_workers,
+    prefetch_factor=prefetch_factor,
     shuffle=False,  # False para datasets iterables
-    collate_fn=default_collate
+    collate_fn=default_collate,
+    drop_last=True if is_multi_gpu else False  # Drop last para consistency en multi-GPU
 )
 
 val_loader = DataLoader(
@@ -1618,10 +1647,12 @@ val_loader = DataLoader(
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
-    persistent_workers=False,
-    prefetch_factor=2 if safe_num_workers > 0 else None,
+    pin_memory_device=pin_memory_device,
+    persistent_workers=persistent_workers,
+    prefetch_factor=prefetch_factor,
     shuffle=False,
-    collate_fn=default_collate
+    collate_fn=default_collate,
+    drop_last=False  # No drop last en validación
 )
 
 # Crear modelo

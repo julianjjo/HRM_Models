@@ -924,7 +924,7 @@ else:
 # ==============================================================================
 
 def get_dataloader_workers():
-    """Determina el número seguro de workers para DataLoader"""
+    """Determina el número óptimo de workers para DataLoader basado en entorno y configuración multi-GPU"""
     try:
         # Detectar si estamos en Google Colab
         if 'google.colab' in str(get_ipython()):
@@ -941,10 +941,21 @@ def get_dataloader_workers():
     except:
         pass
 
-    # Para sistemas normales, usar menos workers para evitar problemas
-    workers = min(2, mp.cpu_count())
-    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
-    return workers
+    # Para sistemas normales, calcular workers óptimos para multi-GPU
+    total_cpus = mp.cpu_count()
+    num_gpus = WORLD_SIZE if DISTRIBUTED else 1
+    
+    if num_gpus > 1:
+        # Multi-GPU: Más workers para saturar múltiples GPUs
+        # Regla empírica: 3-4 workers por GPU, limitado por CPUs disponibles
+        optimal_workers = min(num_gpus * 4, total_cpus - 2, 20)  # Máximo 20 workers para modelos grandes
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers para máximo throughput.")
+    else:
+        # Single-GPU: Configuración conservadora
+        optimal_workers = min(6, total_cpus // 2)  # Más workers para modelo large
+        print(f"Single-GPU Large Model. Usando {optimal_workers} workers para DataLoader.")
+    
+    return optimal_workers
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
@@ -1644,13 +1655,47 @@ def custom_collate_fn(batch):
     
     return default_collate(filtered_batch)
 
+# Configuración optimizada para multi-GPU distributed training
+is_multi_gpu = DISTRIBUTED and WORLD_SIZE > 1
+
+# Configurar DistributedSampler para entrenamiento distribuido
+train_sampler = None
+if is_multi_gpu and not isinstance(tokenized_splits["train"], IterableDataset):
+    train_sampler = DistributedSampler(
+        tokenized_splits["train"],
+        num_replicas=WORLD_SIZE,
+        rank=LOCAL_RANK,
+        shuffle=True,  # DistributedSampler maneja el shuffle
+        seed=SEED
+    )
+    train_shuffle = False  # Desactivar shuffle cuando usamos DistributedSampler
+    print(f"🔄 Usando DistributedSampler para {WORLD_SIZE} GPUs (rank {LOCAL_RANK})")
+else:
+    train_shuffle = train_shuffle  # Mantener configuración original
+
+# Configurar prefetch y persistent_workers para multi-GPU
+if is_multi_gpu and safe_num_workers > 0:
+    prefetch_factor = 6  # Más prefetch para modelos grandes multi-GPU
+    persistent_workers = True  # Mantener workers vivos entre epochs
+    pin_memory_device = f"cuda:{LOCAL_RANK}" if DISTRIBUTED else "cuda"
+    print(f"🚀 Configuración Multi-GPU Large Model: prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers}")
+else:
+    prefetch_factor = 4 if safe_num_workers > 0 else None  # Más prefetch para large model
+    persistent_workers = safe_num_workers > 0
+    pin_memory_device = None
+
 train_loader = DataLoader(
     tokenized_splits["train"],
     batch_size=BATCH_SIZE,
+    sampler=train_sampler,
     num_workers=safe_num_workers,
     pin_memory=True,
+    pin_memory_device=pin_memory_device,
+    persistent_workers=persistent_workers,
+    prefetch_factor=prefetch_factor,
     shuffle=train_shuffle,
-    collate_fn=custom_collate_fn
+    collate_fn=custom_collate_fn,
+    drop_last=True if is_multi_gpu else False  # Drop last para consistency en multi-GPU
 )
 
 val_loader = DataLoader(
@@ -1658,8 +1703,12 @@ val_loader = DataLoader(
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
+    pin_memory_device=pin_memory_device,
+    persistent_workers=persistent_workers,
+    prefetch_factor=prefetch_factor,
     shuffle=False,
-    collate_fn=custom_collate_fn
+    collate_fn=custom_collate_fn,
+    drop_last=False  # No drop last en validación
 )
 
 # Crear modelo
@@ -1845,6 +1894,12 @@ for epoch in range(start_epoch, NUM_EPOCHS):
     model.train()
     optimizer.zero_grad()
     epoch_start_time = time.time()
+    
+    # Configurar epoch para DistributedSampler si está en uso
+    if train_sampler is not None:
+        train_sampler.set_epoch(epoch)
+        if LOCAL_RANK == 0:
+            print(f"🔄 Epoch {epoch} configurado para DistributedSampler en todos los ranks")
     
     progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
     
