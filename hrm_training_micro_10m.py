@@ -721,7 +721,7 @@ for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     DATASETS_CONFIG[custom_name] = {
         "name": "mixed",
         "config": None,
-        "train_samples": 10_000_000,   # Estimación reducida para modelo micro (10M)
+        "train_samples": 25_000_000,   # Estimación expandida para modelo micro H200 (25M)
         "val_samples": 125_000,
         "repo_suffix": f"Custom-{custom_name.replace('_', '-').title()}",
         "description": f"Mezcla personalizada para 50M: {custom_name.replace('_', ' ').title()}",
@@ -729,7 +729,7 @@ for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     }
 
 # Mostrar datasets disponibles
-print("=== DATASETS DISPONIBLES PARA MODELO MICRO (10M) ===")
+print("=== DATASETS DISPONIBLES PARA MODELO MICRO OPTIMIZADO H200 (25M) ===")
 for key, config in DATASETS_CONFIG.items():
     marker = " ← SELECCIONADO" if key == ACTIVE_DATASET else ""
     print(f"• {key}: {config['description']}{marker}")
@@ -743,11 +743,11 @@ DATASET_CONFIG = DATASET_INFO["config"]
 HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Micro-10M"
 SEED = 42
 NUM_EPOCHS = 2             # Menos épocas para modelo micro
-BLOCK_SIZE = 128         # Contexto ultra-reducido para minimizar memoria (128 tokens)
+BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
-# Configuración de entrenamiento para modelo micro (~10M parámetros)
-BATCH_SIZE = 1           # Batch mínimo para reducir memoria drasticamente 
-GRAD_ACCUM_STEPS = 32    # Batch efectivo de 32 mantenido
+# Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
+BATCH_SIZE = 4096        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
@@ -761,16 +761,16 @@ MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
-# --- CONFIGURACIÓN PARA MODELO MICRO (~10M PARÁMETROS) ---
-# Configuración micro para recursos muy limitados (T4, hardware básico)
+# --- CONFIGURACIÓN PARA MODELO MICRO OPTIMIZADO PARA H200 (~25M PARÁMETROS) ---
+# Configuración micro expandida para aprovechar mejor hardware potente (H200)
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 128,                     # Dimensión micro-reducida (128)
-    "n_head": 4,                       # 4 cabezas de atención (128/4 = 32 dim por cabeza)
-    "n_layers": 4,                     # Solo 4 capas HRM (micro-compacto)
-    "d_ff": 512,                       # 4 * n_embd para FFN (128 * 4)
+    "n_embd": 256,                     # Dimensión expandida para H200 (256)
+    "n_head": 8,                       # 8 cabezas de atención (256/8 = 32 dim por cabeza)
+    "n_layers": 6,                     # 6 capas HRM (más capacidad)
+    "d_ff": 1024,                      # 4 * n_embd para FFN (256 * 4)
     "dropout": 0.1,
-    "halt_max_steps": 3,               # Mínimos pasos para modelo micro
+    "halt_max_steps": 4,               # Pasos optimizados para modelo expandido
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
