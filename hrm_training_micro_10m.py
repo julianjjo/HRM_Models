@@ -1857,7 +1857,7 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
     # Prefetch más agresivo para C4 streaming (dataset masivo)
-    prefetch_factor = max(12, safe_num_workers * 3)  # Incrementado para mejor CPU utilization
+    prefetch_factor = max(64, safe_num_workers * 3)  # Incrementado para mejor CPU utilization
     persistent_workers = True  # Critical para streaming - evita reinicializar workers
     # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
