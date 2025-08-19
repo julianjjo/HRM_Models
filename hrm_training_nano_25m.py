@@ -841,7 +841,7 @@ if TENSORBOARD_AVAILABLE:
 # ==============================================================================
 
 def get_dataloader_workers():
-    """Determina el número seguro de workers para DataLoader"""
+    """Determina el número óptimo de workers para DataLoader basado en entorno y configuración multi-GPU"""
     try:
         # Detectar si estamos en Google Colab
         if 'google.colab' in str(get_ipython()):
@@ -858,10 +858,21 @@ def get_dataloader_workers():
     except:
         pass
 
-    # Para sistemas normales, usar menos workers para evitar problemas
-    workers = min(2, mp.cpu_count())
-    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
-    return workers
+    # Para sistemas normales, calcular workers óptimos para multi-GPU
+    total_cpus = mp.cpu_count()
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    
+    if num_gpus > 1:
+        # Multi-GPU: Workers optimizados para modelo nano
+        # Regla empírica: 2-3 workers por GPU para modelo nano
+        optimal_workers = min(num_gpus * 2, total_cpus - 1, 12)  # Máximo 12 workers para nano
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers para máximo throughput.")
+    else:
+        # Single-GPU: Configuración conservadora para modelo nano
+        optimal_workers = min(4, total_cpus // 2)
+        print(f"Single-GPU Nano Model. Usando {optimal_workers} workers para DataLoader.")
+    
+    return optimal_workers
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
@@ -1475,24 +1486,51 @@ def custom_collate_fn(batch):
     
     return default_collate(filtered_batch)
 
-# Configurar samplers distribuidos si es necesario
+# Configurar samplers distribuidos y optimizaciones multi-GPU
 train_sampler = None
 val_sampler = None
+is_multi_gpu = is_distributed and world_size > 1
 
 if is_distributed and not is_iterable:
-    train_sampler = DistributedSampler(tokenized_splits["train"], num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(tokenized_splits["validation"], num_replicas=world_size, rank=rank, shuffle=False)
+    train_sampler = DistributedSampler(
+        tokenized_splits["train"], 
+        num_replicas=world_size, 
+        rank=rank, 
+        shuffle=True,
+        seed=SEED  # Agregar seed para reproducibilidad
+    )
+    val_sampler = DistributedSampler(
+        tokenized_splits["validation"], 
+        num_replicas=world_size, 
+        rank=rank, 
+        shuffle=False
+    )
     train_shuffle = False  # Cuando usamos DistributedSampler, no podemos usar shuffle en DataLoader
     print(f"🔗 DistributedSampler configurado para rank {rank}/{world_size}")
+
+# Configurar prefetch y persistent_workers optimizados para multi-GPU
+if is_multi_gpu and safe_num_workers > 0:
+    prefetch_factor = 4  # Prefetch optimizado para modelo nano multi-GPU
+    persistent_workers = True  # Mantener workers vivos entre epochs
+    pin_memory_device = f"cuda:{local_rank}" if is_distributed else "cuda"
+    print(f"🚀 Configuración Multi-GPU Nano Model: prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers}")
+else:
+    prefetch_factor = 2 if safe_num_workers > 0 else None
+    persistent_workers = safe_num_workers > 0
+    pin_memory_device = None
 
 train_loader = DataLoader(
     tokenized_splits["train"],
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
+    pin_memory_device=pin_memory_device,
+    persistent_workers=persistent_workers,
+    prefetch_factor=prefetch_factor,
     shuffle=train_shuffle,
     sampler=train_sampler,
-    collate_fn=custom_collate_fn
+    collate_fn=custom_collate_fn,
+    drop_last=True if is_multi_gpu else False  # Drop last para consistency en multi-GPU
 )
 
 val_loader = DataLoader(
@@ -1500,9 +1538,13 @@ val_loader = DataLoader(
     batch_size=BATCH_SIZE,
     num_workers=safe_num_workers,
     pin_memory=True,
+    pin_memory_device=pin_memory_device,
+    persistent_workers=persistent_workers,
+    prefetch_factor=prefetch_factor,
     shuffle=False,
     sampler=val_sampler,
-    collate_fn=custom_collate_fn
+    collate_fn=custom_collate_fn,
+    drop_last=False  # No drop last en validación
 )
 
 # Crear modelo
