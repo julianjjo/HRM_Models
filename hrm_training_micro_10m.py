@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO ULTRA-PEQUEÑO ~25M PARÁMETROS  
-VERSIÓN ULTRA-COMPACTA: Configuración para ~25M parámetros con contexto ultra-reducido (128 tokens)
-- Arquitectura HRM ultra-eficiente (6 capas, 256 dim)
+HRM-Text1 Training Script - MODELO MICRO ~10M PARÁMETROS  
+VERSIÓN MICRO: Configuración para ~10M parámetros con contexto ultra-reducido (128 tokens)
+- Arquitectura HRM micro-eficiente (4 capas, 128 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
 - Optimizaciones extremas de memoria para recursos muy limitados
-- Configuración optimizada para entrenamiento rápido en hardware básico
+- Configuración optimizada para hardware básico (T4, etc.)
 """
 
 import os, random, contextlib, multiprocessing as mp, atexit, math
@@ -578,14 +578,14 @@ DATASET_SUBSET_PERCENT = 1.0   # Usar más datos para modelo pequeño (más efic
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
 CUSTOM_MIX_RATIOS = {
-    # Ejemplo de mezcla personalizada enfocada en calidad para modelo extra pequeño
+    # Ejemplo de mezcla personalizada enfocada en calidad para modelo micro
     "high_quality_small": {
         "c4": 0.5,             # 50% C4 (base sólida)
         "fineweb": 0.3,        # 30% FineWeb (alta calidad)
         "openwebtext": 0.2     # 20% OpenWebText (diversidad)
     },
     
-    # Ejemplo de mezcla balanceada para modelo extra pequeño
+    # Ejemplo de mezcla balanceada para modelo micro
     "balanced_small": {
         "c4": 0.4,             # 40% C4 (multilingüe)
         "slimpajama_en": 0.3,  # 30% SlimPajama inglés
@@ -599,7 +599,7 @@ CUSTOM_MIX_RATIOS = {
         "openwebtext": 0.4     # 40% OpenWebText
     },
     
-    # Mezcla enfocada en conversaciones para modelo extra pequeño
+    # Mezcla enfocada en conversaciones para modelo micro
     "conversation_small": {
         "human_conversations": 0.5,  # 50% Conversaciones humanas
         "c4": 0.3,                   # 30% C4 base
@@ -721,7 +721,7 @@ for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     DATASETS_CONFIG[custom_name] = {
         "name": "mixed",
         "config": None,
-        "train_samples": 25_000_000,   # Estimación reducida para modelo extra pequeño (50M)
+        "train_samples": 10_000_000,   # Estimación reducida para modelo micro (10M)
         "val_samples": 125_000,
         "repo_suffix": f"Custom-{custom_name.replace('_', '-').title()}",
         "description": f"Mezcla personalizada para 50M: {custom_name.replace('_', ' ').title()}",
@@ -729,7 +729,7 @@ for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     }
 
 # Mostrar datasets disponibles
-print("=== DATASETS DISPONIBLES PARA MODELO ULTRA-PEQUEÑO (25M) ===")
+print("=== DATASETS DISPONIBLES PARA MODELO MICRO (10M) ===")
 for key, config in DATASETS_CONFIG.items():
     marker = " ← SELECCIONADO" if key == ACTIVE_DATASET else ""
     print(f"• {key}: {config['description']}{marker}")
@@ -740,12 +740,12 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-25M"
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Micro-10M"
 SEED = 42
-NUM_EPOCHS = 2             # Menos épocas para modelo extra pequeño
+NUM_EPOCHS = 2             # Menos épocas para modelo micro
 BLOCK_SIZE = 128         # Contexto ultra-reducido para minimizar memoria (128 tokens)
 
-# Configuración de entrenamiento para modelo extra pequeño (~50M parámetros)
+# Configuración de entrenamiento para modelo micro (~10M parámetros)
 BATCH_SIZE = 1           # Batch mínimo para reducir memoria drasticamente 
 GRAD_ACCUM_STEPS = 32    # Batch efectivo de 32 mantenido
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
@@ -761,16 +761,16 @@ MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
-# --- CONFIGURACIÓN PARA MODELO EXTRA PEQUEÑO (~50M PARÁMETROS) ---
-# Configuración ultra-compacta para recursos muy limitados
+# --- CONFIGURACIÓN PARA MODELO MICRO (~10M PARÁMETROS) ---
+# Configuración micro para recursos muy limitados (T4, hardware básico)
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 256,                     # Dimensión ultra-reducida (256)
-    "n_head": 4,                       # 4 cabezas de atención (256/4 = 64 dim por cabeza)
-    "n_layers": 6,                     # Solo 6 capas HRM (ultra-compacto)
-    "d_ff": 1024,                      # 4 * n_embd para FFN (256 * 4)
+    "n_embd": 128,                     # Dimensión micro-reducida (128)
+    "n_head": 4,                       # 4 cabezas de atención (128/4 = 32 dim por cabeza)
+    "n_layers": 4,                     # Solo 4 capas HRM (micro-compacto)
+    "d_ff": 512,                       # 4 * n_embd para FFN (128 * 4)
     "dropout": 0.1,
-    "halt_max_steps": 4,               # Mínimos pasos para modelo ultra-pequeño
+    "halt_max_steps": 3,               # Mínimos pasos para modelo micro
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
@@ -812,7 +812,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_tiny_25m_output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_micro_10m_output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -1927,14 +1927,14 @@ def save_final_model():
             model_to_save.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload HRM-Text1 25M nano model trained on C4 dataset"
+                commit_message=f"Upload HRM-Text1 10M micro model trained on C4 dataset"
             )
 
             # Subir el tokenizador
             tokenizer.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Text1 25M nano model"
+                commit_message=f"Upload tokenizer for HRM-Text1 10M micro model"
             )
 
             print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
