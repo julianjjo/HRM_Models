@@ -1850,6 +1850,7 @@ if is_multi_gpu and safe_num_workers > 0:
     
     print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
     print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
+    print(f"   🔍 DEBUG: is_multi_gpu={is_multi_gpu}, safe_num_workers={safe_num_workers}")
 else:
     prefetch_factor = 8 if safe_num_workers > 0 else None  # Incrementado para single-GPU
     persistent_workers = safe_num_workers > 0
@@ -1870,6 +1871,9 @@ train_kwargs = {
 # Solo agregar argumentos no-None
 if prefetch_factor is not None:
     train_kwargs["prefetch_factor"] = prefetch_factor
+    print(f"   ✅ DataLoader configurado con prefetch_factor={prefetch_factor}")
+else:
+    print(f"   ⚠️  DataLoader SIN prefetch_factor (workers={safe_num_workers})")
 if pin_memory_device is not None:
     train_kwargs["pin_memory_device"] = pin_memory_device
 if multiprocessing_context is not None:
