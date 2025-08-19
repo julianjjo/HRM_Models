@@ -26,6 +26,16 @@ from tqdm.auto import tqdm
 
 from huggingface_hub import HfFolder, HfApi
 
+# TensorBoard para monitoreo de entrenamiento
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+    print("✅ TensorBoard disponible para monitoreo de entrenamiento")
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    print("⚠️  TensorBoard no disponible. Instala con: pip install tensorboard")
+    SummaryWriter = None
+
 # Para descargas de Kaggle
 try:
     import kagglehub
@@ -1191,6 +1201,13 @@ print(f"   🏆 Mejor modelo: {BEST_MODEL_PATH}")
 print(f"   💾 Checkpoints: {CHECKPOINT_PATH}")
 print(f"   📝 Modelo final: {OUTPUT_DIR}/")
 
+# Configurar TensorBoard
+TENSORBOARD_DIR = os.path.join(OUTPUT_DIR, "tensorboard_logs")
+if TENSORBOARD_AVAILABLE:
+    os.makedirs(TENSORBOARD_DIR, exist_ok=True)
+    print(f"📊 TensorBoard logs: {TENSORBOARD_DIR}")
+    print(f"💡 Para ver TensorBoard: tensorboard --logdir {TENSORBOARD_DIR}")
+
 # Configurar device según si estamos en modo distribuido o no
 if DISTRIBUTED:
     device = torch.device(f"cuda:{LOCAL_RANK}")
@@ -1690,6 +1707,34 @@ scheduler = get_cosine_schedule_with_warmup(
 # Mixed precision scaler
 scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
 
+# Inicializar TensorBoard Writer (solo en proceso principal)
+writer = None
+if TENSORBOARD_AVAILABLE and (not DISTRIBUTED or LOCAL_RANK == 0):
+    writer = SummaryWriter(log_dir=TENSORBOARD_DIR)
+    print(f"📊 TensorBoard Writer inicializado")
+    
+    # Log hyperparameters
+    hyperparams = {
+        'model/n_embd': MODEL_PARAMS['n_embd'],
+        'model/n_layers': MODEL_PARAMS['n_layers'],
+        'model/n_head': MODEL_PARAMS['n_head'],
+        'model/block_size': BLOCK_SIZE,
+        'training/batch_size': BATCH_SIZE,
+        'training/learning_rate': LEARNING_RATE_MAX,
+        'training/weight_decay': WEIGHT_DECAY,
+        'training/warmup_steps': num_warmup_steps,
+        'training/max_epochs': NUM_EPOCHS,
+        'training/mixed_precision': MIXED_PRECISION,
+        'training/gradient_clipping': GRADIENT_CLIPPING,
+        'hardware/device': str(device),
+        'hardware/device_count': torch.cuda.device_count() if torch.cuda.is_available() else 1,
+        'distributed/world_size': WORLD_SIZE if DISTRIBUTED else 1,
+    }
+    
+    # Log hyperparams como texto
+    hyperparams_text = "\n".join([f"{k}: {v}" for k, v in hyperparams.items()])
+    writer.add_text("Hyperparameters", hyperparams_text, 0)
+
 # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
 # Flag para activar/desactivar la modificación del learning rate al cargar checkpoint
 # USO: Cambiar MODIFY_LR_ON_LOAD a True y ajustar NEW_LEARNING_RATE según sea necesario
@@ -1824,6 +1869,55 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                 scheduler.step()
                 global_step += 1
                 
+                # TensorBoard logging (solo en proceso principal)
+                if writer is not None:
+                    current_lr = scheduler.get_last_lr()[0]
+                    train_loss = loss.item() * GRAD_ACCUM_STEPS
+                    
+                    # Métricas básicas de entrenamiento
+                    writer.add_scalar('Loss/Train', train_loss, global_step)
+                    writer.add_scalar('Learning_Rate/Current', current_lr, global_step)
+                    writer.add_scalar('Training/Epoch_Progress', epoch + (i / len(progress)), global_step)
+                    writer.add_scalar('Training/Global_Step', global_step, global_step)
+                    
+                    # Métricas de gradientes cada 50 pasos para evitar overhead
+                    if global_step % 50 == 0:
+                        total_norm = 0
+                        param_count = 0
+                        grad_norm = 0
+                        param_norm = 0
+                        
+                        for p in model.parameters():
+                            if p.requires_grad and p.grad is not None:
+                                param_norm_sq = p.data.norm().item() ** 2
+                                param_norm += param_norm_sq
+                                
+                                grad_norm_sq = p.grad.data.norm().item() ** 2
+                                grad_norm += grad_norm_sq
+                                
+                                param_count += p.numel()
+                        
+                        if param_count > 0:
+                            grad_norm = (grad_norm ** 0.5)
+                            param_norm = (param_norm ** 0.5)
+                            
+                            writer.add_scalar('Gradients/Global_Norm', grad_norm, global_step)
+                            writer.add_scalar('Parameters/Global_Norm', param_norm, global_step)
+                            writer.add_scalar('Gradients/Param_Ratio', grad_norm / (param_norm + 1e-8), global_step)
+                    
+                    # Métricas de memoria GPU cada 100 pasos
+                    if global_step % 100 == 0 and torch.cuda.is_available():
+                        for gpu_id in range(torch.cuda.device_count()):
+                            memory_allocated = torch.cuda.memory_allocated(gpu_id) / 1e9  # GB
+                            memory_cached = torch.cuda.memory_reserved(gpu_id) / 1e9     # GB
+                            writer.add_scalar(f'GPU_{gpu_id}/Memory_Allocated_GB', memory_allocated, global_step)
+                            writer.add_scalar(f'GPU_{gpu_id}/Memory_Cached_GB', memory_cached, global_step)
+                            
+                            # Calcular utilización de memoria
+                            total_memory = torch.cuda.get_device_properties(gpu_id).total_memory / 1e9
+                            memory_util = (memory_allocated / total_memory) * 100
+                            writer.add_scalar(f'GPU_{gpu_id}/Memory_Utilization_%', memory_util, global_step)
+                
                 # Checkpoint periódico
                 if global_step % CHECKPOINT_STEPS == 0:
                     model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
@@ -1874,6 +1968,30 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         avg_val_loss = total_val_loss / val_batches
         print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
         
+        # Log expandido de validation metrics a TensorBoard
+        if writer is not None:
+            # Métricas de validación principales
+            writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
+            writer.add_scalar('Loss/Best_Validation', best_val_loss, global_step)
+            writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
+            
+            # Calcular diferencia con mejor loss
+            val_loss_diff = avg_val_loss - best_val_loss
+            writer.add_scalar('Loss/Val_vs_Best_Diff', val_loss_diff, global_step)
+            
+            # Ratio de validación vs entrenamiento (si tenemos train loss reciente)
+            if hasattr(writer, '_last_train_loss'):
+                train_val_ratio = avg_val_loss / (writer._last_train_loss + 1e-8)
+                writer.add_scalar('Loss/Train_Val_Ratio', train_val_ratio, global_step)
+                
+                # Indicador de overfitting (val loss > train loss)
+                overfitting_indicator = 1.0 if avg_val_loss > writer._last_train_loss else 0.0
+                writer.add_scalar('Training/Overfitting_Signal', overfitting_indicator, global_step)
+            
+            # Guardar último train loss para próxima comparación
+            if 'train_loss' in locals():
+                writer._last_train_loss = train_loss
+        
         model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
         
         # Guardar mejor modelo
@@ -1882,6 +2000,23 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
             torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
             patience_counter = 0
+            
+            # Log mejora del modelo a TensorBoard con histogramas
+            if writer is not None:
+                writer.add_scalar('Training/New_Best_Loss', best_val_loss, global_step)
+                
+                # Agregar histogramas de pesos cuando se guarda el mejor modelo
+                for name, param in model_to_save.named_parameters():
+                    if param.requires_grad and param.dim() > 1:  # Solo capas con peso significativo
+                        # Limpiar nombre para TensorBoard
+                        clean_name = name.replace('.', '/')
+                        writer.add_histogram(f'Weights/{clean_name}', param.data, global_step)
+                        
+                        # Estadísticas de pesos
+                        writer.add_scalar(f'Weight_Stats/{clean_name}_mean', param.data.mean().item(), global_step)
+                        writer.add_scalar(f'Weight_Stats/{clean_name}_std', param.data.std().item(), global_step)
+                        writer.add_scalar(f'Weight_Stats/{clean_name}_max', param.data.max().item(), global_step)
+                        writer.add_scalar(f'Weight_Stats/{clean_name}_min', param.data.min().item(), global_step)
         else:
             patience_counter += 1
             
@@ -1905,6 +2040,11 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         break
 
 print("Entrenamiento finalizado.")
+
+# Cerrar TensorBoard Writer
+if writer is not None:
+    writer.close()
+    print("📊 TensorBoard Writer cerrado")
 
 # Guardar modelo final
 model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
