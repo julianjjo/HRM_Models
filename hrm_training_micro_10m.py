@@ -1644,7 +1644,9 @@ if is_multi_gpu and safe_num_workers > 0:
     # Prefetch más agresivo para C4 streaming (dataset masivo)
     prefetch_factor = 8  # Incrementado para C4 600B - más buffer para evitar GPU idle
     persistent_workers = True  # Critical para streaming - evita reinicializar workers
-    pin_memory_device = f"cuda:{LOCAL_RANK}"  # Pin a GPU específica
+    # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
     
     # Buffer adicional para streaming datasets masivos
     multiprocessing_context = "spawn"  # Más estable para datasets grandes
