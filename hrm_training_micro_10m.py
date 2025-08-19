@@ -1211,13 +1211,34 @@ if torch.cuda.is_available():
     print(f"💾 VRAM total disponible: {total_vram:.1f} GB")
     torch.cuda.empty_cache()
 
+# Autenticación con Hugging Face Hub
 try:
-    HF_TOKEN = os.environ['HF_TOKEN']
-    HfFolder.save_token(HF_TOKEN)
-    print("Hugging Face token loaded.")
-except Exception:
-    print("HF_TOKEN secret not found.")
-    HF_TOKEN = None
+    from huggingface_hub import login
+    
+    # Intentar obtener token de variable de entorno
+    HF_TOKEN = os.environ.get('HF_TOKEN')
+    
+    if HF_TOKEN:
+        login(token=HF_TOKEN)
+        print("✅ Hugging Face token loaded from environment variable.")
+    else:
+        # Intentar login interactivo (útil para desarrollo local)
+        try:
+            login()
+            print("✅ Hugging Face authentication successful.")
+        except Exception as e:
+            print(f"⚠️  HF authentication failed: {e}")
+            print("💡 Para usar HF Pro, configura HF_TOKEN o ejecuta: huggingface-cli login")
+            HF_TOKEN = None
+except ImportError:
+    print("⚠️  huggingface_hub login not available")
+    HF_TOKEN = os.environ.get('HF_TOKEN')
+    if HF_TOKEN:
+        HfFolder.save_token(HF_TOKEN)
+        print("Hugging Face token loaded (legacy method).")
+    else:
+        print("HF_TOKEN secret not found.")
+        HF_TOKEN = None
 
 print("Loading tokenizer (T5 slow)...")
 tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
