@@ -1663,33 +1663,47 @@ else:
     pin_memory_device = None
     multiprocessing_context = None
 
-train_loader = DataLoader(
-    tokenized_splits["train"],
-    batch_size=BATCH_SIZE,
-    num_workers=safe_num_workers,
-    pin_memory=True,
-    pin_memory_device=pin_memory_device,
-    persistent_workers=persistent_workers,
-    prefetch_factor=prefetch_factor,
-    multiprocessing_context=multiprocessing_context,  # Optimización para C4 streaming
-    shuffle=False,  # False para datasets iterables
-    collate_fn=default_collate,
-    drop_last=True if is_multi_gpu else False  # Drop last para consistency en multi-GPU
-)
+# Configurar argumentos del DataLoader condicionalmente
+train_kwargs = {
+    "batch_size": BATCH_SIZE,
+    "num_workers": safe_num_workers,
+    "pin_memory": True,
+    "persistent_workers": persistent_workers,
+    "shuffle": False,  # False para datasets iterables
+    "collate_fn": default_collate,
+    "drop_last": is_multi_gpu,  # Drop last para consistency en multi-GPU
+}
 
-val_loader = DataLoader(
-    tokenized_splits["validation"],
-    batch_size=BATCH_SIZE,
-    num_workers=safe_num_workers,
-    pin_memory=True,
-    pin_memory_device=pin_memory_device,
-    persistent_workers=persistent_workers,
-    prefetch_factor=prefetch_factor,
-    multiprocessing_context=multiprocessing_context,  # Misma optimización
-    shuffle=False,
-    collate_fn=default_collate,
-    drop_last=False  # No drop last en validación
-)
+# Solo agregar argumentos no-None
+if prefetch_factor is not None:
+    train_kwargs["prefetch_factor"] = prefetch_factor
+if pin_memory_device is not None:
+    train_kwargs["pin_memory_device"] = pin_memory_device
+if multiprocessing_context is not None:
+    train_kwargs["multiprocessing_context"] = multiprocessing_context
+
+train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
+
+# Configurar argumentos del validation DataLoader condicionalmente
+val_kwargs = {
+    "batch_size": BATCH_SIZE,
+    "num_workers": safe_num_workers,
+    "pin_memory": True,
+    "persistent_workers": persistent_workers,
+    "shuffle": False,
+    "collate_fn": default_collate,
+    "drop_last": False,  # No drop last en validación
+}
+
+# Solo agregar argumentos no-None
+if prefetch_factor is not None:
+    val_kwargs["prefetch_factor"] = prefetch_factor
+if pin_memory_device is not None:
+    val_kwargs["pin_memory_device"] = pin_memory_device
+if multiprocessing_context is not None:
+    val_kwargs["multiprocessing_context"] = multiprocessing_context
+
+val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
 
 # Sistema de buffer inteligente para C4 streaming
 class StreamingBufferWrapper:
