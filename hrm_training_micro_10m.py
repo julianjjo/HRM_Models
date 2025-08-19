@@ -1660,6 +1660,41 @@ for split_name in ["train", "validation"]:
 train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
 val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
 
+def custom_collate_fn(batch):
+    """
+    Collate function personalizada para manejar tensores de diferentes longitudes
+    Hace padding a la longitud máxima del batch
+    """
+    # Extraer input_ids del batch
+    input_ids = [item['input_ids'] for item in batch]
+    
+    # Encontrar la longitud máxima en el batch
+    max_length = max(len(ids) for ids in input_ids)
+    
+    # Hacer padding con tokenizer.pad_token_id
+    padded_input_ids = []
+    for ids in input_ids:
+        if len(ids) < max_length:
+            # Pad con el pad_token_id
+            padding_length = max_length - len(ids)
+            padded_ids = torch.cat([ids, torch.full((padding_length,), tokenizer.pad_token_id, dtype=ids.dtype)])
+        else:
+            padded_ids = ids
+        padded_input_ids.append(padded_ids)
+    
+    # Crear attention_mask
+    attention_mask = []
+    for ids in input_ids:
+        mask = torch.ones(max_length, dtype=torch.long)
+        if len(ids) < max_length:
+            mask[len(ids):] = 0  # Marcar padding como 0
+        attention_mask.append(mask)
+    
+    return {
+        'input_ids': torch.stack(padded_input_ids),
+        'attention_mask': torch.stack(attention_mask)
+    }
+
 print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 
 # Configuración optimizada para multi-GPU (variables ya definidas arriba)
@@ -1691,7 +1726,7 @@ train_kwargs = {
     "pin_memory": True,
     "persistent_workers": persistent_workers,
     "shuffle": False,  # False para datasets iterables
-    "collate_fn": default_collate,
+    "collate_fn": custom_collate_fn,
     "drop_last": is_multi_gpu,  # Drop last para consistency en multi-GPU
 }
 
@@ -1712,7 +1747,7 @@ val_kwargs = {
     "pin_memory": True,
     "persistent_workers": persistent_workers,
     "shuffle": False,
-    "collate_fn": default_collate,
+    "collate_fn": custom_collate_fn,
     "drop_last": False,  # No drop last en validación
 }
 
