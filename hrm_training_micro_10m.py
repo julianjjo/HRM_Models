@@ -1625,6 +1625,10 @@ for split_name in ["train", "validation"]:
 # ### FIX DATALOADER ###: Usar la función segura para determinar workers
 safe_num_workers = get_num_workers()
 
+# Configuración para multi-GPU
+num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+is_multi_gpu = num_gpus > 1
+
 # Función para verificar si es IterableDataset
 def is_iterable_dataset(dataset):
     return isinstance(dataset, IterableDataset)
@@ -1635,9 +1639,7 @@ val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
 
 print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 
-# Configuración optimizada para multi-GPU
-num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-is_multi_gpu = num_gpus > 1
+# Configuración optimizada para multi-GPU (variables ya definidas arriba)
 
 # Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
