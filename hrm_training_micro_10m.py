@@ -1622,14 +1622,24 @@ for split_name in ["train", "validation"]:
         batch_size_tokenization = 1000
         num_proc = min(safe_num_workers, 4)
     
-    tokenized_splits[split_name] = raw_datasets[split_name].map(
-        tokenize_function, 
-        batched=True,
-        batch_size=batch_size_tokenization,
-        num_proc=num_proc if not is_iterable_dataset(raw_datasets[split_name]) else None,
-        remove_columns=columns_to_remove,
-        desc=f"Tokenizando {split_name} para C4 streaming"
-    ).with_format("torch")
+    # Para IterableDataset no usar num_proc (no soportado)
+    if is_iterable_dataset(raw_datasets[split_name]):
+        tokenized_splits[split_name] = raw_datasets[split_name].map(
+            tokenize_function, 
+            batched=True,
+            batch_size=batch_size_tokenization,
+            remove_columns=columns_to_remove,
+            desc=f"Tokenizando {split_name} para C4 streaming"
+        ).with_format("torch")
+    else:
+        tokenized_splits[split_name] = raw_datasets[split_name].map(
+            tokenize_function, 
+            batched=True,
+            batch_size=batch_size_tokenization,
+            num_proc=num_proc,
+            remove_columns=columns_to_remove,
+            desc=f"Tokenizando {split_name} para C4 streaming"
+        ).with_format("torch")
 
 # ### FIX DATALOADER ###: Variables ya definidas arriba
 
