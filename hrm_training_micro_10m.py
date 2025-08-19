@@ -1649,7 +1649,7 @@ if is_multi_gpu and safe_num_workers > 0:
     pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
     
     # Buffer adicional para streaming datasets masivos
-    multiprocessing_context = "spawn"  # Más estable para datasets grandes
+    multiprocessing_context = "fork"  # Compatible sin __main__ guard
     
     print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
     print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
