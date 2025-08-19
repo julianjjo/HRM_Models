@@ -8,7 +8,7 @@ VERSIÓN MICRO: Configuración para ~10M parámetros con contexto ultra-reducido
 - Configuración optimizada para hardware básico (T4, etc.)
 """
 
-import os, random, contextlib, multiprocessing as mp, atexit, math
+import os, random, multiprocessing as mp, atexit, math, time
 from typing import List, Dict, Optional, Tuple
 
 # Configurar método de multiprocessing antes de cualquier uso
@@ -19,13 +19,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
-from torch.utils.data.dataloader import default_collate
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_linear_schedule_with_warmup
+from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_cosine_schedule_with_warmup
 from tqdm.auto import tqdm
 
 from datasets import load_dataset
@@ -961,22 +959,6 @@ def show_mix_summary(mix_ratios, dataset_name=""):
 
 # get_num_workers() ya definida arriba - función duplicada eliminada
 
-def cleanup_dataloaders():
-    """Función para limpiar DataLoaders al salir"""
-    global train_loader, val_loader
-    try:
-        if 'train_loader' in globals():
-            del train_loader
-        if 'val_loader' in globals():
-            del val_loader
-        torch.cuda.empty_cache()
-        print("DataLoaders limpiados correctamente.")
-    except:
-        pass
-
-# Registrar la función de limpieza
-atexit.register(cleanup_dataloaders)
-
 def balance_gpu_memory():
     """Optimizar distribución de memoria entre GPUs para DataParallel"""
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
@@ -1857,7 +1839,7 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
     # Prefetch más agresivo para C4 streaming (dataset masivo)
-    prefetch_factor = max(128, safe_num_workers * 3)  # Incrementado para mejor CPU utilization
+    prefetch_factor = max(512, safe_num_workers * 3)  # Incrementado para mejor CPU utilization
     persistent_workers = True  # Critical para streaming - evita reinicializar workers
     # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
@@ -2017,7 +1999,6 @@ print(f"Total de pasos de entrenamiento: {num_training_steps}")
 print(f"Pasos de warmup: {num_warmup_steps}")
 
 # Scheduler coseno con warmup para decaimiento más suave
-from transformers import get_cosine_schedule_with_warmup
 
 scheduler = get_cosine_schedule_with_warmup(
     optimizer,
@@ -2096,7 +2077,7 @@ if checkpoint_loaded:
         
         if checkpoint_training_steps != num_training_steps:
             print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
-            scheduler = get_linear_schedule_with_warmup(
+            scheduler = get_cosine_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=num_warmup_steps,
                 num_training_steps=num_training_steps
@@ -2115,282 +2096,9 @@ if not checkpoint_loaded:
     best_val_loss = float('inf')
     patience_counter = 0
 
-# === NUEVAS FUNCIONES DE ENTRENAMIENTO CON LIMPIEZA ===
-
-def main_training():
-    """Función principal de entrenamiento con manejo de limpieza"""
-    global train_loader, val_loader, global_step, best_val_loss, patience_counter
-
-    try:
-        # Bucle de entrenamiento principal
-        for epoch in range(start_epoch, NUM_EPOCHS):
-            model.train()
-            optimizer.zero_grad()
-            
-            progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
-            
-            for i, batch in enumerate(progress):
-                input_ids = batch["input_ids"].to(device, non_blocking=True)
-                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-                labels = input_ids.clone()
-
-                # Mixed precision forward pass
-                with torch.amp.autocast(
-                    device_type=device.type, 
-                    dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, 
-                    enabled=MIXED_PRECISION
-                ):
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                    loss = outputs.loss / GRAD_ACCUM_STEPS
-                    
-                    # Para DataParallel, loss puede ser un tensor con múltiples valores
-                    if hasattr(model, 'module') and loss.dim() > 0:
-                        loss = loss.mean()
-                
-                # Backward pass
-                if loss is not None and torch.isfinite(loss):
-                    scaler.scale(loss).backward()
-                    
-                    # Sincronizar gradientes en DataParallel después de cada backward
-                    if hasattr(model, 'module') and world_size > 1:
-                        torch.cuda.synchronize()  # Asegurar que todas las GPUs terminen
-                    
-                    if (i + 1) % GRAD_ACCUM_STEPS == 0:
-                        # Gradient clipping y update
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                        scaler.step(optimizer)
-                        scaler.update()
-                        optimizer.zero_grad()
-                        scheduler.step()
-                        global_step += 1
-                        
-                        # Limpiar cache de GPU cada pocas iteraciones
-                        if global_step % 10 == 0:
-                            torch.cuda.empty_cache()
-                        
-                        # Checkpoint periódico
-                        if global_step % CHECKPOINT_STEPS == 0:
-                            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-                            print(f"\nGuardando checkpoint en paso {global_step}...")
-                            torch.save({
-                                'epoch': epoch,
-                                'step': global_step,
-                                'model_state_dict': model_to_save.state_dict(),
-                                'optimizer_state_dict': optimizer.state_dict(),
-                                'scheduler_state_dict': scheduler.state_dict(),
-                                'scaler_state_dict': scaler.state_dict(),
-                                'best_val_loss': best_val_loss,
-                                'patience_counter': patience_counter,
-                                'num_training_steps': num_training_steps,
-                            }, CHECKPOINT_PATH)
-                            print(f"Checkpoint guardado en {CHECKPOINT_PATH}")
-                    
-                    # Actualizar progress bar
-                    current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else LEARNING_RATE_MAX
-                    progress.set_postfix({
-                        "loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", 
-                        "lr": f"{current_lr:.2e}", 
-                        "step": global_step
-                    })
-                    
-                    # Log expandido a TensorBoard (solo proceso principal y cada N pasos)
-                    if writer is not None and global_step % 10 == 0:
-                        train_loss = loss.item() * GRAD_ACCUM_STEPS
-                        
-                        # Métricas básicas de entrenamiento
-                        writer.add_scalar('Loss/Train', train_loss, global_step)
-                        writer.add_scalar('Learning_Rate/Current', current_lr, global_step)
-                        writer.add_scalar('Training/Epoch_Progress', epoch + (i / len(progress)), global_step)
-                        writer.add_scalar('Training/Global_Step', global_step, global_step)
-                        
-                        # Métricas de gradientes cada 50 pasos para evitar overhead
-                        if global_step % 50 == 0:
-                            # Obtener el modelo sin wrapper para acceder a parámetros
-                            model_for_grads = model.module if hasattr(model, 'module') else model
-                            if hasattr(model_for_grads, '_orig_mod'):
-                                model_for_grads = model_for_grads._orig_mod
-                            
-                            grad_norm = 0.0
-                            param_norm = 0.0
-                            grad_count = 0
-                            
-                            for name, param in model_for_grads.named_parameters():
-                                if param.grad is not None:
-                                    grad_norm += param.grad.norm().item() ** 2
-                                    grad_count += 1
-                                param_norm += param.norm().item() ** 2
-                            
-                            if grad_count > 0:
-                                grad_norm = (grad_norm ** 0.5)
-                                param_norm = (param_norm ** 0.5)
-                                
-                                writer.add_scalar('Gradients/Global_Norm', grad_norm, global_step)
-                                writer.add_scalar('Parameters/Global_Norm', param_norm, global_step)
-                                writer.add_scalar('Gradients/Param_Ratio', grad_norm / (param_norm + 1e-8), global_step)
-                        
-                        # Métricas de memoria GPU cada 100 pasos
-                        if global_step % 100 == 0 and torch.cuda.is_available():
-                            for gpu_id in range(torch.cuda.device_count()):
-                                memory_allocated = torch.cuda.memory_allocated(gpu_id) / 1e9  # GB
-                                memory_cached = torch.cuda.memory_reserved(gpu_id) / 1e9     # GB
-                                writer.add_scalar(f'GPU_{gpu_id}/Memory_Allocated_GB', memory_allocated, global_step)
-                                writer.add_scalar(f'GPU_{gpu_id}/Memory_Cached_GB', memory_cached, global_step)
-                                
-                                # Calcular utilización de memoria
-                                total_memory = torch.cuda.get_device_properties(gpu_id).total_memory / 1e9
-                                memory_util = (memory_allocated / total_memory) * 100
-                                writer.add_scalar(f'GPU_{gpu_id}/Memory_Utilization_%', memory_util, global_step)
-
-            # Validación al final de cada época
-            model.eval()
-            total_val_loss, val_batches = 0.0, 0
-            
-            with torch.no_grad():
-                for batch in tqdm(val_loader, desc="Validando..."):
-                    input_ids = batch["input_ids"].to(device, non_blocking=True)
-                    attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-                    labels = input_ids.clone()
-                    
-                    with torch.amp.autocast(
-                        device_type=device.type, 
-                        dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, 
-                        enabled=MIXED_PRECISION
-                    ):
-                        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                        
-                        # Para DataParallel, loss puede ser un tensor con múltiples valores
-                        val_loss = outputs.loss
-                        if hasattr(model, 'module') and val_loss.dim() > 0:
-                            val_loss = val_loss.mean()
-
-                    if val_loss is not None and torch.isfinite(val_loss):
-                        total_val_loss += val_loss.item()
-                        val_batches += 1
-            
-            if val_batches > 0:
-                avg_val_loss = total_val_loss / val_batches
-                print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
-                
-                # Log expandido de validation metrics a TensorBoard
-                if writer is not None:
-                    # Métricas de validación principales
-                    writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
-                    writer.add_scalar('Loss/Best_Validation', best_val_loss, global_step)
-                    writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
-                    
-                    # Calcular diferencia con mejor loss
-                    val_loss_diff = avg_val_loss - best_val_loss
-                    writer.add_scalar('Loss/Val_vs_Best_Diff', val_loss_diff, global_step)
-                    
-                    # Ratio de validación vs entrenamiento (si tenemos train loss reciente)
-                    if hasattr(writer, '_last_train_loss'):
-                        train_val_ratio = avg_val_loss / (writer._last_train_loss + 1e-8)
-                        writer.add_scalar('Loss/Train_Val_Ratio', train_val_ratio, global_step)
-                        
-                        # Indicador de overfitting (val loss > train loss)
-                        overfitting_indicator = 1.0 if avg_val_loss > writer._last_train_loss else 0.0
-                        writer.add_scalar('Training/Overfitting_Signal', overfitting_indicator, global_step)
-                    
-                    # Guardar último train loss para próxima comparación
-                    writer._last_train_loss = train_loss
-                
-                # Manejar tanto DDP (_orig_mod) como DataParallel (module)
-                if hasattr(model, '_orig_mod'):
-                    model_to_save = model._orig_mod  # DDP
-                elif hasattr(model, 'module'):
-                    model_to_save = model.module     # DataParallel
-                else:
-                    model_to_save = model
-                
-                # Guardar mejor modelo
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-                    
-                    # Solo rank 0 guarda el mejor modelo en entrenamiento distribuido
-                    if not is_distributed or rank == 0:
-                        torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
-                    
-                    patience_counter = 0
-                    
-                    # Log mejora del modelo a TensorBoard con histogramas
-                    if writer is not None:
-                        writer.add_scalar('Training/New_Best_Loss', best_val_loss, global_step)
-                        
-                        # Agregar histogramas de pesos cuando se guarda el mejor modelo
-                        model_for_hist = model_to_save
-                        for name, param in model_for_hist.named_parameters():
-                            if param.requires_grad and param.dim() > 1:  # Solo capas con peso significativo
-                                # Limpiar nombre para TensorBoard
-                                clean_name = name.replace('.', '/')
-                                writer.add_histogram(f'Weights/{clean_name}', param.data, global_step)
-                                
-                                # Estadísticas de pesos
-                                writer.add_scalar(f'Weight_Stats/{clean_name}_mean', param.data.mean().item(), global_step)
-                                writer.add_scalar(f'Weight_Stats/{clean_name}_std', param.data.std().item(), global_step)
-                                writer.add_scalar(f'Weight_Stats/{clean_name}_max', param.data.max().item(), global_step)
-                                writer.add_scalar(f'Weight_Stats/{clean_name}_min', param.data.min().item(), global_step)
-                else:
-                    patience_counter += 1
-                    
-                # Checkpoint al final de época usando función distribuida
-                save_checkpoint_distributed(
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    scaler=scaler,
-                    epoch=epoch + 1,
-                    global_step=global_step,
-                    best_val_loss=best_val_loss,
-                    patience_counter=patience_counter,
-                    num_training_steps=num_training_steps,
-                    checkpoint_path=CHECKPOINT_PATH,
-                    is_distributed=is_distributed,
-                    rank=rank if is_distributed else 0
-                )
-            
-            # Early stopping
-            if patience_counter >= EARLY_STOPPING_PATIENCE:
-                print("Detención temprana por falta de mejora en la validación.")
-                break
-        
-        print("Entrenamiento finalizado.")
-        
-        # Cerrar TensorBoard Writer
-        if writer is not None:
-            writer.close()
-            print("📊 TensorBoard Writer cerrado")
-            
-        return True
-        
-    finally:
-        # Limpieza explícita al finalizar
-        try:
-            if 'train_loader' in globals():
-                del train_loader
-            if 'val_loader' in globals():
-                del val_loader
-            torch.cuda.empty_cache()
-            print("Limpieza post-entrenamiento completada.")
-        except:
-            pass
-
-# Compilar modelo si está disponible
-# Deshabilitado torch.compile para reducir uso de memoria
-# if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
-#     print("Compilando el modelo con torch.compile()...")
-#     model = torch.compile(model)
-print("torch.compile() deshabilitado para optimizar memoria")
-
-# ==============================================================================
-# --- BUCLE DE ENTRENAMIENTO ---
-# ==============================================================================
-
 global_step = start_step
 
 # Variables para tracking de velocidad y throughput
-import time
 step_times = []
 epoch_start_time = None
 samples_processed = 0
@@ -2642,38 +2350,3 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperatu
         )
     
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
-def test_model_and_summary():
-    """Prueba el modelo final y muestra el resumen del entrenamiento"""
-    print("\n--- Probando la Generación del Modelo Final ---")
-    try:
-        inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
-        # torch.compile deshabilitado para ahorrar memoria
-        # if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
-        #     inference_model = torch.compile(inference_model)
-        
-        prompts = [
-            "The cat sat on the", 
-            "Artificial intelligence is a field that", 
-            "To be, or not to be, that is the question:",
-            "In a world where technology advances rapidly,",
-            "The future of humanity depends on"
-        ]
-        
-        for prompt in prompts:
-            response = chat_with_model(prompt, inference_model, tokenizer)
-            print(f"\nPrompt: {prompt}\nRespuesta: {response}")
-            
-    except Exception as e:
-        print(f"El test de generación falló: {e}")
-
-    print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
-    print(f"Parámetros del modelo: {total_params:,}")
-    print(f"Contexto máximo: {BLOCK_SIZE}")
-    print(f"Capas HRM: {MODEL_PARAMS['n_layers']}")
-    print(f"Dimensión del modelo: {MODEL_PARAMS['n_embd']}")
-    print(f"Cabezas de atención: {MODEL_PARAMS['n_head']}")
-    print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
-    print(f"Modelo guardado en: {OUTPUT_DIR}")
-
-    print("\n--- Script completado exitosamente ---")
