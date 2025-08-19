@@ -1960,7 +1960,7 @@ class StreamingBufferWrapper:
 if is_multi_gpu and ACTIVE_DATASET == "c4":
     print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
     # Buffer más grande para mejor utilización de CPU en paralelo
-    buffer_size = max(64, num_gpus * safe_num_workers * 8)  # Incrementado para mejor throughput
+    buffer_size = max(256, num_gpus * safe_num_workers * 16)  # Incrementado para mejor throughput
     train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
     print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
 
