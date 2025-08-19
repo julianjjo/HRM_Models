@@ -409,6 +409,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
     config_class = HRMText1Config
     main_input_name = "input_ids"
     supports_gradient_checkpointing = True
+    _tied_weights_keys = ["lm_head.weight", "token_embeddings.weight"]
     
     def __init__(self, config: HRMText1Config):
         super().__init__(config)
@@ -454,6 +455,11 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         # Habilitar gradient checkpointing si está configurado
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
+    
+    def _tie_weights(self):
+        """Tie the weights between the input and output embeddings"""
+        if hasattr(self, 'lm_head') and hasattr(self, 'token_embeddings'):
+            self._tie_or_clone_weights(self.lm_head, self.token_embeddings)
     
     def _set_gradient_checkpointing(self, module, value=False):
         """Para compatibilidad con transformers"""
@@ -1185,6 +1191,127 @@ def setup_distributed():
             print("📱 CPU training mode (sin GPU detectada)")
         return False, 0, 1, 0
 
+def save_checkpoint_distributed(model, optimizer, scheduler, scaler, epoch, global_step, 
+                               best_val_loss, patience_counter, num_training_steps, 
+                               checkpoint_path, is_distributed=False, rank=0):
+    """
+    Guarda checkpoint de manera compatible con entrenamiento distribuido y single GPU
+    Solo el proceso de rank 0 guarda el checkpoint para evitar conflictos
+    """
+    # Solo el proceso principal (rank 0) debe guardar checkpoints
+    if is_distributed and 'RANK' in os.environ and rank != 0:
+        # Los demás procesos esperan a que rank 0 termine
+        if hasattr(dist, 'is_initialized') and dist.is_initialized():
+            dist.barrier()
+        return
+    
+    try:
+        # Obtener el modelo sin wrapper DDP/DataParallel
+        model_to_save = model
+        if hasattr(model, '_orig_mod'):
+            model_to_save = model._orig_mod  # DDP
+        elif hasattr(model, 'module'):
+            model_to_save = model.module     # DataParallel
+        
+        print(f"\n💾 Guardando checkpoint en paso {global_step}...")
+        
+        # Crear directorio si no existe
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        
+        # Crear checkpoint temporal primero para atomicidad
+        temp_path = checkpoint_path + '.tmp'
+        
+        checkpoint_data = {
+            'epoch': epoch,
+            'step': global_step,
+            'model_state_dict': model_to_save.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scaler_state_dict': scaler.state_dict(),
+            'best_val_loss': best_val_loss,
+            'patience_counter': patience_counter,
+            'num_training_steps': num_training_steps,
+            'distributed_training': is_distributed,
+            'timestamp': time.time(),
+        }
+        
+        # Guardar en archivo temporal
+        torch.save(checkpoint_data, temp_path)
+        
+        # Mover archivo temporal al final (operación atómica)
+        os.rename(temp_path, checkpoint_path)
+        
+        print(f"✅ Checkpoint guardado exitosamente en {checkpoint_path}")
+        
+        # Sincronizar con otros procesos si es distribuido
+        if is_distributed and 'RANK' in os.environ and hasattr(dist, 'is_initialized') and dist.is_initialized():
+            dist.barrier()
+            
+    except Exception as e:
+        print(f"❌ Error al guardar checkpoint: {e}")
+        
+        # Limpiar archivo temporal si existe
+        temp_path = checkpoint_path + '.tmp'
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+        
+        # Sincronizar con otros procesos incluso si hay error
+        if is_distributed and 'RANK' in os.environ and hasattr(dist, 'is_initialized') and dist.is_initialized():
+            dist.barrier()
+        
+        raise e
+
+def load_checkpoint_distributed(checkpoint_path, model, optimizer, scheduler, scaler, 
+                               device, is_distributed=False, rank=0):
+    """
+    Carga checkpoint de manera compatible con entrenamiento distribuido y single GPU
+    """
+    if not os.path.exists(checkpoint_path):
+        print("--- No se encontró checkpoint. Empezando entrenamiento desde cero. ---")
+        return False, 0, 0, float('inf'), 0
+    
+    try:
+        print(f"--- Reanudando entrenamiento desde el checkpoint: {checkpoint_path} ---")
+        
+        # Sincronizar antes de cargar si es distribuido
+        if is_distributed and 'RANK' in os.environ and hasattr(dist, 'is_initialized') and dist.is_initialized():
+            dist.barrier()
+        
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Obtener el modelo sin wrapper para cargar estado
+        model_to_load = model
+        if hasattr(model, '_orig_mod'):
+            model_to_load = model._orig_mod  # DDP
+        elif hasattr(model, 'module'):
+            model_to_load = model.module     # DataParallel
+        
+        # Cargar estados
+        model_to_load.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        
+        # Extraer información del checkpoint
+        start_epoch = checkpoint['epoch']
+        start_step = checkpoint.get('step', 0)
+        best_val_loss = checkpoint['best_val_loss']
+        patience_counter = checkpoint.get('patience_counter', 0)
+        
+        print(f"✅ Checkpoint cargado exitosamente")
+        print(f"   📊 Época: {start_epoch + 1}, Paso: {start_step}")
+        print(f"   🏆 Mejor pérdida de validación: {best_val_loss:.4f}")
+        
+        return True, start_epoch, start_step, best_val_loss, patience_counter
+        
+    except Exception as e:
+        print(f"❌ Error al cargar checkpoint: {e}")
+        print("--- Empezando entrenamiento desde cero. ---")
+        return False, 0, 0, float('inf'), 0
+
 # Configurar distributed training
 is_distributed, rank, world_size, local_rank = setup_distributed()
 
@@ -1899,65 +2026,52 @@ best_val_loss = float('inf')
 patience_counter = 0
 CHECKPOINT_STEPS = 1000
 
-if os.path.exists(CHECKPOINT_PATH):
-    print(f"--- Reanudando entrenamiento desde el checkpoint: {CHECKPOINT_PATH} ---")
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-    
-    # Manejar tanto DDP (_orig_mod) como DataParallel (module)
-    if hasattr(model, '_orig_mod'):
-        model_to_load = model._orig_mod  # DDP
-    elif hasattr(model, 'module'):
-        model_to_load = model.module     # DataParallel
-    else:
-        model_to_load = model
-    model_to_load.load_state_dict(checkpoint['model_state_dict'])
+# Cargar checkpoint usando la función distribuida
+checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = load_checkpoint_distributed(
+    checkpoint_path=CHECKPOINT_PATH,
+    model=model,
+    optimizer=optimizer,
+    scheduler=scheduler,
+    scaler=scaler,
+    device=device,
+    is_distributed=is_distributed,
+    rank=rank if is_distributed else 0
+)
 
-    # Modificar el learning rate si el flag está activado
-    if MODIFY_LR_ON_LOAD:
-        print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
-        # Modificar el learning rate en el checkpoint del optimizer antes de cargarlo
-        for param_group in checkpoint['optimizer_state_dict']['param_groups']:
-            param_group['lr'] = NEW_LEARNING_RATE
-        print(f"Learning rate modificado en el checkpoint del optimizer")
-    
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    
-    # Verificar que el learning rate se aplicó correctamente
-    if MODIFY_LR_ON_LOAD:
-        actual_lr = optimizer.param_groups[0]['lr']
-        print(f"Learning rate después de cargar: {actual_lr:.6f}")
-        if abs(actual_lr - NEW_LEARNING_RATE) > 1e-8:
-            print(f"⚠️  Advertencia: El learning rate no se aplicó correctamente")
-        else:
-            print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
-    
-    start_epoch = checkpoint['epoch']
-    start_step = checkpoint.get('step', 0)
-    best_val_loss = checkpoint['best_val_loss']
-    patience_counter = checkpoint.get('patience_counter', 0)
-    
-    # VERIFICAR SI EL DATASET CAMBIÓ Y REAJUSTAR SCHEDULER
-    checkpoint_training_steps = checkpoint.get('num_training_steps', 0)
-    if checkpoint_training_steps != num_training_steps:
-        print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps
-        )
-        # Ajustar el paso actual proporcionalmente
-        current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
-        new_step = int(current_progress * num_training_steps)
-        for _ in range(new_step):
-            scheduler.step()
-        print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
-    
-    print(f"Checkpoint cargado. Reanudando desde la época {start_epoch + 1}, paso {start_step}.")
-    print(f"Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
-else:
-    print("--- No se encontró checkpoint. Empezando entrenamiento desde cero. ---")
+# Manejar modificación de learning rate si se cargó checkpoint
+if checkpoint_loaded and MODIFY_LR_ON_LOAD:
+    print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = NEW_LEARNING_RATE
+    print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
+
+# Verificar y ajustar scheduler si el dataset cambió
+if checkpoint_loaded:
+    # Recargar checkpoint para verificar num_training_steps (se podría optimizar guardándolo en la función)
+    if os.path.exists(CHECKPOINT_PATH):
+        temp_checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+        checkpoint_training_steps = temp_checkpoint.get('num_training_steps', 0)
+        
+        if checkpoint_training_steps != num_training_steps:
+            print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps
+            )
+            # Ajustar el paso actual proporcionalmente
+            current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
+            new_step = int(current_progress * num_training_steps)
+            for _ in range(new_step):
+                scheduler.step()
+            print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
+
+# Inicializar valores por defecto si no se cargó checkpoint
+if not checkpoint_loaded:
+    start_epoch = 0
+    start_step = 0
+    best_val_loss = float('inf')
+    patience_counter = 0
 
 # === NUEVAS FUNCIONES DE ENTRENAMIENTO CON LIMPIEZA ===
 
@@ -2147,7 +2261,11 @@ def main_training():
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-                    torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+                    
+                    # Solo rank 0 guarda el mejor modelo en entrenamiento distribuido
+                    if not is_distributed or rank == 0:
+                        torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+                    
                     patience_counter = 0
                     
                     # Log mejora del modelo a TensorBoard con histogramas
@@ -2170,19 +2288,21 @@ def main_training():
                 else:
                     patience_counter += 1
                     
-                # Checkpoint al final de época
-                print(f"Guardando checkpoint al final de época {epoch+1}...")
-                torch.save({
-                    'epoch': epoch + 1,
-                    'step': global_step,
-                    'model_state_dict': model_to_save.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'scaler_state_dict': scaler.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'patience_counter': patience_counter,
-                    'num_training_steps': num_training_steps,
-                }, CHECKPOINT_PATH)
+                # Checkpoint al final de época usando función distribuida
+                save_checkpoint_distributed(
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    epoch=epoch + 1,
+                    global_step=global_step,
+                    best_val_loss=best_val_loss,
+                    patience_counter=patience_counter,
+                    num_training_steps=num_training_steps,
+                    checkpoint_path=CHECKPOINT_PATH,
+                    is_distributed=is_distributed,
+                    rank=rank if is_distributed else 0
+                )
             
             # Early stopping
             if patience_counter >= EARLY_STOPPING_PATIENCE:
@@ -2307,8 +2427,20 @@ def main_training():
                     
                     # Guardar checkpoint cada CHECKPOINT_STEPS
                     if global_step % CHECKPOINT_STEPS == 0:
-                        # [El código de checkpoint se mantiene igual]
-                        pass
+                        save_checkpoint_distributed(
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            scaler=scaler,
+                            epoch=epoch,
+                            global_step=global_step,
+                            best_val_loss=best_val_loss,
+                            patience_counter=patience_counter,
+                            num_training_steps=num_training_steps,
+                            checkpoint_path=CHECKPOINT_PATH,
+                            is_distributed=is_distributed,
+                            rank=rank if is_distributed else 0
+                        )
                     
                     # Actualizar progress bar
                     current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else LEARNING_RATE_MAX
@@ -2366,7 +2498,7 @@ def save_final_model():
         print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
         model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
 
-    model_to_save.save_pretrained(OUTPUT_DIR)
+    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
     tokenizer.save_pretrained(OUTPUT_DIR)
     print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
