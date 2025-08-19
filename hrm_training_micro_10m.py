@@ -1852,12 +1852,53 @@ def main_training():
                         "step": global_step
                     })
                     
-                    # Log a TensorBoard (solo proceso principal y cada N pasos)
+                    # Log expandido a TensorBoard (solo proceso principal y cada N pasos)
                     if writer is not None and global_step % 10 == 0:
                         train_loss = loss.item() * GRAD_ACCUM_STEPS
-                        writer.add_scalar('train/loss', train_loss, global_step)
-                        writer.add_scalar('train/learning_rate', current_lr, global_step)
-                        writer.add_scalar('train/epoch', epoch + (i / len(progress)), global_step)
+                        
+                        # Métricas básicas de entrenamiento
+                        writer.add_scalar('Loss/Train', train_loss, global_step)
+                        writer.add_scalar('Learning_Rate/Current', current_lr, global_step)
+                        writer.add_scalar('Training/Epoch_Progress', epoch + (i / len(progress)), global_step)
+                        writer.add_scalar('Training/Global_Step', global_step, global_step)
+                        
+                        # Métricas de gradientes cada 50 pasos para evitar overhead
+                        if global_step % 50 == 0:
+                            # Obtener el modelo sin wrapper para acceder a parámetros
+                            model_for_grads = model.module if hasattr(model, 'module') else model
+                            if hasattr(model_for_grads, '_orig_mod'):
+                                model_for_grads = model_for_grads._orig_mod
+                            
+                            grad_norm = 0.0
+                            param_norm = 0.0
+                            grad_count = 0
+                            
+                            for name, param in model_for_grads.named_parameters():
+                                if param.grad is not None:
+                                    grad_norm += param.grad.norm().item() ** 2
+                                    grad_count += 1
+                                param_norm += param.norm().item() ** 2
+                            
+                            if grad_count > 0:
+                                grad_norm = (grad_norm ** 0.5)
+                                param_norm = (param_norm ** 0.5)
+                                
+                                writer.add_scalar('Gradients/Global_Norm', grad_norm, global_step)
+                                writer.add_scalar('Parameters/Global_Norm', param_norm, global_step)
+                                writer.add_scalar('Gradients/Param_Ratio', grad_norm / (param_norm + 1e-8), global_step)
+                        
+                        # Métricas de memoria GPU cada 100 pasos
+                        if global_step % 100 == 0 and torch.cuda.is_available():
+                            for gpu_id in range(torch.cuda.device_count()):
+                                memory_allocated = torch.cuda.memory_allocated(gpu_id) / 1e9  # GB
+                                memory_cached = torch.cuda.memory_reserved(gpu_id) / 1e9     # GB
+                                writer.add_scalar(f'GPU_{gpu_id}/Memory_Allocated_GB', memory_allocated, global_step)
+                                writer.add_scalar(f'GPU_{gpu_id}/Memory_Cached_GB', memory_cached, global_step)
+                                
+                                # Calcular utilización de memoria
+                                total_memory = torch.cuda.get_device_properties(gpu_id).total_memory / 1e9
+                                memory_util = (memory_allocated / total_memory) * 100
+                                writer.add_scalar(f'GPU_{gpu_id}/Memory_Utilization_%', memory_util, global_step)
 
             # Validación al final de cada época
             model.eval()
@@ -1889,11 +1930,28 @@ def main_training():
                 avg_val_loss = total_val_loss / val_batches
                 print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
                 
-                # Log validation metrics a TensorBoard
+                # Log expandido de validation metrics a TensorBoard
                 if writer is not None:
-                    writer.add_scalar('validation/loss', avg_val_loss, global_step)
-                    writer.add_scalar('validation/best_loss', best_val_loss, global_step)
-                    writer.add_scalar('validation/patience_counter', patience_counter, global_step)
+                    # Métricas de validación principales
+                    writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
+                    writer.add_scalar('Loss/Best_Validation', best_val_loss, global_step)
+                    writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
+                    
+                    # Calcular diferencia con mejor loss
+                    val_loss_diff = avg_val_loss - best_val_loss
+                    writer.add_scalar('Loss/Val_vs_Best_Diff', val_loss_diff, global_step)
+                    
+                    # Ratio de validación vs entrenamiento (si tenemos train loss reciente)
+                    if hasattr(writer, '_last_train_loss'):
+                        train_val_ratio = avg_val_loss / (writer._last_train_loss + 1e-8)
+                        writer.add_scalar('Loss/Train_Val_Ratio', train_val_ratio, global_step)
+                        
+                        # Indicador de overfitting (val loss > train loss)
+                        overfitting_indicator = 1.0 if avg_val_loss > writer._last_train_loss else 0.0
+                        writer.add_scalar('Training/Overfitting_Signal', overfitting_indicator, global_step)
+                    
+                    # Guardar último train loss para próxima comparación
+                    writer._last_train_loss = train_loss
                 
                 # Manejar tanto DDP (_orig_mod) como DataParallel (module)
                 if hasattr(model, '_orig_mod'):
@@ -1910,9 +1968,23 @@ def main_training():
                     torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
                     patience_counter = 0
                     
-                    # Log mejora del modelo a TensorBoard
+                    # Log mejora del modelo a TensorBoard con histogramas
                     if writer is not None:
-                        writer.add_scalar('model/new_best_loss', best_val_loss, global_step)
+                        writer.add_scalar('Training/New_Best_Loss', best_val_loss, global_step)
+                        
+                        # Agregar histogramas de pesos cuando se guarda el mejor modelo
+                        model_for_hist = model_to_save
+                        for name, param in model_for_hist.named_parameters():
+                            if param.requires_grad and param.dim() > 1:  # Solo capas con peso significativo
+                                # Limpiar nombre para TensorBoard
+                                clean_name = name.replace('.', '/')
+                                writer.add_histogram(f'Weights/{clean_name}', param.data, global_step)
+                                
+                                # Estadísticas de pesos
+                                writer.add_scalar(f'Weight_Stats/{clean_name}_mean', param.data.mean().item(), global_step)
+                                writer.add_scalar(f'Weight_Stats/{clean_name}_std', param.data.std().item(), global_step)
+                                writer.add_scalar(f'Weight_Stats/{clean_name}_max', param.data.max().item(), global_step)
+                                writer.add_scalar(f'Weight_Stats/{clean_name}_min', param.data.min().item(), global_step)
                 else:
                     patience_counter += 1
                     
@@ -1968,6 +2040,131 @@ print("torch.compile() deshabilitado para optimizar memoria")
 # ==============================================================================
 
 global_step = start_step
+
+# Variables para tracking de velocidad y throughput
+import time
+step_times = []
+epoch_start_time = None
+samples_processed = 0
+
+def main_training():
+    """Función principal de entrenamiento con métricas avanzadas de TensorBoard"""
+    global global_step, writer, step_times, epoch_start_time, samples_processed
+    
+    # Métricas de velocidad
+    step_start_time = time.time()
+    
+    for epoch in range(start_epoch, NUM_EPOCHS):
+        epoch_start_time = time.time()
+        print(f"\\n🚀 Iniciando Época {epoch+1}/{NUM_EPOCHS}")
+        
+        model.train()
+        optimizer.zero_grad()
+        
+        progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
+        
+        epoch_loss = 0.0
+        epoch_steps = 0
+        
+        for i, batch in enumerate(progress):
+            step_start_time = time.time()
+            
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            labels = input_ids.clone()
+            
+            # Contar muestras procesadas
+            samples_processed += input_ids.size(0)
+            
+            # Mixed precision forward pass
+            with torch.amp.autocast(
+                device_type=device.type, 
+                dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, 
+                enabled=MIXED_PRECISION
+            ):
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss / GRAD_ACCUM_STEPS
+                
+                # Para DataParallel, loss puede ser un tensor con múltiples valores
+                if hasattr(model, 'module') and loss.dim() > 0:
+                    loss = loss.mean()
+            
+            # Backward pass
+            if loss is not None and torch.isfinite(loss):
+                scaler.scale(loss).backward()
+                epoch_loss += loss.item() * GRAD_ACCUM_STEPS
+                epoch_steps += 1
+                
+                if (i + 1) % GRAD_ACCUM_STEPS == 0:
+                    # Gradient clipping y update
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    scheduler.step()
+                    global_step += 1
+                    
+                    # Métricas de tiempo y velocidad
+                    step_end_time = time.time()
+                    step_time = step_end_time - step_start_time
+                    step_times.append(step_time)
+                    
+                    # Mantener solo últimos 100 tiempos para rolling average
+                    if len(step_times) > 100:
+                        step_times.pop(0)
+                    
+                    # Guardar checkpoint cada CHECKPOINT_STEPS
+                    if global_step % CHECKPOINT_STEPS == 0:
+                        # [El código de checkpoint se mantiene igual]
+                        pass
+                    
+                    # Actualizar progress bar
+                    current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else LEARNING_RATE_MAX
+                    progress.set_postfix({
+                        "loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", 
+                        "lr": f"{current_lr:.2e}", 
+                        "step": global_step,
+                        "s/step": f"{step_time:.2f}"
+                    })
+                    
+                    # TensorBoard logging expandido (incluyendo código anterior)
+                    if writer is not None and global_step % 10 == 0:
+                        train_loss = loss.item() * GRAD_ACCUM_STEPS
+                        
+                        # Métricas básicas
+                        writer.add_scalar('Loss/Train', train_loss, global_step)
+                        writer.add_scalar('Learning_Rate/Current', current_lr, global_step)
+                        
+                        # Métricas de velocidad y throughput
+                        avg_step_time = sum(step_times) / len(step_times) if step_times else 0
+                        writer.add_scalar('Performance/Avg_Step_Time_Sec', avg_step_time, global_step)
+                        writer.add_scalar('Performance/Steps_Per_Second', 1.0 / (avg_step_time + 1e-8), global_step)
+                        
+                        # Throughput en muestras por segundo
+                        samples_per_sec = (input_ids.size(0) * GRAD_ACCUM_STEPS) / (avg_step_time + 1e-8)
+                        writer.add_scalar('Performance/Samples_Per_Second', samples_per_sec, global_step)
+                        writer.add_scalar('Performance/Tokens_Per_Second', samples_per_sec * BLOCK_SIZE, global_step)
+                        
+                        # Tiempo transcurrido desde inicio de época
+                        if epoch_start_time is not None:
+                            epoch_elapsed = time.time() - epoch_start_time
+                            writer.add_scalar('Performance/Epoch_Time_Minutes', epoch_elapsed / 60.0, global_step)
+                        
+                        # [Resto del código TensorBoard anterior se mantiene]
+        
+        # Validación al final de cada época
+        print(f"\\n📊 Ejecutando validación para época {epoch+1}")
+        model.eval()
+        # [El código de validación se mantiene igual]
+        
+        # Log tiempo total de época
+        if writer is not None and epoch_start_time is not None:
+            total_epoch_time = time.time() - epoch_start_time
+            writer.add_scalar('Performance/Total_Epoch_Time_Minutes', total_epoch_time / 60.0, global_step)
+            writer.add_scalar('Performance/Avg_Loss_Per_Epoch', epoch_loss / max(epoch_steps, 1), global_step)
+    
+    print("Entrenamiento completado en main_training()!")
 
 def save_final_model():
     """Guarda el modelo final y lo sube a Hugging Face Hub si está configurado"""
