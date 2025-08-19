@@ -1554,7 +1554,7 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
 # Para dataset mezclado, los splits ya están configurados
 
 def tokenize_function(examples):
-    """Función de tokenización flexible que maneja diferentes formatos de dataset"""
+    """Función de tokenización optimizada para C4 streaming masivo"""
     texts = []
     
     # Manejar diferentes campos de texto según el dataset
@@ -1577,12 +1577,21 @@ def tokenize_function(examples):
         else:
             raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
     
-    # Procesar textos con filtro optimizado para modelo pequeño
+    # Optimización para C4: procesar textos con filtro eficiente
     for text in text_field:
-        if isinstance(text, str) and len(text) > 100:  # Filtro más estricto para calidad
+        if isinstance(text, str) and len(text) > 100:  # Filtro optimizado para calidad
             texts.append(str(text) + tokenizer.eos_token)
     
-    return tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
+    # Tokenización optimizada para streaming masivo
+    # Sin padding para mayor eficiencia en memoria y procesamiento
+    return tokenizer(
+        texts, 
+        truncation=True, 
+        max_length=BLOCK_SIZE, 
+        padding=False,  # Eliminado padding para streaming efficiency
+        add_special_tokens=False,  # Ya agregamos EOS token manualmente
+        return_attention_mask=False  # Sin attention mask para optimizar memoria
+    )
 
 print("Applying tokenization function (on-the-fly)...")
 tokenized_splits = {}
@@ -1594,10 +1603,23 @@ print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
 print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
 
 for split_name in ["train", "validation"]:
+    # Optimización para C4 streaming: batch size más grande y configuración eficiente
+    if ACTIVE_DATASET == "c4" and is_multi_gpu:
+        # Configuración optimizada para C4 streaming masivo
+        batch_size_tokenization = 2000  # Batch más grande para C4
+        num_proc = min(safe_num_workers, 8)  # Paralelización limitada
+        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc}")
+    else:
+        batch_size_tokenization = 1000
+        num_proc = min(safe_num_workers, 4)
+    
     tokenized_splits[split_name] = raw_datasets[split_name].map(
         tokenize_function, 
-        batched=True, 
-        remove_columns=columns_to_remove
+        batched=True,
+        batch_size=batch_size_tokenization,
+        num_proc=num_proc if not is_iterable_dataset(raw_datasets[split_name]) else None,
+        remove_columns=columns_to_remove,
+        desc=f"Tokenizando {split_name} para C4 streaming"
     ).with_format("torch")
 
 # ### FIX DATALOADER ###: Usar la función segura para determinar workers
@@ -1617,16 +1639,23 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
 is_multi_gpu = num_gpus > 1
 
-# Configurar prefetch y persistent_workers para multi-GPU
+# Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
-    prefetch_factor = 4  # Más prefetch para multi-GPU
-    persistent_workers = True  # Mantener workers vivos entre epochs
-    pin_memory_device = "cuda"  # Pin to specific CUDA device
-    print(f"🚀 Configuración Multi-GPU: prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers}")
+    # Prefetch más agresivo para C4 streaming (dataset masivo)
+    prefetch_factor = 8  # Incrementado para C4 600B - más buffer para evitar GPU idle
+    persistent_workers = True  # Critical para streaming - evita reinicializar workers
+    pin_memory_device = f"cuda:{LOCAL_RANK}"  # Pin a GPU específica
+    
+    # Buffer adicional para streaming datasets masivos
+    multiprocessing_context = "spawn"  # Más estable para datasets grandes
+    
+    print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
+    print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
 else:
-    prefetch_factor = 2 if safe_num_workers > 0 else None
+    prefetch_factor = 4 if safe_num_workers > 0 else None  # Incrementado para single-GPU
     persistent_workers = safe_num_workers > 0
     pin_memory_device = None
+    multiprocessing_context = None
 
 train_loader = DataLoader(
     tokenized_splits["train"],
@@ -1636,6 +1665,7 @@ train_loader = DataLoader(
     pin_memory_device=pin_memory_device,
     persistent_workers=persistent_workers,
     prefetch_factor=prefetch_factor,
+    multiprocessing_context=multiprocessing_context,  # Optimización para C4 streaming
     shuffle=False,  # False para datasets iterables
     collate_fn=default_collate,
     drop_last=True if is_multi_gpu else False  # Drop last para consistency en multi-GPU
@@ -1649,10 +1679,56 @@ val_loader = DataLoader(
     pin_memory_device=pin_memory_device,
     persistent_workers=persistent_workers,
     prefetch_factor=prefetch_factor,
+    multiprocessing_context=multiprocessing_context,  # Misma optimización
     shuffle=False,
     collate_fn=default_collate,
     drop_last=False  # No drop last en validación
 )
+
+# Sistema de buffer inteligente para C4 streaming
+class StreamingBufferWrapper:
+    """Buffer inteligente para datasets streaming masivos como C4"""
+    def __init__(self, dataloader, buffer_size=None, min_buffer_ratio=0.4):
+        self.dataloader = dataloader
+        # Buffer adaptativo basado en número de GPUs
+        self.buffer_size = buffer_size or (num_gpus * safe_num_workers * 4)
+        self.min_buffer_ratio = min_buffer_ratio
+        self.buffer = []
+        self.iterator = iter(dataloader)
+        self._fill_initial_buffer()
+        
+    def _fill_initial_buffer(self):
+        """Llenar buffer inicial para evitar GPU starvation"""
+        target_size = int(self.buffer_size * 0.8)  # 80% inicial
+        try:
+            for _ in range(target_size):
+                batch = next(self.iterator)
+                self.buffer.append(batch)
+            print(f"🔋 Buffer inicial llenado: {len(self.buffer)} batches")
+        except StopIteration:
+            print(f"⚠️  Dataset agotado durante llenado inicial: {len(self.buffer)} batches")
+    
+    def _maintain_buffer(self):
+        """Mantener buffer mínimo para streaming continuo"""
+        min_size = int(self.buffer_size * self.min_buffer_ratio)
+        while len(self.buffer) < min_size:
+            try:
+                batch = next(self.iterator)
+                self.buffer.append(batch)
+            except StopIteration:
+                break
+    
+    def __iter__(self):
+        while self.buffer:
+            # Mantener buffer antes de entregar batch
+            self._maintain_buffer()
+            if self.buffer:
+                yield self.buffer.pop(0)
+
+# Aplicar buffer wrapper solo en multi-GPU para C4 streaming
+if is_multi_gpu and ACTIVE_DATASET == "c4":
+    print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
+    train_loader = StreamingBufferWrapper(train_loader, buffer_size=num_gpus * safe_num_workers * 6)
 
 # Crear modelo
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
@@ -2143,6 +2219,15 @@ def main_training():
                     # Mantener solo últimos 100 tiempos para rolling average
                     if len(step_times) > 100:
                         step_times.pop(0)
+                    
+                    # Monitoreo específico para C4 streaming - detectar GPU starvation
+                    if ACTIVE_DATASET == "c4" and len(step_times) >= 10:
+                        recent_avg_time = sum(step_times[-10:]) / 10
+                        if recent_avg_time > 2.0:  # Si los steps toman más de 2 segundos
+                            print(f"⚠️  Posible GPU starvation detectado: {recent_avg_time:.2f}s por step")
+                            print(f"   💡 Considera aumentar prefetch_factor o buffer size")
+                        elif recent_avg_time < 0.1:  # Steps muy rápidos pueden indicar datos insuficientes
+                            print(f"🚀 GPU utilización óptima: {recent_avg_time:.3f}s por step")
                     
                     # Guardar checkpoint cada CHECKPOINT_STEPS
                     if global_step % CHECKPOINT_STEPS == 0:
