@@ -942,22 +942,7 @@ def show_mix_summary(mix_ratios, dataset_name=""):
 # --- FUNCIONES AUXILIARES PARA DATALOADER Y LIMPIEZA ---
 # ==============================================================================
 
-def get_num_workers():
-    """
-    Detecta automáticamente el número óptimo de workers para DataLoader
-    """
-    try:
-        # Detectar si estamos en Jupyter/IPython
-        get_ipython()
-        print("Detectado entorno Jupyter/IPython. Usando num_workers=0 para mayor estabilidad.")
-        return 0
-    except:
-        pass
-
-    # Para sistemas normales, usar menos workers para evitar problemas
-    workers = min(2, mp.cpu_count())
-    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
-    return workers
+# get_num_workers() ya definida arriba - función duplicada eliminada
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
@@ -1622,14 +1607,14 @@ for split_name in ["train", "validation"]:
         batch_size_tokenization = 1000
         num_proc = min(safe_num_workers, 4)
     
-    # Para IterableDataset no usar num_proc (no soportado)
+    # Para IterableDataset no usar num_proc ni desc (no soportados)
     if is_iterable_dataset(raw_datasets[split_name]):
+        print(f"🚀 Tokenizando {split_name} para C4 streaming (IterableDataset)")
         tokenized_splits[split_name] = raw_datasets[split_name].map(
             tokenize_function, 
             batched=True,
             batch_size=batch_size_tokenization,
-            remove_columns=columns_to_remove,
-            desc=f"Tokenizando {split_name} para C4 streaming"
+            remove_columns=columns_to_remove
         ).with_format("torch")
     else:
         tokenized_splits[split_name] = raw_datasets[split_name].map(
