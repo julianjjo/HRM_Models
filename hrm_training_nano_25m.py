@@ -1646,22 +1646,34 @@ print("torch.compile() deshabilitado para optimizar memoria")
 
 global_step = start_step
 
-for epoch in range(start_epoch, NUM_EPOCHS):
-    model.train()
-    
-    # Configurar epoch para DistributedSampler si está en uso
-    if is_distributed and train_sampler is not None:
-        train_sampler.set_epoch(epoch)
-        print(f"📅 Epoch {epoch} configurado para DistributedSampler en rank {rank}")
-    
-    progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
-    
-    for i, batch in enumerate(progress):
-        # Para IterableDataset, usamos la estimación de pasos por época
-        loader_len = estimated_steps_per_epoch if is_iterable else len(train_loader)
+# Variables para tracking de velocidad y throughput
+import time
+step_times = []
+epoch_start_time = None
+samples_processed = 0
 
-        input_ids = batch["input_ids"].to(device, non_blocking=True)
-        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+def main_training():
+    """Función principal de entrenamiento con métricas avanzadas de performance"""
+    global train_loader, val_loader, global_step, best_val_loss, patience_counter
+    global step_times, epoch_start_time, samples_processed
+    
+    try:
+        for epoch in range(start_epoch, NUM_EPOCHS):
+            model.train()
+            epoch_start_time = time.time()
+            
+            # Configurar epoch para DistributedSampler si está en uso
+            if is_distributed and train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+                print(f"📅 Epoch {epoch} configurado para DistributedSampler en rank {rank}")
+            
+            progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
+            
+            for i, batch in enumerate(progress):
+                step_start_time = time.time()
+                
+                input_ids = batch["input_ids"].to(device, non_blocking=True)
+                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = input_ids.clone()
 
         with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):

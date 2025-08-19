@@ -583,7 +583,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 10.0   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 30.0   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -756,7 +756,7 @@ NUM_EPOCHS = 2             # Menos épocas para modelo micro
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 70        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+BATCH_SIZE = 260        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
