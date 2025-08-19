@@ -1584,7 +1584,7 @@ tokenized_splits = {}
 # Configuración para multi-GPU (necesario antes del loop de tokenización)
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
 is_multi_gpu = num_gpus > 1
-safe_num_workers = get_num_workers()
+safe_num_workers = get_dataloader_workers()
 
 # Función para verificar si es IterableDataset (necesaria en el loop)
 def is_iterable_dataset(dataset):
