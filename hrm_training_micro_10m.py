@@ -11,6 +11,10 @@ VERSIÓN MICRO: Configuración para ~10M parámetros con contexto ultra-reducido
 import os, random, contextlib, multiprocessing as mp, atexit, math
 from typing import List, Dict, Optional, Tuple
 
+# Configurar método de multiprocessing antes de cualquier uso
+if __name__ == '__main__':
+    mp.set_start_method('fork', force=True)
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -858,25 +862,20 @@ def get_dataloader_workers():
     except:
         pass
 
-    # TEMPORAL: Usar 0 workers para evitar problemas de multiprocessing spawn
-    print("⚠️  Usando num_workers=0 temporalmente para evitar errores de multiprocessing.")
-    print("    Para mejor rendimiento, reestructurar código con if __name__ == '__main__' guard.")
-    return 0
+    # Para sistemas normales, calcular workers óptimos para multi-GPU
+    total_cpus = mp.cpu_count()
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     
-    # # Para sistemas normales, calcular workers óptimos para multi-GPU
-    # total_cpus = mp.cpu_count()
-    # num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    # 
-    # if num_gpus > 1:
-    #     # Multi-GPU: 4 workers por GPU para máxima utilización
-    #     optimal_workers = min(num_gpus * 4, total_cpus - 2, 16)  # 4 workers por GPU
-    #     print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
-    # else:
-    #     # Single-GPU: Configuración conservadora
-    #     optimal_workers = min(4, total_cpus // 2)
-    #     print(f"Single-GPU. Usando {optimal_workers} workers para DataLoader.")
-    # 
-    # return optimal_workers
+    if num_gpus > 1:
+        # Multi-GPU: 4 workers por GPU para máxima utilización
+        optimal_workers = min(num_gpus * 4, total_cpus - 2, 16)  # 4 workers por GPU
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
+    else:
+        # Single-GPU: Configuración conservadora
+        optimal_workers = min(4, total_cpus // 2)
+        print(f"Single-GPU. Usando {optimal_workers} workers para DataLoader.")
+    
+    return optimal_workers
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
