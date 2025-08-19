@@ -858,20 +858,25 @@ def get_dataloader_workers():
     except:
         pass
 
-    # Para sistemas normales, calcular workers óptimos para multi-GPU
-    total_cpus = mp.cpu_count()
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    # TEMPORAL: Usar 0 workers para evitar problemas de multiprocessing spawn
+    print("⚠️  Usando num_workers=0 temporalmente para evitar errores de multiprocessing.")
+    print("    Para mejor rendimiento, reestructurar código con if __name__ == '__main__' guard.")
+    return 0
     
-    if num_gpus > 1:
-        # Multi-GPU: 4 workers por GPU para máxima utilización
-        optimal_workers = min(num_gpus * 4, total_cpus - 2, 16)  # 4 workers por GPU
-        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
-    else:
-        # Single-GPU: Configuración conservadora
-        optimal_workers = min(4, total_cpus // 2)
-        print(f"Single-GPU. Usando {optimal_workers} workers para DataLoader.")
-    
-    return optimal_workers
+    # # Para sistemas normales, calcular workers óptimos para multi-GPU
+    # total_cpus = mp.cpu_count()
+    # num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    # 
+    # if num_gpus > 1:
+    #     # Multi-GPU: 4 workers por GPU para máxima utilización
+    #     optimal_workers = min(num_gpus * 4, total_cpus - 2, 16)  # 4 workers por GPU
+    #     print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
+    # else:
+    #     # Single-GPU: Configuración conservadora
+    #     optimal_workers = min(4, total_cpus // 2)
+    #     print(f"Single-GPU. Usando {optimal_workers} workers para DataLoader.")
+    # 
+    # return optimal_workers
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
