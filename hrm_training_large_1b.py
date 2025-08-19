@@ -946,10 +946,9 @@ def get_dataloader_workers():
     num_gpus = WORLD_SIZE if DISTRIBUTED else 1
     
     if num_gpus > 1:
-        # Multi-GPU: Más workers para saturar múltiples GPUs
-        # Regla empírica: 3-4 workers por GPU, limitado por CPUs disponibles
-        optimal_workers = min(num_gpus * 4, total_cpus - 2, 20)  # Máximo 20 workers para modelos grandes
-        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers para máximo throughput.")
+        # Multi-GPU: 4 workers por GPU para máxima utilización
+        optimal_workers = min(num_gpus * 4, total_cpus - 2, 20)  # 4 workers por GPU, máximo 20
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
     else:
         # Single-GPU: Configuración conservadora
         optimal_workers = min(6, total_cpus // 2)  # Más workers para modelo large

@@ -871,10 +871,9 @@ def get_dataloader_workers():
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     
     if num_gpus > 1:
-        # Multi-GPU: Más workers para saturar múltiples GPUs
-        # Regla empírica: 3-4 workers por GPU para modelo medium
-        optimal_workers = min(num_gpus * 3, total_cpus - 2, 16)  # Máximo 16 workers para medium
-        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers para máximo throughput.")
+        # Multi-GPU: 4 workers por GPU para máxima utilización
+        optimal_workers = min(num_gpus * 4, total_cpus - 2, 16)  # 4 workers por GPU
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
     else:
         # Single-GPU: Configuración intermedia para modelo medium
         optimal_workers = min(5, total_cpus // 2)
