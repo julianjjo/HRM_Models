@@ -750,11 +750,11 @@ BATCH_SIZE = 1           # Batch mínimo para reducir memoria drasticamente
 GRAD_ACCUM_STEPS = 32    # Batch efectivo de 32 mantenido
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
-# Learning rate schedule optimizado para modelos grandes
-LEARNING_RATE_MAX = 2e-3  # Reducido para estabilidad
-LEARNING_RATE_MIN = 1e-6
+# Learning rate schedule optimizado para datasets grandes con decaimiento suave
+LEARNING_RATE_MAX = 8e-4  # Reducido significativamente para datasets grandes
+LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
-WARMUP_RATIO = 0.1        # 10% de warmup
+WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -1138,12 +1138,61 @@ print(f"   🏆 Mejor modelo: {BEST_MODEL_PATH}")
 print(f"   💾 Checkpoints: {CHECKPOINT_PATH}")
 print(f"   📝 Modelo final: {OUTPUT_DIR}/")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Dispositivo detectado: {device}")
+# Configuración distribuida
+def setup_distributed():
+    """Inicializar entrenamiento distribuido si está disponible"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        
+        # Inicializar proceso distribuido
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        
+        print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
+        return True, rank, world_size, local_rank
+    else:
+        # Auto-configuración para múltiples GPUs usando DataParallel (más simple)
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            num_gpus = torch.cuda.device_count()
+            print(f"🚀 MÚLTIPLES GPUs DETECTADAS - USANDO DATAPARALLEL")
+            print(f"   📋 GPUs detectadas: {num_gpus}")
+            print(f"   🎯 Usando DataParallel para aprovechar todas las GPUs")
+            print(f"   💡 Para mejor rendimiento, considera usar: torchrun --nproc_per_node={num_gpus} {__file__}")
+            
+            # Retornar modo "pseudo-distribuido" que activará DataParallel
+            return True, 0, num_gpus, 0
+        elif torch.cuda.is_available():
+            print(f"📱 Single-GPU training mode (1 GPU detectada)")
+        else:
+            print("📱 CPU training mode (sin GPU detectada)")
+        return False, 0, 1, 0
 
-# Verificar memoria disponible
+# Configurar distributed training
+is_distributed, rank, world_size, local_rank = setup_distributed()
+
+# Configurar dispositivo
+if is_distributed and 'RANK' in os.environ:
+    device = torch.device(f"cuda:{local_rank}")
+    print(f"Dispositivo distribuido: {device} (rank {rank})")
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Dispositivo detectado: {device}")
+
+# Verificar memoria disponible y mostrar información detallada de GPUs
 if torch.cuda.is_available():
-    print(f"VRAM disponible: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    num_gpus = torch.cuda.device_count()
+    print(f"🔥 {num_gpus} GPU(s) detectada(s):")
+    
+    total_vram = 0
+    for i in range(num_gpus):
+        props = torch.cuda.get_device_properties(i)
+        vram_gb = props.total_memory / 1e9
+        total_vram += vram_gb
+        print(f"   GPU {i}: {props.name} - {vram_gb:.1f} GB VRAM")
+    
+    print(f"💾 VRAM total disponible: {total_vram:.1f} GB")
     torch.cuda.empty_cache()
 
 try:
@@ -1562,6 +1611,23 @@ val_loader = DataLoader(
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
 model = HRMText1(config).to(device)
 
+# Envolver modelo para multi-GPU
+if is_distributed:
+    if world_size > 1 and 'RANK' in os.environ:
+        # Entrenamiento distribuido real con torchrun
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
+    elif world_size > 1:
+        # Auto-inicialización multi-GPU con DataParallel
+        model = nn.DataParallel(model)
+        print(f"🔗 Modelo envuelto con DataParallel usando {torch.cuda.device_count()} GPUs")
+        print(f"   🎯 GPU principal: {device}")
+        print(f"   📋 GPUs utilizadas: {list(range(torch.cuda.device_count()))}")
+    else:
+        print(f"📱 Modelo en single-GPU mode: {device}")
+else:
+    print(f"📱 Modelo en single-GPU mode: {device}")
+
 # Contar parámetros
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Número de parámetros del modelo: {total_params:,}")
@@ -1582,11 +1648,14 @@ num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
 print(f"Total de pasos de entrenamiento: {num_training_steps}")
 print(f"Pasos de warmup: {num_warmup_steps}")
 
-# Scheduler con warmup
-scheduler = get_linear_schedule_with_warmup(
+# Scheduler coseno con warmup para decaimiento más suave
+from transformers import get_cosine_schedule_with_warmup
+
+scheduler = get_cosine_schedule_with_warmup(
     optimizer,
     num_warmup_steps=num_warmup_steps,
-    num_training_steps=num_training_steps
+    num_training_steps=num_training_steps,
+    num_cycles=0.5  # Media vuelta coseno para decaimiento más suave
 )
 
 # Mixed precision scaler
@@ -1610,7 +1679,13 @@ if os.path.exists(CHECKPOINT_PATH):
     print(f"--- Reanudando entrenamiento desde el checkpoint: {CHECKPOINT_PATH} ---")
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     
-    model_to_load = model._orig_mod if hasattr(model, '_orig_mod') else model
+    # Manejar tanto DDP (_orig_mod) como DataParallel (module)
+    if hasattr(model, '_orig_mod'):
+        model_to_load = model._orig_mod  # DDP
+    elif hasattr(model, 'module'):
+        model_to_load = model.module     # DataParallel
+    else:
+        model_to_load = model
     model_to_load.load_state_dict(checkpoint['model_state_dict'])
 
     # Modificar el learning rate si el flag está activado
@@ -1687,6 +1762,10 @@ def main_training():
                 ):
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                     loss = outputs.loss / GRAD_ACCUM_STEPS
+                    
+                    # Para DataParallel, loss puede ser un tensor con múltiples valores
+                    if hasattr(model, 'module') and loss.dim() > 0:
+                        loss = loss.mean()
                 
                 # Backward pass
                 if loss is not None and torch.isfinite(loss):
@@ -1747,16 +1826,27 @@ def main_training():
                         enabled=MIXED_PRECISION
                     ):
                         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                        
+                        # Para DataParallel, loss puede ser un tensor con múltiples valores
+                        val_loss = outputs.loss
+                        if hasattr(model, 'module') and val_loss.dim() > 0:
+                            val_loss = val_loss.mean()
 
-                    if outputs.loss is not None and torch.isfinite(outputs.loss):
-                        total_val_loss += outputs.loss.item()
+                    if val_loss is not None and torch.isfinite(val_loss):
+                        total_val_loss += val_loss.item()
                         val_batches += 1
             
             if val_batches > 0:
                 avg_val_loss = total_val_loss / val_batches
                 print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
                 
-                model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+                # Manejar tanto DDP (_orig_mod) como DataParallel (module)
+                if hasattr(model, '_orig_mod'):
+                    model_to_save = model._orig_mod  # DDP
+                elif hasattr(model, 'module'):
+                    model_to_save = model.module     # DataParallel
+                else:
+                    model_to_save = model
                 
                 # Guardar mejor modelo
                 if avg_val_loss < best_val_loss:
