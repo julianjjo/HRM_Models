@@ -1696,9 +1696,18 @@ def main_training():
                 scheduler.step()
                 global_step += 1
                 
+                # Métricas de tiempo y velocidad
+                step_end_time = time.time()
+                step_time = step_end_time - step_start_time
+                step_times.append(step_time)
+                
+                # Mantener solo últimos 100 tiempos para rolling average
+                if len(step_times) > 100:
+                    step_times.pop(0)
+                
                 current_lr = scheduler.get_last_lr()[0]
                 
-                # TensorBoard logging (solo en proceso principal)
+                # TensorBoard logging expandido (solo en proceso principal)
                 if writer is not None:
                     train_loss = loss.item() * GRAD_ACCUM_STEPS
                     
@@ -1707,6 +1716,21 @@ def main_training():
                     writer.add_scalar('Learning_Rate/Current', current_lr, global_step)
                     writer.add_scalar('Training/Epoch_Progress', epoch + (i / len(progress)), global_step)
                     writer.add_scalar('Training/Global_Step', global_step, global_step)
+                    
+                    # Métricas de velocidad y throughput
+                    avg_step_time = sum(step_times) / len(step_times) if step_times else 0
+                    writer.add_scalar('Performance/Avg_Step_Time_Sec', avg_step_time, global_step)
+                    writer.add_scalar('Performance/Steps_Per_Second', 1.0 / (avg_step_time + 1e-8), global_step)
+                    
+                    # Throughput en muestras por segundo
+                    samples_per_sec = (input_ids.size(0) * GRAD_ACCUM_STEPS) / (avg_step_time + 1e-8)
+                    writer.add_scalar('Performance/Samples_Per_Second', samples_per_sec, global_step)
+                    writer.add_scalar('Performance/Tokens_Per_Second', samples_per_sec * BLOCK_SIZE, global_step)
+                    
+                    # Tiempo transcurrido desde inicio de época
+                    if epoch_start_time is not None:
+                        epoch_elapsed = time.time() - epoch_start_time
+                        writer.add_scalar('Performance/Epoch_Time_Minutes', epoch_elapsed / 60.0, global_step)
                     
                     # Métricas de gradientes cada 50 pasos para evitar overhead
                     if global_step % 50 == 0:
@@ -1746,7 +1770,12 @@ def main_training():
                             memory_util = (memory_allocated / total_memory) * 100
                             writer.add_scalar(f'GPU_{gpu_id}/Memory_Utilization_%', memory_util, global_step)
                 
-                progress.set_postfix({"loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", "lr": f"{current_lr:.2e}", "step": global_step})
+                progress.set_postfix({
+                    "loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", 
+                    "lr": f"{current_lr:.2e}", 
+                    "step": global_step,
+                    "s/step": f"{step_time:.2f}"
+                })
 
     # Validación al final de cada época
     model.eval()
@@ -1850,6 +1879,13 @@ def main_training():
             dist.broadcast(patience_counter_tensor, src=0)
             best_val_loss = best_val_loss_tensor.item()
             patience_counter = patience_counter_tensor.item()
+    
+        # Log tiempo total de época
+        if writer is not None and epoch_start_time is not None:
+            total_epoch_time = time.time() - epoch_start_time
+            writer.add_scalar('Performance/Total_Epoch_Time_Minutes', total_epoch_time / 60.0, global_step)
+            epoch_loss = sum([st for st in step_times]) / len(step_times) if step_times else 0
+            writer.add_scalar('Performance/Avg_Loss_Per_Epoch', epoch_loss, global_step)
     
     if patience_counter >= EARLY_STOPPING_PATIENCE:
         print("Detención temprana por falta de mejora en la validación.")
