@@ -1596,6 +1596,10 @@ def tokenize_function(examples):
 print("Applying tokenization function (on-the-fly)...")
 tokenized_splits = {}
 
+# Configuración para multi-GPU (necesario antes del loop de tokenización)
+num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+is_multi_gpu = num_gpus > 1
+
 # Detectar columnas a eliminar dinámicamente
 sample = next(iter(raw_datasets["train"]))
 columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
@@ -1625,9 +1629,6 @@ for split_name in ["train", "validation"]:
 # ### FIX DATALOADER ###: Usar la función segura para determinar workers
 safe_num_workers = get_num_workers()
 
-# Configuración para multi-GPU
-num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-is_multi_gpu = num_gpus > 1
 
 # Función para verificar si es IterableDataset
 def is_iterable_dataset(dataset):
