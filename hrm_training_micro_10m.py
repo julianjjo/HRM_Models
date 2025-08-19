@@ -1839,7 +1839,7 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
     # Prefetch más agresivo para C4 streaming (dataset masivo)
-    prefetch_factor = max(2048, safe_num_workers * 24)  # Incrementado para mejor CPU utilization
+    prefetch_factor = max(1024, safe_num_workers * 32)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
     persistent_workers = True  # Critical para streaming - evita reinicializar workers
     # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
@@ -1942,7 +1942,7 @@ class StreamingBufferWrapper:
 if is_multi_gpu and ACTIVE_DATASET == "c4":
     print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
     # Buffer más grande para mejor utilización de CPU en paralelo
-    buffer_size = max(256, num_gpus * safe_num_workers * 16)  # Incrementado para mejor throughput
+    buffer_size = max(128, num_gpus * safe_num_workers * 8)  # Optimizado para servidor con 480GB RAM
     train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
     print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
 
