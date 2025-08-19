@@ -766,8 +766,8 @@ NUM_EPOCHS = 2             # Menos épocas para modelo micro
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 90        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
-GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
+BATCH_SIZE = 64        # Batch optimizado para 8xGPU distribuido (~9GB uso estimado por GPU)
+GRAD_ACCUM_STEPS = 4     # Batch efectivo: 64*8*4=2048 - balanceado para 8 GPUs
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
@@ -852,19 +852,26 @@ if TENSORBOARD_AVAILABLE:
 
 def get_dataloader_workers():
     """Determina el número óptimo de workers para DataLoader basado en entorno y configuración"""
+    # Para entrenamiento distribuido, usar workers para mejor CPU utilization
+    if is_distributed and world_size > 1:
+        # En multi-GPU distribuido, usar 2-4 workers por GPU para mejor paralelismo
+        optimal_workers = min(4, max(2, mp.cpu_count() // world_size))
+        print(f"🚀 Modo distribuido: usando {optimal_workers} workers por proceso (total CPUs: {mp.cpu_count()})")
+        return optimal_workers
+    
     try:
         # Detectar si estamos en Google Colab
         if 'google.colab' in str(get_ipython()):
-            print("Detectado entorno Google Colab. Usando num_workers=0 para evitar problemas de multiprocessing.")
-            return 0
+            print("Detectado entorno Google Colab. Usando num_workers=2 para mejor rendimiento.")
+            return 2  # Cambiar de 0 a 2 para mejor rendimiento
     except:
         pass
 
     try:
         # Detectar si estamos en Jupyter/IPython
         get_ipython()
-        print("Detectado entorno Jupyter/IPython. Usando num_workers=0 para mayor estabilidad.")
-        return 0
+        print("Detectado entorno Jupyter/IPython. Usando num_workers=2 para mejor rendimiento.")
+        return 2  # Cambiar de 0 a 2 para mejor rendimiento
     except:
         pass
 
@@ -969,6 +976,27 @@ def cleanup_dataloaders():
 
 # Registrar la función de limpieza
 atexit.register(cleanup_dataloaders)
+
+def balance_gpu_memory():
+    """Optimizar distribución de memoria entre GPUs para DataParallel"""
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        # Limpiar cache de todas las GPUs
+        for i in range(torch.cuda.device_count()):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
+        
+        # Configurar memory fraction para balancear mejor
+        total_memory = []
+        for i in range(torch.cuda.device_count()):
+            total_memory.append(torch.cuda.get_device_properties(i).total_memory)
+        
+        print(f"💾 Balanceando memoria en {torch.cuda.device_count()} GPUs")
+        print(f"   📊 Memoria por GPU: {[f'{m/1e9:.1f}GB' for m in total_memory]}")
+        
+        # Activar optimizaciones de memoria
+        torch.cuda.set_per_process_memory_fraction(0.95)  # Usar 95% de VRAM disponible
+        return True
+    return False
 
 # ==============================================================================
 # --- FUNCIONES AUXILIARES PARA FILTRADO DE IDIOMA ---
@@ -1829,7 +1857,7 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
     # Prefetch más agresivo para C4 streaming (dataset masivo)
-    prefetch_factor = 8  # Incrementado para C4 600B - más buffer para evitar GPU idle
+    prefetch_factor = max(12, safe_num_workers * 3)  # Incrementado para mejor CPU utilization
     persistent_workers = True  # Critical para streaming - evita reinicializar workers
     # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
@@ -1841,7 +1869,7 @@ if is_multi_gpu and safe_num_workers > 0:
     print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
     print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
 else:
-    prefetch_factor = 4 if safe_num_workers > 0 else None  # Incrementado para single-GPU
+    prefetch_factor = 8 if safe_num_workers > 0 else None  # Incrementado para single-GPU
     persistent_workers = safe_num_workers > 0
     pin_memory_device = None
     multiprocessing_context = None
@@ -1931,7 +1959,13 @@ class StreamingBufferWrapper:
 # Aplicar buffer wrapper solo en multi-GPU para C4 streaming
 if is_multi_gpu and ACTIVE_DATASET == "c4":
     print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
-    train_loader = StreamingBufferWrapper(train_loader, buffer_size=num_gpus * safe_num_workers * 6)
+    # Buffer más grande para mejor utilización de CPU en paralelo
+    buffer_size = max(64, num_gpus * safe_num_workers * 8)  # Incrementado para mejor throughput
+    train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
+    print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
+
+# Balancear memoria GPU antes de crear modelo
+balance_gpu_memory()
 
 # Crear modelo
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
@@ -1944,11 +1978,19 @@ if is_distributed:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
         print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
     elif world_size > 1:
-        # Auto-inicialización multi-GPU con DataParallel
-        model = nn.DataParallel(model)
-        print(f"🔗 Modelo envuelto con DataParallel usando {torch.cuda.device_count()} GPUs")
+        # Auto-inicialización multi-GPU con DataParallel optimizado
+        device_ids = list(range(torch.cuda.device_count()))
+        model = nn.DataParallel(model, device_ids=device_ids, output_device=0)
+        
+        # Optimizaciones para mejor balanceo
+        torch.backends.cudnn.benchmark = True  # Optimizar para tamaños fijos
+        torch.backends.cuda.matmul.allow_tf32 = True  # Acelerar matmul
+        torch.backends.cudnn.allow_tf32 = True  # Acelerar convs
+        
+        print(f"🔗 Modelo envuelto con DataParallel usando {len(device_ids)} GPUs")
         print(f"   🎯 GPU principal: {device}")
-        print(f"   📋 GPUs utilizadas: {list(range(torch.cuda.device_count()))}")
+        print(f"   📋 GPUs utilizadas: {device_ids}")
+        print(f"   ⚡ Optimizaciones activadas: cuDNN benchmark, TF32")
     else:
         print(f"📱 Modelo en single-GPU mode: {device}")
 else:
@@ -2108,6 +2150,10 @@ def main_training():
                 # Backward pass
                 if loss is not None and torch.isfinite(loss):
                     scaler.scale(loss).backward()
+                    
+                    # Sincronizar gradientes en DataParallel después de cada backward
+                    if hasattr(model, 'module') and world_size > 1:
+                        torch.cuda.synchronize()  # Asegurar que todas las GPUs terminen
                     
                     if (i + 1) % GRAD_ACCUM_STEPS == 0:
                         # Gradient clipping y update
