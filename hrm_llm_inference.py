@@ -9,13 +9,10 @@ import torch
 import torch.nn.functional as F
 from transformers import T5Tokenizer
 
-from hrm_text1_modeling import HRMText1
+from hrm_training_micro_10m import HRMText1
 
-# Model Config (Make sure these are the same as the training if you tweaked those params)
+# Configuración simple - el modelo carga su configuración automáticamente
 T5_TOKENIZER_REPO = "t5-small"
-MODEL_CONFIG = {"d_model": 512, "n_heads": 8, "d_ff": 2048, "dropout": 0.1}
-BLOCK_SIZE = 512
-MAX_HALT_STEPS = 8
 
 def generate_text(model, tokenizer, prompt_text, max_new_tokens=15, temperature=0.7, top_k=50):
     """Generates text using the HRMText1 model."""
@@ -97,27 +94,12 @@ def main():
         tokenizer.add_special_tokens({"pad_token": "<pad>"})
     tokenizer.padding_side = "left"
 
-    print("Initializing model...")
-    config = {
-        "vocab_size": len(tokenizer),
-        "block_size": BLOCK_SIZE,
-        "d_model": MODEL_CONFIG["d_model"],
-        "n_heads": MODEL_CONFIG["n_heads"],
-        "d_ff": MODEL_CONFIG["d_ff"],
-        "dropout": MODEL_CONFIG["dropout"],
-        "halt_max_steps": MAX_HALT_STEPS,
-        "ponder_loss_weight": 0.0,
-        "halt_bias_init": 0.0
-    }
-    model = HRMText1(config).to(device)
-
-    print(f"Loading model weights from '{args.model_path}'...")
+    print(f"Loading model from '{args.model_path}'...")
     try:
-        state_dict = torch.load(args.model_path, map_location=device)
-        model.load_state_dict(state_dict)
-        print("Model weights loaded successfully.")
+        model = HRMText1.from_pretrained(args.model_path).to(device)
+        print("✅ Model loaded successfully using from_pretrained()")
     except Exception as e:
-        print(f"Error loading model weights: {e}")
+        print(f"❌ Error loading model: {e}")
         return
 
     num_params = sum(p.numel() for p in model.parameters())

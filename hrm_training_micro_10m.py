@@ -584,6 +584,65 @@ class HRMText1(PreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
         return {"input_ids": input_ids, "attention_mask": attention_mask}
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path, **kwargs):
+        """
+        Carga modelo desde directorio que contiene config.json y checkpoint.pth o pytorch_model.bin
+        Compatible con modelos guardados tanto con save_pretrained() como con checkpoint manual
+        """
+        import json
+        
+        # Cargar configuración
+        config_path = os.path.join(pretrained_model_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config_dict = json.load(f)
+            config = HRMText1Config(**config_dict)
+        else:
+            raise FileNotFoundError(f"No se encontró config.json en {pretrained_model_path}")
+        
+        # Crear modelo
+        model = cls(config)
+        
+        # Intentar cargar pesos - prioridad: pytorch_model.bin > checkpoint.pth
+        model_files = [
+            "pytorch_model.bin",
+            "model.safetensors", 
+            "checkpoint.pth"
+        ]
+        
+        loaded = False
+        for model_file in model_files:
+            model_path = os.path.join(pretrained_model_path, model_file)
+            if os.path.exists(model_path):
+                try:
+                    state_dict = torch.load(model_path, map_location='cpu')
+                    
+                    # Si es un checkpoint completo, extraer model_state_dict
+                    if 'model_state_dict' in state_dict:
+                        state_dict = state_dict['model_state_dict']
+                    
+                    # Cargar pesos
+                    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                    
+                    if missing_keys:
+                        print(f"⚠️ Claves faltantes: {missing_keys}")
+                    if unexpected_keys:
+                        print(f"⚠️ Claves inesperadas: {unexpected_keys}")
+                    
+                    print(f"✅ Modelo cargado desde: {model_path}")
+                    loaded = True
+                    break
+                    
+                except Exception as e:
+                    print(f"⚠️ Error cargando {model_file}: {e}")
+                    continue
+        
+        if not loaded:
+            raise FileNotFoundError(f"No se encontraron pesos válidos en {pretrained_model_path}")
+        
+        return model
 
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT PARA ~100M PARÁMETROS (MODELO PEQUEÑO) ---
@@ -591,7 +650,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 2.0   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 0.1   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -760,7 +819,8 @@ DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Micro-10M"
 SEED = 42
-NUM_EPOCHS = 2             # Menos épocas para modelo micro
+NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
+CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
@@ -2040,11 +2100,9 @@ if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
     writer.add_text("Hyperparameters", hyperparams_text, 0)
 
 # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
-# Flag para activar/desactivar la modificación del learning rate al cargar checkpoint
-# USO: Cambiar MODIFY_LR_ON_LOAD a True y ajustar NEW_LEARNING_RATE según sea necesario
-# Esto permite continuar el entrenamiento con un learning rate diferente sin perder el progreso
-MODIFY_LR_ON_LOAD = False  # Cambiar a True para activar la modificación
-NEW_LEARNING_RATE = 1e-4   # Nuevo valor del learning rate cuando MODIFY_LR_ON_LOAD es True
+# Configuración unificada para entrenamiento continuo
+# NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
+NEW_LEARNING_RATE = 5e-5   # LR reducido para fine-tuning con nuevo dataset
 
 # Checkpoint loading
 start_epoch = 0
@@ -2066,7 +2124,7 @@ checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = lo
 )
 
 # Manejar modificación de learning rate si se cargó checkpoint
-if checkpoint_loaded and MODIFY_LR_ON_LOAD:
+if checkpoint_loaded and CONTINUE_TRAINING:
     print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
     for param_group in optimizer.param_groups:
         param_group['lr'] = NEW_LEARNING_RATE
@@ -2114,14 +2172,21 @@ def main_training():
     # Métricas de velocidad
     step_start_time = time.time()
     
-    for epoch in range(start_epoch, NUM_EPOCHS):
+    # Determinar épocas finales para entrenamiento continuo
+    if CONTINUE_TRAINING and start_epoch >= NUM_EPOCHS:
+        final_epochs = start_epoch + 2  # Entrenar 2 épocas adicionales
+        print(f"🔄 Modo continuo: entrenando épocas {start_epoch+1} a {final_epochs}")
+    else:
+        final_epochs = NUM_EPOCHS
+    
+    for epoch in range(start_epoch, final_epochs):
         epoch_start_time = time.time()
-        print(f"\\n🚀 Iniciando Época {epoch+1}/{NUM_EPOCHS}")
+        print(f"\\n🚀 Iniciando Época {epoch+1}/{final_epochs}")
         
         model.train()
         optimizer.zero_grad()
         
-        progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
+        progress = tqdm(train_loader, desc=f"Época {epoch+1}/{final_epochs}")
         
         epoch_loss = 0.0
         epoch_steps = 0
