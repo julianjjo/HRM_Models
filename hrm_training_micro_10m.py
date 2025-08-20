@@ -764,7 +764,7 @@ NUM_EPOCHS = 2             # Menos épocas para modelo micro
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 170        # Batch optimizado para 8xGPU distribuido (~9GB uso estimado por GPU)
+BATCH_SIZE = 80        # Batch optimizado para 8xGPU distribuido (~9GB uso estimado por GPU)
 GRAD_ACCUM_STEPS = 4     # Batch efectivo: 64*8*4=2048 - balanceado para 8 GPUs
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
