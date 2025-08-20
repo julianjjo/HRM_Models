@@ -650,7 +650,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 30   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 100   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -686,7 +686,7 @@ CUSTOM_MIX_RATIOS = {
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "c4"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "high_quality_1b", etc.
+ACTIVE_DATASET = "mixed"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "high_quality_1b", etc.
 
 DATASETS_CONFIG = {
     "c4": {
@@ -819,12 +819,12 @@ DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Micro-10M"
 SEED = 42
-NUM_EPOCHS = 2             # Épocas totales para entrenamiento continuo
-CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
+NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
+CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 20        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+BATCH_SIZE = 40        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
@@ -1354,6 +1354,35 @@ def save_checkpoint_distributed(model, optimizer, scheduler, scaler, epoch, glob
             'num_training_steps': num_training_steps,
             'distributed_training': is_distributed,
             'timestamp': time.time(),
+            # Datos adicionales para inferencia
+            'model_config': model_to_save.config.to_dict() if hasattr(model_to_save.config, 'to_dict') else vars(model_to_save.config),
+            'tokenizer_info': {
+                'tokenizer_class': 'T5Tokenizer',
+                'pretrained_model_name': T5_TOKENIZER_REPO,
+                'vocab_size': model_to_save.config.vocab_size,
+                'pad_token_id': getattr(tokenizer, 'pad_token_id', None) if 'tokenizer' in globals() else None,
+                'eos_token_id': getattr(tokenizer, 'eos_token_id', None) if 'tokenizer' in globals() else None,
+                'bos_token_id': getattr(tokenizer, 'bos_token_id', None) if 'tokenizer' in globals() else None,
+                'unk_token_id': getattr(tokenizer, 'unk_token_id', None) if 'tokenizer' in globals() else None,
+            },
+            'generation_config': {
+                'max_length': model_to_save.config.block_size,
+                'do_sample': True,
+                'temperature': 0.8,
+                'top_p': 0.9,
+                'top_k': 50,
+                'repetition_penalty': 1.1,
+                'pad_token_id': getattr(tokenizer, 'pad_token_id', None) if 'tokenizer' in globals() else None,
+                'eos_token_id': getattr(tokenizer, 'eos_token_id', None) if 'tokenizer' in globals() else None,
+            },
+            'training_metadata': {
+                'dataset_name': ACTIVE_DATASET if 'ACTIVE_DATASET' in globals() else None,
+                'block_size': model_to_save.config.block_size,
+                'learning_rate': LEARNING_RATE if 'LEARNING_RATE' in globals() else None,
+                'batch_size': BATCH_SIZE if 'BATCH_SIZE' in globals() else None,
+                'grad_accumulation_steps': GRAD_ACCUMULATION_STEPS if 'GRAD_ACCUMULATION_STEPS' in globals() else None,
+                'seed': SEED if 'SEED' in globals() else None,
+            }
         }
         
         # Guardar en archivo temporal
