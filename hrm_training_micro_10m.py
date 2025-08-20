@@ -764,7 +764,7 @@ NUM_EPOCHS = 2             # Menos épocas para modelo micro
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 80        # Batch optimizado para 8xGPU distribuido (~9GB uso estimado por GPU)
+BATCH_SIZE = 170        # Batch optimizado para 8xGPU distribuido (~9GB uso estimado por GPU)
 GRAD_ACCUM_STEPS = 4     # Batch efectivo: 64*8*4=2048 - balanceado para 8 GPUs
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
@@ -853,7 +853,7 @@ def get_dataloader_workers():
     # Para entrenamiento distribuido, usar workers para mejor CPU utilization
     if is_distributed and world_size > 1:
         # En multi-GPU distribuido, usar 2-4 workers por GPU para mejor paralelismo
-        optimal_workers = min(128, max(64, mp.cpu_count() // world_size))
+        optimal_workers = min(256, max(150, mp.cpu_count() // world_size))
         print(f"🚀 Modo distribuido: usando {optimal_workers} workers por proceso (total CPUs: {mp.cpu_count()})")
         return optimal_workers
     
@@ -1839,7 +1839,7 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
     # Prefetch más agresivo para C4 streaming (dataset masivo)
-    prefetch_factor = max(2097152, safe_num_workers * 1024)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
+    prefetch_factor = max(1048576, safe_num_workers * 1024)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
     persistent_workers = True  # Critical para streaming - evita reinicializar workers
     # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
