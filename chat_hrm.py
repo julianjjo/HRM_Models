@@ -10,6 +10,10 @@ import torch
 from transformers import T5Tokenizer
 import sys
 
+# Evitar ejecución del código de entrenamiento al importar
+import os
+os.environ['HRM_IMPORT_ONLY'] = '1'
+
 # Importar clases necesarias del script de entrenamiento
 try:
     from hrm_training_micro_10m import HRMText1, HRMText1Config

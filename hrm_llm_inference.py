@@ -9,6 +9,10 @@ import torch
 import torch.nn.functional as F
 from transformers import T5Tokenizer
 
+# Evitar ejecución del código de entrenamiento al importar
+import os
+os.environ['HRM_IMPORT_ONLY'] = '1'
+
 from hrm_training_micro_10m import HRMText1
 
 # Configuración simple - el modelo carga su configuración automáticamente

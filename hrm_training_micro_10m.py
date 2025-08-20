@@ -650,7 +650,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.1   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 1.0   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -824,8 +824,8 @@ CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáti
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 80        # Batch optimizado para 8xGPU distribuido (~9GB uso estimado por GPU)
-GRAD_ACCUM_STEPS = 4     # Batch efectivo: 64*8*4=2048 - balanceado para 8 GPUs
+BATCH_SIZE = 30        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
@@ -871,19 +871,56 @@ CUSTOM_BASE_PATH = None  # Dejar None para usar la ruta por defecto
 # Usar: export HRM_OUTPUT_BASE="/tu/ruta" antes de ejecutar el script
 HRM_OUTPUT_BASE_ENV = os.environ.get('HRM_OUTPUT_BASE')
 
+def detect_and_setup_colab():
+    """Detecta si estamos en Google Colab y configura Google Drive automáticamente"""
+    try:
+        # Verificar si estamos en Colab
+        import google.colab
+        print("🔍 Google Colab detectado!")
+        
+        # Montar Google Drive automáticamente
+        try:
+            from google.colab import drive
+            drive.mount('/content/drive')
+            print("✅ Google Drive montado exitosamente en /content/drive")
+            
+            # Verificar que el directorio existe
+            drive_path = "/content/drive/MyDrive"
+            if os.path.exists(drive_path):
+                print(f"✅ Directorio de Drive confirmado: {drive_path}")
+                return drive_path
+            else:
+                print(f"⚠️  Directorio de Drive no encontrado, usando directorio local")
+                return "./HRM_Models"
+                
+        except Exception as e:
+            print(f"⚠️  Error montando Google Drive: {e}")
+            print("🔄 Continuando con directorio local")
+            return "./HRM_Models"
+            
+    except ImportError:
+        # No estamos en Colab
+        print("📱 Entorno local detectado (no es Google Colab)")
+        return None
+
 # Determinar ruta base final
 def determine_output_base():
     """Determina la ruta base según la configuración"""
-    # Prioridad: Variable de entorno > Ruta personalizada > Ruta por defecto
+    # Prioridad: Variable de entorno > Ruta personalizada > Colab Drive > Ruta por defecto
     if HRM_OUTPUT_BASE_ENV:
+        print(f"🌍 Usando ruta desde variable de entorno: {HRM_OUTPUT_BASE_ENV}")
         return HRM_OUTPUT_BASE_ENV
     elif CUSTOM_BASE_PATH:
+        print(f"🎯 Usando ruta personalizada: {CUSTOM_BASE_PATH}")
         return CUSTOM_BASE_PATH
     else:
+        # Detectar y configurar Google Colab automáticamente
+        colab_path = detect_and_setup_colab()
+        if colab_path:
+            return os.path.join(colab_path, "HRM")
+        
         # Rutas por defecto según el entorno
-        if os.path.exists("/content/drive/MyDrive"):
-            return "/content/drive/MyDrive/HRM"  # Google Colab
-        elif os.path.exists(os.path.expanduser("~/Documents")):
+        if os.path.exists(os.path.expanduser("~/Documents")):
             return os.path.expanduser("~/Documents/HRM")  # Sistemas Unix/Mac
         else:
             return "./HRM_Models"  # Directorio actual como fallback
@@ -896,6 +933,20 @@ CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
 print(f"📁 Ruta base configurada: {OUTPUT_BASE}")
 print(f"📁 Directorio de salida: {OUTPUT_DIR}")
+print(f"📊 TensorBoard logs: {os.path.join(OUTPUT_DIR, 'tensorboard_logs')}")
+print(f"💡 Para ver TensorBoard: tensorboard --logdir {os.path.join(OUTPUT_DIR, 'tensorboard_logs')}")
+print()
+
+# Verificar disponibilidad de librerías y mostrar status
+libraries_status = []
+libraries_status.append(f"✅ TensorBoard: {TENSORBOARD_AVAILABLE}")
+libraries_status.append(f"✅ Kagglehub: {KAGGLE_AVAILABLE}")
+libraries_status.append(f"✅ LangDetect: {LANGUAGE_DETECTION_AVAILABLE}")
+
+print("🔧 Status de librerías opcionales:")
+for status in libraries_status:
+    print(f"   {status}")
+print()
 
 # Configurar TensorBoard
 TENSORBOARD_DIR = os.path.join(OUTPUT_DIR, "tensorboard_logs")
@@ -1408,40 +1459,68 @@ if torch.cuda.is_available():
     print(f"💾 VRAM total disponible: {total_vram:.1f} GB")
     torch.cuda.empty_cache()
 
-# Autenticación con Hugging Face Hub
-try:
-    from huggingface_hub import login
-    
-    # Intentar obtener token de variable de entorno
-    HF_TOKEN = os.environ.get('HF_TOKEN')
-    
-    if HF_TOKEN:
-        login(token=HF_TOKEN)
-        print("✅ Hugging Face token loaded from environment variable.")
-    else:
-        # Intentar login interactivo (útil para desarrollo local)
-        try:
-            login()
-            print("✅ Hugging Face authentication successful.")
-        except Exception as e:
-            print(f"⚠️  HF authentication failed: {e}")
-            print("💡 Para usar HF Pro, configura HF_TOKEN o ejecuta: huggingface-cli login")
-            HF_TOKEN = None
-except ImportError:
-    print("⚠️  huggingface_hub login not available")
-    HF_TOKEN = os.environ.get('HF_TOKEN')
-    if HF_TOKEN:
-        HfFolder.save_token(HF_TOKEN)
-        print("Hugging Face token loaded (legacy method).")
-    else:
-        print("HF_TOKEN secret not found.")
-        HF_TOKEN = None
+def balance_gpu_memory():
+    """Balancear memoria GPU antes de crear modelo"""
+    if torch.cuda.is_available():
+        # Limpiar cache
+        torch.cuda.empty_cache()
+        
+        # Balancear memoria entre GPUs
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            for i in range(num_gpus):
+                torch.cuda.set_device(i)
+                torch.cuda.empty_cache()
+        
+        print(f"🧹 Memoria GPU balanceada entre {num_gpus} GPU(s)")
 
-print("Loading tokenizer (T5 slow)...")
-tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
-if tokenizer.pad_token is None:
-    tokenizer.add_special_tokens({"pad_token": "<pad>"})
-print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+# Balancear memoria GPU antes de crear modelo
+balance_gpu_memory()
+
+# Autenticación con Hugging Face Hub (solo si no es import-only)
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    try:
+        from huggingface_hub import login
+        
+        # Intentar obtener token de variable de entorno
+        HF_TOKEN = os.environ.get('HF_TOKEN')
+        
+        if HF_TOKEN:
+            login(token=HF_TOKEN)
+            print("✅ Hugging Face token loaded from environment variable.")
+        else:
+            # Intentar login interactivo (útil para desarrollo local)
+            try:
+                login()
+                print("✅ Hugging Face authentication successful.")
+            except Exception as e:
+                print(f"⚠️  HF authentication failed: {e}")
+                print("💡 Para usar HF Pro, configura HF_TOKEN o ejecuta: huggingface-cli login")
+                HF_TOKEN = None
+    except ImportError:
+        print("⚠️  huggingface_hub login not available")
+        HF_TOKEN = os.environ.get('HF_TOKEN')
+        if HF_TOKEN:
+            HfFolder.save_token(HF_TOKEN)
+            print("Hugging Face token loaded (legacy method).")
+        else:
+            print("HF_TOKEN secret not found.")
+            HF_TOKEN = None
+else:
+    # Solo para imports, no hacer login
+    HF_TOKEN = None
+
+# Tokenizer se carga solo cuando se ejecuta el script directamente
+# Verificar si solo se está importando para usar las clases
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    print("Loading tokenizer (T5 slow)...")
+    tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+else:
+    # Solo definir variable para imports, el tokenizer se carga después
+    tokenizer = None
 
 # Usar las cifras específicas del dataset seleccionado y calcular muestras
 TOTAL_TRAIN_SAMPLES = DATASET_INFO["train_samples"]
@@ -2013,12 +2092,13 @@ if is_multi_gpu and ACTIVE_DATASET == "c4":
 # Balancear memoria GPU antes de crear modelo
 balance_gpu_memory()
 
-# Crear modelo
-config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
-model = HRMText1(config).to(device)
+# Crear modelo solo si no es import-only
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
+    model = HRMText1(config).to(device)
 
-# Envolver modelo para multi-GPU
-if is_distributed:
+# Envolver modelo para multi-GPU (solo si no es import-only)
+if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
     if world_size > 1 and 'RANK' in os.environ:
         # Entrenamiento distribuido real con torchrun
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -2167,7 +2247,24 @@ samples_processed = 0
 
 def main_training():
     """Función principal de entrenamiento con métricas avanzadas de TensorBoard"""
-    global global_step, writer, step_times, epoch_start_time, samples_processed
+    global global_step, writer, step_times, epoch_start_time, samples_processed, tokenizer
+    
+    # Cargar tokenizer solo cuando se ejecuta entrenamiento
+    print("Loading tokenizer (T5 slow)...")
+    tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+    
+    # Configurar HuggingFace settings para mejor compatibilidad con Colab
+    try:
+        # Configurar variables de entorno para HuggingFace
+        import os
+        os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')  # Evitar warnings en Jupyter/Colab
+        if 'google.colab' in str(type(get_ipython() if 'get_ipython' in globals() else '')):
+            print("🔧 Configuración optimizada para Google Colab detectada")
+    except:
+        pass
     
     # Métricas de velocidad
     step_start_time = time.time()
