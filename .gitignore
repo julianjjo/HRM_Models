@@ -212,3 +212,10 @@ wandb/
 .roo
 hrm_text1_c4_output-large
 *.pub
+
+# HRM-Text model outputs and training artifacts
+hrm_text1_c4_micro_10m_output/
+*.bin
+*.safetensors
+tensorboard_logs/
+*.DS_Store
