@@ -989,9 +989,9 @@ def get_dataloader_workers():
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     
     if num_gpus > 1:
-        # Multi-GPU: 4 workers por GPU para máxima utilización
-        optimal_workers = min(num_gpus * 4, total_cpus - 2, 16)  # 4 workers por GPU
-        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
+        # Multi-GPU: 8 workers por GPU para máxima utilización
+        optimal_workers = min(num_gpus * 8, 32, 64)  # 8 workers por GPU
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (8 por GPU) para máxima utilización.")
     else:
         # Single-GPU: Configuración conservadora
         optimal_workers = min(4, total_cpus // 2)
@@ -1978,7 +1978,7 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
     # Prefetch más agresivo para C4 streaming (dataset masivo)
-    prefetch_factor = max(524288, safe_num_workers * 1024)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
+    prefetch_factor = max(65536, safe_num_workers * 1024)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
     persistent_workers = True  # Critical para streaming - evita reinicializar workers
     # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
