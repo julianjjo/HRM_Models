@@ -964,7 +964,7 @@ def get_dataloader_workers():
     # Para entrenamiento distribuido, usar workers para mejor CPU utilization
     if is_distributed and world_size > 1:
         # En multi-GPU distribuido, usar 2-4 workers por GPU para mejor paralelismo
-        optimal_workers = min(256, max(150, mp.cpu_count() // world_size))
+        optimal_workers = min(256, max(128, mp.cpu_count() // world_size))
         print(f"🚀 Modo distribuido: usando {optimal_workers} workers por proceso (total CPUs: {mp.cpu_count()})")
         return optimal_workers
     
