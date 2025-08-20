@@ -8,8 +8,12 @@ VERSIÓN AMPLIADA: Configuración para ~1B parámetros con contexto extendido (2
 - Configuración optimizada para modelos grandes
 """
 
-import os, random, contextlib, multiprocessing as mp, atexit, math
+import os, random, contextlib, multiprocessing as mp, atexit, math, time
 from typing import List, Dict, Optional, Tuple
+
+# Configurar método de multiprocessing antes de cualquier uso
+if __name__ == '__main__':
+    mp.set_start_method('fork', force=True)
 
 import torch
 import torch.nn as nn
@@ -21,7 +25,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_linear_schedule_with_warmup
+from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_cosine_schedule_with_warmup
 from tqdm.auto import tqdm
 
 from datasets import load_dataset
@@ -450,6 +454,11 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         # Habilitar gradient checkpointing si está configurado
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
+
+    def _tie_weights(self):
+        """Tie the weights between the input and output embeddings"""
+        if hasattr(self, 'lm_head') and hasattr(self, 'token_embeddings'):
+            self._tie_or_clone_weights(self.lm_head, self.token_embeddings)
     
     def _set_gradient_checkpointing(self, module, value=False):
         """Para compatibilidad con transformers"""
@@ -576,6 +585,65 @@ class HRMText1(PreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
         return {"input_ids": input_ids, "attention_mask": attention_mask}
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path, **kwargs):
+        """
+        Carga modelo desde directorio que contiene config.json y checkpoint.pth o pytorch_model.bin
+        Compatible con modelos guardados tanto con save_pretrained() como con checkpoint manual
+        """
+        import json
+        
+        # Cargar configuración
+        config_path = os.path.join(pretrained_model_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config_dict = json.load(f)
+            config = HRMText1Config(**config_dict)
+        else:
+            raise FileNotFoundError(f"No se encontró config.json en {pretrained_model_path}")
+        
+        # Crear modelo
+        model = cls(config)
+        
+        # Intentar cargar pesos - prioridad: pytorch_model.bin > checkpoint.pth
+        model_files = [
+            "pytorch_model.bin",
+            "model.safetensors", 
+            "checkpoint.pth"
+        ]
+        
+        loaded = False
+        for model_file in model_files:
+            model_path = os.path.join(pretrained_model_path, model_file)
+            if os.path.exists(model_path):
+                try:
+                    state_dict = torch.load(model_path, map_location='cpu')
+                    
+                    # Si es un checkpoint completo, extraer model_state_dict
+                    if 'model_state_dict' in state_dict:
+                        state_dict = state_dict['model_state_dict']
+                    
+                    # Cargar pesos
+                    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                    
+                    if missing_keys:
+                        print(f"⚠️ Claves faltantes: {missing_keys}")
+                    if unexpected_keys:
+                        print(f"⚠️ Claves inesperadas: {unexpected_keys}")
+                    
+                    print(f"✅ Modelo cargado desde: {model_path}")
+                    loaded = True
+                    break
+                    
+                except Exception as e:
+                    print(f"⚠️ Error cargando {model_file}: {e}")
+                    continue
+        
+        if not loaded:
+            raise FileNotFoundError(f"No se encontraron pesos válidos en {pretrained_model_path}")
+        
+        return model
 
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT PARA ~1B PARÁMETROS ---
@@ -811,19 +879,56 @@ CUSTOM_BASE_PATH = None  # Dejar None para usar la ruta por defecto
 # Usar: export HRM_OUTPUT_BASE="/tu/ruta" antes de ejecutar el script
 HRM_OUTPUT_BASE_ENV = os.environ.get('HRM_OUTPUT_BASE')
 
+def detect_and_setup_colab():
+    """Detecta si estamos en Google Colab y configura Google Drive automáticamente"""
+    try:
+        # Verificar si estamos en Colab
+        import google.colab
+        print("🔍 Google Colab detectado!")
+        
+        # Montar Google Drive automáticamente
+        try:
+            from google.colab import drive
+            drive.mount('/content/drive')
+            print("✅ Google Drive montado exitosamente en /content/drive")
+            
+            # Verificar que el directorio existe
+            drive_path = "/content/drive/MyDrive"
+            if os.path.exists(drive_path):
+                print(f"✅ Directorio de Drive confirmado: {drive_path}")
+                return drive_path
+            else:
+                print(f"⚠️  Directorio de Drive no encontrado, usando directorio local")
+                return "./HRM_Models"
+                
+        except Exception as e:
+            print(f"⚠️  Error montando Google Drive: {e}")
+            print("🔄 Continuando con directorio local")
+            return "./HRM_Models"
+            
+    except ImportError:
+        # No estamos en Colab
+        print("📱 Entorno local detectado (no es Google Colab)")
+        return None
+
 # Determinar ruta base final
 def determine_output_base():
     """Determina la ruta base según la configuración"""
-    # Prioridad: Variable de entorno > Ruta personalizada > Ruta por defecto
+    # Prioridad: Variable de entorno > Ruta personalizada > Colab Drive > Ruta por defecto
     if HRM_OUTPUT_BASE_ENV:
+        print(f"🌍 Usando ruta desde variable de entorno: {HRM_OUTPUT_BASE_ENV}")
         return HRM_OUTPUT_BASE_ENV
     elif CUSTOM_BASE_PATH:
+        print(f"🎯 Usando ruta personalizada: {CUSTOM_BASE_PATH}")
         return CUSTOM_BASE_PATH
     else:
+        # Detectar y configurar Google Colab automáticamente
+        colab_path = detect_and_setup_colab()
+        if colab_path:
+            return os.path.join(colab_path, "HRM")
+        
         # Rutas por defecto según el entorno
-        if os.path.exists("/content/drive/MyDrive"):
-            return "/content/drive/MyDrive/HRM"  # Google Colab
-        elif os.path.exists(os.path.expanduser("~/Documents")):
+        if os.path.exists(os.path.expanduser("~/Documents")):
             return os.path.expanduser("~/Documents/HRM")  # Sistemas Unix/Mac
         else:
             return "./HRM_Models"  # Directorio actual como fallback
@@ -1592,32 +1697,56 @@ if raw_datasets is None or raw_datasets.get("train") is None:
 
 print(f"Tipo de dataset: {type(raw_datasets['train'])}")
 
-# Para datasets streaming, necesitamos manejar las columnas de manera diferente
-if hasattr(raw_datasets["train"], 'features') and raw_datasets["train"].features is not None:
-    # Dataset no streaming (tiene .features)
-    columns_to_remove = list(raw_datasets["train"].features.keys())
-    print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
-    tokenized_splits = {}
-    for split_name in ["train", "validation"]:
+# Detectar columnas a eliminar dinámicamente
+sample = next(iter(raw_datasets["train"]))
+columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
+print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
+print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+
+tokenized_splits = {}
+for split_name in ["train", "validation"]:
+    # Optimización para C4 streaming: batch size más grande y configuración eficiente
+    if ACTIVE_DATASET == "c4" and is_multi_gpu:
+        # Configuración optimizada para C4 streaming masivo
+        batch_size_tokenization = 2000  # Batch más grande para C4
+        num_proc = min(safe_num_workers, 8)  # Paralelización limitada
+        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc}")
+    else:
+        batch_size_tokenization = 1000
+        num_proc = min(safe_num_workers, 4)
+    
+    # Para IterableDataset no usar num_proc ni desc (no soportados)
+    if is_iterable_dataset(raw_datasets[split_name]):
+        print(f"🚀 Tokenizando {split_name} para C4 streaming (IterableDataset)")
         tokenized_splits[split_name] = raw_datasets[split_name].map(
-            tokenize_function,
+            tokenize_function, 
             batched=True,
+            batch_size=batch_size_tokenization,
+            remove_columns=columns_to_remove
+        ).with_format("torch")
+    else:
+        tokenized_splits[split_name] = raw_datasets[split_name].map(
+            tokenize_function, 
+            batched=True,
+            batch_size=batch_size_tokenization,
             remove_columns=columns_to_remove,
-            num_proc=max(1, mp.cpu_count() // 2)
-        )
-else:
-    # Dataset streaming (IterableDataset)
-    print("Dataset streaming detectado - aplicando tokenización sin remove_columns")
-    tokenized_splits = {
-        "train": raw_datasets["train"].map(tokenize_function, batched=True),
-        "validation": raw_datasets["validation"].map(tokenize_function, batched=True)
-    }
+            num_proc=num_proc,
+            desc=f"Tokenizando {split_name}"
+        ).with_format("torch")
+
+# Detectar si los datasets son iterables
+train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
+val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
 
 safe_num_workers = get_num_workers()
 print(f"Creando DataLoaders con {safe_num_workers} workers...")
 
+# Función para verificar si es IterableDataset (necesaria en el loop)
+def is_iterable_dataset(dataset):
+    return isinstance(dataset, IterableDataset)
+
 # Detectar si es IterableDataset para ajustar parámetros
-is_iterable = hasattr(tokenized_splits["train"], '__iter__') and not hasattr(tokenized_splits["train"], '__len__')
+is_iterable = train_is_iterable
 train_shuffle = False if is_iterable else True
 
 print(f"Dataset iterable detectado: {is_iterable}, shuffle para entrenamiento: {train_shuffle}")
@@ -1747,7 +1876,6 @@ print(f"Total de pasos de entrenamiento (estimado): {num_training_steps:,}")
 print(f"Pasos de warmup: {num_warmup_steps:,}")
 
 # Scheduler coseno con warmup para decaimiento más suave
-from transformers import get_cosine_schedule_with_warmup
 
 scheduler = get_cosine_schedule_with_warmup(
     optimizer,
@@ -1862,6 +1990,15 @@ def main_training():
     global train_loader, val_loader, global_step, best_val_loss, patience_counter
 
     try:
+        # Configurar variables de entorno para HuggingFace
+        import os
+        os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')  # Evitar warnings en Jupyter/Colab
+        if 'google.colab' in str(type(get_ipython() if 'get_ipython' in globals() else '')):
+            print("🔧 Configuración optimizada para Google Colab detectada")
+    except:
+        pass
+
+    try:
         # El bucle de entrenamiento original aquí
         return True
     finally:
@@ -1888,7 +2025,6 @@ if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
 global_step = start_step
 
 # Variables para tracking de velocidad y throughput
-import time
 step_times = []
 epoch_start_time = None
 samples_processed = 0

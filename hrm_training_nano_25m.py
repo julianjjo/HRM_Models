@@ -8,20 +8,24 @@ VERSIÓN ULTRA-COMPACTA: Configuración para ~25M parámetros con contexto ultra
 - Configuración optimizada para entrenamiento rápido en hardware básico
 """
 
-import os, random, contextlib, multiprocessing as mp, atexit, math
+import os, random, contextlib, multiprocessing as mp, atexit, math, time
 from typing import List, Dict, Optional, Tuple
+
+# Configurar método de multiprocessing antes de cualquier uso
+if __name__ == '__main__':
+    mp.set_start_method('fork', force=True)
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from torch.utils.data.dataloader import default_collate
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_linear_schedule_with_warmup
+from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_cosine_schedule_with_warmup
 from tqdm.auto import tqdm
 
 from datasets import load_dataset, concatenate_datasets
@@ -451,6 +455,11 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
 
+    def _tie_weights(self):
+        """Tie the weights between the input and output embeddings"""
+        if hasattr(self, 'lm_head') and hasattr(self, 'token_embeddings'):
+            self._tie_or_clone_weights(self.lm_head, self.token_embeddings)
+    
     def _set_gradient_checkpointing(self, module, value=False):
         """Para compatibilidad con transformers"""
         if isinstance(module, HRMText1):
@@ -576,6 +585,65 @@ class HRMText1(PreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
         return {"input_ids": input_ids, "attention_mask": attention_mask}
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path, **kwargs):
+        """
+        Carga modelo desde directorio que contiene config.json y checkpoint.pth o pytorch_model.bin
+        Compatible con modelos guardados tanto con save_pretrained() como con checkpoint manual
+        """
+        import json
+        
+        # Cargar configuración
+        config_path = os.path.join(pretrained_model_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config_dict = json.load(f)
+            config = HRMText1Config(**config_dict)
+        else:
+            raise FileNotFoundError(f"No se encontró config.json en {pretrained_model_path}")
+        
+        # Crear modelo
+        model = cls(config)
+        
+        # Intentar cargar pesos - prioridad: pytorch_model.bin > checkpoint.pth
+        model_files = [
+            "pytorch_model.bin",
+            "model.safetensors", 
+            "checkpoint.pth"
+        ]
+        
+        loaded = False
+        for model_file in model_files:
+            model_path = os.path.join(pretrained_model_path, model_file)
+            if os.path.exists(model_path):
+                try:
+                    state_dict = torch.load(model_path, map_location='cpu')
+                    
+                    # Si es un checkpoint completo, extraer model_state_dict
+                    if 'model_state_dict' in state_dict:
+                        state_dict = state_dict['model_state_dict']
+                    
+                    # Cargar pesos
+                    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                    
+                    if missing_keys:
+                        print(f"⚠️ Claves faltantes: {missing_keys}")
+                    if unexpected_keys:
+                        print(f"⚠️ Claves inesperadas: {unexpected_keys}")
+                    
+                    print(f"✅ Modelo cargado desde: {model_path}")
+                    loaded = True
+                    break
+                    
+                except Exception as e:
+                    print(f"⚠️ Error cargando {model_file}: {e}")
+                    continue
+        
+        if not loaded:
+            raise FileNotFoundError(f"No se encontraron pesos válidos en {pretrained_model_path}")
+        
+        return model
 
 # ==============================================================================
 # --- CONFIGURACIÓN DEL SCRIPT PARA ~100M PARÁMETROS (MODELO PEQUEÑO) ---
@@ -803,19 +871,56 @@ CUSTOM_BASE_PATH = None  # Dejar None para usar la ruta por defecto
 # Usar: export HRM_OUTPUT_BASE="/tu/ruta" antes de ejecutar el script
 HRM_OUTPUT_BASE_ENV = os.environ.get('HRM_OUTPUT_BASE')
 
+def detect_and_setup_colab():
+    """Detecta si estamos en Google Colab y configura Google Drive automáticamente"""
+    try:
+        # Verificar si estamos en Colab
+        import google.colab
+        print("🔍 Google Colab detectado!")
+        
+        # Montar Google Drive automáticamente
+        try:
+            from google.colab import drive
+            drive.mount('/content/drive')
+            print("✅ Google Drive montado exitosamente en /content/drive")
+            
+            # Verificar que el directorio existe
+            drive_path = "/content/drive/MyDrive"
+            if os.path.exists(drive_path):
+                print(f"✅ Directorio de Drive confirmado: {drive_path}")
+                return drive_path
+            else:
+                print(f"⚠️  Directorio de Drive no encontrado, usando directorio local")
+                return "./HRM_Models"
+                
+        except Exception as e:
+            print(f"⚠️  Error montando Google Drive: {e}")
+            print("🔄 Continuando con directorio local")
+            return "./HRM_Models"
+            
+    except ImportError:
+        # No estamos en Colab
+        print("📱 Entorno local detectado (no es Google Colab)")
+        return None
+
 # Determinar ruta base final
 def determine_output_base():
     """Determina la ruta base según la configuración"""
-    # Prioridad: Variable de entorno > Ruta personalizada > Ruta por defecto
+    # Prioridad: Variable de entorno > Ruta personalizada > Colab Drive > Ruta por defecto
     if HRM_OUTPUT_BASE_ENV:
+        print(f"🌍 Usando ruta desde variable de entorno: {HRM_OUTPUT_BASE_ENV}")
         return HRM_OUTPUT_BASE_ENV
     elif CUSTOM_BASE_PATH:
+        print(f"🎯 Usando ruta personalizada: {CUSTOM_BASE_PATH}")
         return CUSTOM_BASE_PATH
     else:
+        # Detectar y configurar Google Colab automáticamente
+        colab_path = detect_and_setup_colab()
+        if colab_path:
+            return os.path.join(colab_path, "HRM")
+        
         # Rutas por defecto según el entorno
-        if os.path.exists("/content/drive/MyDrive"):
-            return "/content/drive/MyDrive/HRM"  # Google Colab
-        elif os.path.exists(os.path.expanduser("~/Documents")):
+        if os.path.exists(os.path.expanduser("~/Documents")):
             return os.path.expanduser("~/Documents/HRM")  # Sistemas Unix/Mac
         else:
             return "./HRM_Models"  # Directorio actual como fallback
@@ -1438,30 +1543,52 @@ if raw_datasets is None or raw_datasets.get("train") is None:
 
 print(f"Tipo de dataset: {type(raw_datasets['train'])}")
 
-# Para datasets streaming, necesitamos manejar las columnas de manera diferente
-if hasattr(raw_datasets["train"], 'features') and raw_datasets["train"].features is not None:
-    # Dataset no streaming (tiene .features)
-    columns_to_remove = list(raw_datasets["train"].features.keys())
-    print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
-    tokenized_splits = raw_datasets.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=columns_to_remove,
-        num_proc=max(1, mp.cpu_count() // 2)
-    )
-else:
-    # Dataset streaming (IterableDataset)
-    print("Dataset streaming detectado - aplicando tokenización sin remove_columns")
-    tokenized_splits = {
-        "train": raw_datasets["train"].map(tokenize_function, batched=True),
-        "validation": raw_datasets["validation"].map(tokenize_function, batched=True)
-    }
+# Detectar columnas a eliminar dinámicamente
+sample = next(iter(raw_datasets["train"]))
+columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
+print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
+print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+
+tokenized_splits = {}
+for split_name in ["train", "validation"]:
+    # Optimización para C4 streaming: batch size más grande y configuración eficiente
+    if ACTIVE_DATASET == "c4" and is_multi_gpu:
+        # Configuración optimizada para C4 streaming masivo
+        batch_size_tokenization = 2000  # Batch más grande para C4
+        num_proc = min(safe_num_workers, 8)  # Paralelización limitada
+        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc}")
+    else:
+        batch_size_tokenization = 1000
+        num_proc = min(safe_num_workers, 4)
+    
+    # Para IterableDataset no usar num_proc ni desc (no soportados)
+    if is_iterable_dataset(raw_datasets[split_name]):
+        print(f"🚀 Tokenizando {split_name} para C4 streaming (IterableDataset)")
+        tokenized_splits[split_name] = raw_datasets[split_name].map(
+            tokenize_function, 
+            batched=True,
+            batch_size=batch_size_tokenization,
+            remove_columns=columns_to_remove
+        ).with_format("torch")
+    else:
+        tokenized_splits[split_name] = raw_datasets[split_name].map(
+            tokenize_function, 
+            batched=True,
+            batch_size=batch_size_tokenization,
+            remove_columns=columns_to_remove,
+            num_proc=num_proc,
+            desc=f"Tokenizando {split_name}"
+        ).with_format("torch")
+
+# Detectar si los datasets son iterables
+train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
+val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
 
 safe_num_workers = get_num_workers()
 print(f"Creando DataLoaders con {safe_num_workers} workers...")
 
 # Detectar si es IterableDataset para ajustar parámetros
-is_iterable = hasattr(tokenized_splits["train"], '__iter__') and not hasattr(tokenized_splits["train"], '__len__')
+is_iterable = train_is_iterable
 train_shuffle = False if is_iterable else True
 
 print(f"Dataset iterable detectado: {is_iterable}, shuffle para entrenamiento: {train_shuffle}")
@@ -1507,30 +1634,51 @@ if is_distributed and not is_iterable:
     train_shuffle = False  # Cuando usamos DistributedSampler, no podemos usar shuffle en DataLoader
     print(f"🔗 DistributedSampler configurado para rank {rank}/{world_size}")
 
-# Configurar prefetch y persistent_workers optimizados para multi-GPU
+# Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
-    prefetch_factor = 4  # Prefetch optimizado para modelo nano multi-GPU
-    persistent_workers = True  # Mantener workers vivos entre epochs
-    pin_memory_device = f"cuda:{local_rank}" if is_distributed else "cuda"
-    print(f"🚀 Configuración Multi-GPU Nano Model: prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers}")
+    # Prefetch más agresivo para C4 streaming (dataset masivo)
+    prefetch_factor = max(524288, safe_num_workers * 1024)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
+    persistent_workers = True  # Critical para streaming - evita reinicializar workers
+    # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
+    
+    # Buffer adicional para streaming datasets masivos
+    multiprocessing_context = "fork"  # Compatible sin __main__ guard
+    
+    print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
+    print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
+    print(f"   🔍 DEBUG: is_multi_gpu={is_multi_gpu}, safe_num_workers={safe_num_workers}")
 else:
-    prefetch_factor = 2 if safe_num_workers > 0 else None
+    prefetch_factor = 8 if safe_num_workers > 0 else None  # Incrementado para single-GPU
     persistent_workers = safe_num_workers > 0
     pin_memory_device = None
+    multiprocessing_context = None
 
-train_loader = DataLoader(
-    tokenized_splits["train"],
-    batch_size=BATCH_SIZE,
-    num_workers=safe_num_workers,
-    pin_memory=True,
-    pin_memory_device=pin_memory_device,
-    persistent_workers=persistent_workers,
-    prefetch_factor=prefetch_factor,
-    shuffle=train_shuffle,
-    sampler=train_sampler,
-    collate_fn=custom_collate_fn,
-    drop_last=True if is_multi_gpu else False  # Drop last para consistency en multi-GPU
-)
+# Configurar argumentos del DataLoader condicionalmente
+train_kwargs = {
+    "batch_size": BATCH_SIZE,
+    "num_workers": safe_num_workers,
+    "pin_memory": True,
+    "persistent_workers": persistent_workers,
+    "shuffle": train_shuffle,
+    "sampler": train_sampler,
+    "collate_fn": custom_collate_fn,
+    "drop_last": is_multi_gpu,  # Drop last para consistency en multi-GPU
+}
+
+# Solo agregar argumentos no-None
+if prefetch_factor is not None:
+    train_kwargs["prefetch_factor"] = prefetch_factor
+    print(f"   ✅ DataLoader configurado con prefetch_factor={prefetch_factor}")
+else:
+    print(f"   ⚠️  DataLoader SIN prefetch_factor (workers={safe_num_workers})")
+if pin_memory_device is not None:
+    train_kwargs["pin_memory_device"] = pin_memory_device
+if multiprocessing_context is not None:
+    train_kwargs["multiprocessing_context"] = multiprocessing_context
+
+train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
 
 val_loader = DataLoader(
     tokenized_splits["validation"],
@@ -1545,6 +1693,53 @@ val_loader = DataLoader(
     collate_fn=custom_collate_fn,
     drop_last=False  # No drop last en validación
 )
+
+class StreamingBufferWrapper:
+    """Buffer inteligente para datasets streaming masivos como C4"""
+    def __init__(self, dataloader, buffer_size=None, min_buffer_ratio=0.4):
+        self.dataloader = dataloader
+        # Buffer adaptativo basado en número de GPUs
+        self.buffer_size = buffer_size or (num_gpus * safe_num_workers * 4)
+        self.min_buffer_ratio = min_buffer_ratio
+        self.buffer = []
+        self.iterator = iter(dataloader)
+        self._fill_initial_buffer()
+        
+    def _fill_initial_buffer(self):
+        """Llenar buffer inicial para evitar GPU starvation"""
+        target_size = int(self.buffer_size * 0.8)  # 80% inicial
+        try:
+            for _ in range(target_size):
+                batch = next(self.iterator)
+                self.buffer.append(batch)
+            print(f"🔋 Buffer inicial llenado: {len(self.buffer)} batches")
+        except StopIteration:
+            print(f"⚠️  Dataset agotado durante llenado inicial: {len(self.buffer)} batches")
+    
+    def _maintain_buffer(self):
+        """Mantener buffer mínimo para streaming continuo"""
+        min_size = int(self.buffer_size * self.min_buffer_ratio)
+        while len(self.buffer) < min_size:
+            try:
+                batch = next(self.iterator)
+                self.buffer.append(batch)
+            except StopIteration:
+                break
+    
+    def __iter__(self):
+        while self.buffer:
+            # Mantener buffer antes de entregar batch
+            self._maintain_buffer()
+            if self.buffer:
+                yield self.buffer.pop(0)
+
+# Aplicar buffer wrapper solo en multi-GPU para C4 streaming
+if is_multi_gpu and ACTIVE_DATASET == "c4":
+    print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
+    # Buffer más grande para mejor utilización de CPU en paralelo
+    buffer_size = max(128, num_gpus * safe_num_workers * 8)  # Optimizado para servidor con 480GB RAM
+    train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
+    print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
 
 # Crear modelo
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
@@ -1596,7 +1791,6 @@ print(f"Total de pasos de entrenamiento (estimado): {num_training_steps:,}")
 print(f"Pasos de warmup: {num_warmup_steps:,}")
 
 # Scheduler coseno con warmup para decaimiento más suave
-from transformers import get_cosine_schedule_with_warmup
 
 scheduler = get_cosine_schedule_with_warmup(
     optimizer,
@@ -1688,7 +1882,6 @@ print("torch.compile() deshabilitado para optimizar memoria")
 global_step = start_step
 
 # Variables para tracking de velocidad y throughput
-import time
 step_times = []
 epoch_start_time = None
 samples_processed = 0
@@ -1697,6 +1890,15 @@ def main_training():
     """Función principal de entrenamiento con métricas avanzadas de performance"""
     global train_loader, val_loader, global_step, best_val_loss, patience_counter
     global step_times, epoch_start_time, samples_processed
+    
+    try:
+        # Configurar variables de entorno para HuggingFace
+        import os
+        os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')  # Evitar warnings en Jupyter/Colab
+        if 'google.colab' in str(type(get_ipython() if 'get_ipython' in globals() else '')):
+            print("🔧 Configuración optimizada para Google Colab detectada")
+    except:
+        pass
     
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
@@ -2015,5 +2217,76 @@ else:
 if is_distributed:
     print("🧹 Limpiando procesos distribuidos...")
     dist.destroy_process_group()
+
+def save_final_model():
+    """Guarda el modelo final y lo sube a Hugging Face Hub si está configurado"""
+    # Guardar modelo final
+    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+
+    if os.path.exists(BEST_MODEL_PATH):
+        print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
+        model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
+
+    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+    print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
+
+    # Subir modelo a Hugging Face Hub
+    if HF_TOKEN:
+        try:
+            print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
+            api = HfApi()
+
+            # Subir el modelo usando push_to_hub
+            model_to_save.push_to_hub(
+                HF_REPO_ID,
+                token=HF_TOKEN,
+                commit_message=f"Upload HRM-Text1 25M nano model trained on C4 dataset"
+            )
+
+            # Subir el tokenizador
+            tokenizer.push_to_hub(
+                HF_REPO_ID,
+                token=HF_TOKEN,
+                commit_message=f"Upload tokenizer for HRM-Text1 25M nano model"
+            )
+
+            print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
+
+        except Exception as e:
+            print(f"❌ Error al subir el modelo a Hugging Face: {e}")
+            print("El modelo se guardó localmente pero no se pudo subir al Hub.")
+    else:
+        print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+        print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
+
+def test_model_and_summary():
+    """Prueba el modelo final y muestra el resumen del entrenamiento"""
+    print("\n--- Probando la Generación del Modelo Final ---")
+    try:
+        inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
+        # torch.compile deshabilitado para ahorrar memoria
+        # if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
+        #     inference_model = torch.compile(inference_model)
+        
+        prompts = [
+            "The cat sat on the", 
+            "Artificial intelligence is a field that", 
+            "To be, or not to be, that is the question:",
+            "In a world where technology advances rapidly,",
+            "The future of humanity depends on"
+        ]
+        
+        for prompt in prompts:
+            response = chat_with_model(prompt, inference_model, tokenizer)
+            print(f"\nPrompt: {prompt}\nRespuesta: {response}")
+    except Exception as e:
+        print(f"El test de generación falló: {e}")
+
+    print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
+    print(f"Parámetros del modelo: {total_params:,}")
+    print(f"Contexto máximo: {BLOCK_SIZE}")
+    print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
+    print(f"Modelo guardado en: {OUTPUT_DIR}")
 
 print("\n--- Script completado exitosamente ---")
