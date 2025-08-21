@@ -651,7 +651,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.1  # Aumentado para más datos de entrenamiento
+DATASET_SUBSET_PERCENT = 1.0  # Aumentado para más datos de entrenamiento
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -779,6 +779,8 @@ DATASETS_CONFIG = {
         "type": "kaggle"  # Identificador especial para datasets de Kaggle
     }
 }
+
+
 # Añadir las mezclas personalizadas a la configuración principal
 for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     DATASETS_CONFIG[custom_name] = {
