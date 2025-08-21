@@ -802,7 +802,7 @@ CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáti
 BLOCK_SIZE = 1024        # Contexto expandido para mejor calidad de modelo (1024 tokens)
 
 # Configuración de entrenamiento para modelo 50M optimizada para A100/H100
-BATCH_SIZE = 32        # Batch balanceado para modelo 50M (~8GB uso estimado)
+BATCH_SIZE = 5        # Batch balanceado para modelo 50M (~8GB uso estimado)
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
