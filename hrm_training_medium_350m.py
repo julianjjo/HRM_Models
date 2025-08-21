@@ -2114,7 +2114,7 @@ if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
     # Log hyperparameters
     hyperparams = {
         'model/n_embd': MODEL_PARAMS['n_embd'],
-        'model/n_layer': MODEL_PARAMS['n_layer'],
+        'model/n_layer': MODEL_PARAMS['n_layers'],
         'model/n_head': MODEL_PARAMS['n_head'],
         'model/block_size': BLOCK_SIZE,
         'training/batch_size': BATCH_SIZE,

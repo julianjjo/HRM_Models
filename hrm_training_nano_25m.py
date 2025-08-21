@@ -2029,14 +2029,14 @@ if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
     # Log hyperparameters
     hyperparams = {
         'model/n_embd': MODEL_PARAMS['n_embd'],
-        'model/n_layer': MODEL_PARAMS['n_layer'],
+        'model/n_layer': MODEL_PARAMS['n_layers'],
         'model/n_head': MODEL_PARAMS['n_head'],
         'model/block_size': BLOCK_SIZE,
         'training/batch_size': BATCH_SIZE,
-        'training/learning_rate': LEARNING_RATE,
+        'training/learning_rate': LEARNING_RATE_MAX,
         'training/weight_decay': WEIGHT_DECAY,
-        'training/warmup_steps': WARMUP_STEPS,
-        'training/max_epochs': MAX_EPOCHS,
+        'training/warmup_steps': num_warmup_steps,
+        'training/max_epochs': NUM_EPOCHS,
         'training/grad_accum_steps': GRAD_ACCUM_STEPS,
         'training/mixed_precision': MIXED_PRECISION,
         'training/gradient_clipping': GRADIENT_CLIPPING,
