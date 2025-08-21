@@ -2211,6 +2211,19 @@ if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
 else:
     print(f"📱 Modelo en single-GPU mode: {device}")
 
+# Inicializar variables globales de entrenamiento
+start_epoch = 0
+start_step = 0
+best_val_loss = float('inf')
+patience_counter = 0
+CHECKPOINT_STEPS = 1000
+global_step = 0
+
+# Variables para tracking de velocidad y throughput
+step_times = []
+epoch_start_time = None
+samples_processed = 0
+
 # Contar parámetros (solo si el modelo fue creado)
 if not os.environ.get('HRM_IMPORT_ONLY'):
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -2278,12 +2291,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
     NEW_LEARNING_RATE = 5e-5   # LR reducido para fine-tuning con nuevo dataset
 
-    # Checkpoint loading
-    start_epoch = 0
-    start_step = 0
-    best_val_loss = float('inf')
-    patience_counter = 0
-    CHECKPOINT_STEPS = 1000
+    # Checkpoint loading (variables ya inicializadas globalmente)
 
     # Cargar checkpoint usando la función distribuida
     checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = load_checkpoint_distributed(
@@ -2325,23 +2333,13 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
                     scheduler.step()
                 print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
 
-    # Inicializar valores por defecto si no se cargó checkpoint
-    if not checkpoint_loaded:
-        start_epoch = 0
-        start_step = 0
-        best_val_loss = float('inf')
-        patience_counter = 0
-
+    # Actualizar global_step con el valor cargado
     global_step = start_step
-
-    # Variables para tracking de velocidad y throughput
-    step_times = []
-    epoch_start_time = None
-    samples_processed = 0
 
 def main_training():
     """Función principal de entrenamiento con métricas avanzadas de TensorBoard"""
     global global_step, writer, step_times, epoch_start_time, samples_processed, tokenizer
+    global best_val_loss, patience_counter, start_epoch, start_step
     
     # Cargar tokenizer solo cuando se ejecuta entrenamiento
     print("Loading tokenizer (T5 slow)...")
