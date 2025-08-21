@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - ESCALADO A ~1B PARÁMETROS
-VERSIÓN AMPLIADA: Configuración para ~1B parámetros con contexto extendido (2048/4096)
-- Arquitectura multi-capa HRM apilada (24 capas)
+HRM-Text1 Training Script - MODELO MEDIUM ~350M PARÁMETROS  
+VERSIÓN MEDIUM: Configuración para ~350M parámetros con contexto intermedio (1024 tokens)
+- Arquitectura HRM medium-eficiente (16 capas, 768 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones de memoria y velocidad
-- Configuración optimizada para modelos grandes
+- Optimizaciones de memoria para hardware intermedio
+- Configuración optimizada para hardware medio (RTX 4070, RTX 3080, etc.)
 """
 
-import os, random, contextlib, multiprocessing as mp, atexit, math, time
+import os, random, multiprocessing as mp, atexit, math, time
 from typing import List, Dict, Optional, Tuple
 
 # Configurar método de multiprocessing antes de cualquier uso
@@ -19,9 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
-from torch.utils.data.dataloader import default_collate
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -152,7 +150,7 @@ class HRMText1Config(PretrainedConfig):
     def __init__(self, 
                  vocab_size=32128, 
                  block_size=2048,           # Aumentado para contexto extendido
-                 n_embd=1536,               # Para ~1B params
+                 n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
                  n_layers=24,               # NUEVO: múltiples capas HRM
                  d_ff=6144,                 # 4 * n_embd
@@ -409,6 +407,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
     config_class = HRMText1Config
     main_input_name = "input_ids"
     supports_gradient_checkpointing = True
+    _tied_weights_keys = ["lm_head.weight", "token_embeddings.weight"]
     
     def __init__(self, config: HRMText1Config):
         super().__init__(config)
@@ -454,7 +453,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         # Habilitar gradient checkpointing si está configurado
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
-
+    
     def _tie_weights(self):
         """Tie the weights between the input and output embeddings"""
         if hasattr(self, 'lm_head') and hasattr(self, 'token_embeddings'):
@@ -646,56 +645,48 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         return model
 
 # ==============================================================================
-# --- CONFIGURACIÓN DEL SCRIPT PARA ~1B PARÁMETROS ---
+# --- CONFIGURACIÓN DEL SCRIPT PARA ~100M PARÁMETROS (MODELO PEQUEÑO) ---
 # ==============================================================================
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 1.0  # Aumentado para más datos de entrenamiento
+DATASET_SUBSET_PERCENT = 100   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
 CUSTOM_MIX_RATIOS = {
-    # Ejemplo de mezcla personalizada enfocada en calidad para modelo 1B
-    "high_quality_1b": {
-        "slimpajama_en": 0.4,  # 40% SlimPajama inglés (alta calidad)
-        "pile": 0.3,           # 30% The Pile (diversidad)
-        "openwebtext": 0.2,    # 20% OpenWebText (web content)
-        "fineweb": 0.1         # 10% FineWeb (muy alta calidad)
+    # Ejemplo de mezcla personalizada enfocada en calidad para modelo micro
+    "high_quality_small": {
+        "c4": 0.5,             # 50% C4 (base sólida)
+        "fineweb": 0.3,        # 30% FineWeb (alta calidad)
+        "openwebtext": 0.2     # 20% OpenWebText (diversidad)
     },
     
-    # Ejemplo de mezcla para contenido multilingüe balanceado para 1B
-    "multilingual_balanced_1b": {
-        "c4": 0.3,             # 30% C4 (multilingüe)
+    # Ejemplo de mezcla balanceada para modelo micro
+    "balanced_small": {
+        "c4": 0.4,             # 40% C4 (multilingüe)
         "slimpajama_en": 0.3,  # 30% SlimPajama inglés
-        "spanish": 0.2,        # 20% Español
-        "slimpajama_es": 0.1,  # 10% SlimPajama español
-        "fineweb": 0.1         # 10% FineWeb
+        "fineweb": 0.2,        # 20% FineWeb
+        "openwebtext": 0.1     # 10% OpenWebText
     },
     
-    # Ejemplo de mezcla experimental con todos los datasets para 1B
-    "experimental_full_1b": {
-        "slimpajama": 0.25,    # 25% SlimPajama completo
-        "c4": 0.2,             # 20% C4 multilingüe
-        "pile": 0.2,           # 20% The Pile
-        "fineweb": 0.15,       # 15% FineWeb
-        "openwebtext": 0.1,    # 10% OpenWebText
-        "human_conversations": 0.05,  # 5% Conversaciones humanas
-        "spanish": 0.05        # 5% Español
+    # Mezcla rápida para pruebas y desarrollo
+    "dev_small": {
+        "c4": 0.6,             # 60% C4 (rápido de cargar)
+        "openwebtext": 0.4     # 40% OpenWebText
     },
     
-    # Mezcla enfocada en conversaciones y calidad para chat
-    "conversation_mix_1b": {
-        "human_conversations": 0.4,  # 40% Conversaciones humanas
-        "fineweb": 0.3,             # 30% Contenido de alta calidad
-        "slimpajama_en": 0.2,       # 20% SlimPajama inglés
-        "openwebtext": 0.1          # 10% OpenWebText
+    # Mezcla enfocada en conversaciones para modelo micro
+    "conversation_small": {
+        "human_conversations": 0.5,  # 50% Conversaciones humanas
+        "c4": 0.3,                   # 30% C4 base
+        "fineweb": 0.2               # 20% Contenido de calidad
     }
 }
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "mixed"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "high_quality_1b", etc.
+ACTIVE_DATASET = "c4-english"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "high_quality_1b", etc.
 
 DATASETS_CONFIG = {
     "c4": {
@@ -780,21 +771,20 @@ DATASETS_CONFIG = {
     }
 }
 
-
 # Añadir las mezclas personalizadas a la configuración principal
 for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
     DATASETS_CONFIG[custom_name] = {
         "name": "mixed",
         "config": None,
-        "train_samples": 500_000_000,  # Estimación para modelo 1B
-        "val_samples": 250_000,
+        "train_samples": 25_000_000,   # Estimación expandida para modelo micro H200 (25M)
+        "val_samples": 125_000,
         "repo_suffix": f"Custom-{custom_name.replace('_', '-').title()}",
-        "description": f"Mezcla personalizada para 1B: {custom_name.replace('_', ' ').title()}",
+        "description": f"Mezcla personalizada para 50M: {custom_name.replace('_', ' ').title()}",
         "mix_ratios": mix_ratios
     }
 
 # Mostrar datasets disponibles
-print("=== DATASETS DISPONIBLES PARA MODELO 1B ===")
+print("=== DATASETS DISPONIBLES PARA MODELO MICRO OPTIMIZADO H200 (25M) ===")
 for key, config in DATASETS_CONFIG.items():
     marker = " ← SELECCIONADO" if key == ACTIVE_DATASET else ""
     print(f"• {key}: {config['description']}{marker}")
@@ -805,44 +795,44 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-350M"
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Medium-350M"
 SEED = 42
-NUM_EPOCHS = 3
-BLOCK_SIZE = 1024  # Contexto balanceado para modelo mediano
+NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
+CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
+BLOCK_SIZE = 1024        # Contexto intermedio para modelo medium (1024 tokens)
 
-# Configuración de entrenamiento para modelo grande
-BATCH_SIZE = 4           # Tamaño balanceado para modelo mediano (350M parámetros)
-GRAD_ACCUM_STEPS = 2    # Aumentado para batch efectivo de 256
-EVAL_STEPS = 1000        # Evaluar cada 1000 pasos
+# Configuración de entrenamiento para modelo medium optimizada para hardware intermedio
+BATCH_SIZE = 16        # Batch optimizado para GPUs de ~16GB VRAM
+GRAD_ACCUM_STEPS = 8     # Batch efectivo de 128 para entrenamiento eficiente
+EVAL_STEPS = 1000        # Evaluar cada 1000 pasos para modelo medium
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 6e-4  # Reducido significativamente para datasets grandes
+LEARNING_RATE_MAX = 6e-4  # Reducido para modelo medium y datasets grandes
 LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
-GRADIENT_CLIPPING = 1.0   # Gradient clipping para estabilidad de entrenamiento
 
 # Optimizaciones
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
-USE_GRADIENT_CHECKPOINTING = False  # Temporarily disabled - HRM dynamic computation needs special handling
+USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
-# --- CONFIGURACIÓN PARA MODELO INTERMEDIO (~350M PARÁMETROS) ---
-# Configuración balanceada para un modelo de tamaño mediano
+# --- CONFIGURACIÓN PARA MODELO MEDIUM (~350M PARÁMETROS) ---
+# Configuración medium escalada desde el modelo 10M que funciona perfectamente
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 768,                     # Dimensión intermedia del modelo
+    "n_embd": 768,                     # Dimensión escalada para 350M (768)
     "n_head": 12,                      # 12 cabezas de atención (768/12 = 64 dim por cabeza)
-    "n_layers": 16,                    # 16 capas HRM apiladas (modelo intermedio)
-    "d_ff": 3072,                      # 4 * n_embd para FFN
+    "n_layers": 16,                    # 16 capas HRM (escalado desde 6 del 10M)
+    "d_ff": 3072,                      # 4 * n_embd para FFN (768 * 4)
     "dropout": 0.1,
-    "halt_max_steps": 10,              # Pasos intermedios
+    "halt_max_steps": 4,               # Pasos optimizados para modelo expandido
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
-    "h_update_period": 4,              # H-module se actualiza cada 4 pasos (para modelo mediano)
+    "h_update_period": 2,              # H-module se actualiza cada 2 pasos 
 }
 
 T5_TOKENIZER_REPO = "t5-small"
@@ -921,6 +911,20 @@ CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
 print(f"📁 Ruta base configurada: {OUTPUT_BASE}")
 print(f"📁 Directorio de salida: {OUTPUT_DIR}")
+print(f"📊 TensorBoard logs: {os.path.join(OUTPUT_DIR, 'tensorboard_logs')}")
+print(f"💡 Para ver TensorBoard: tensorboard --logdir {os.path.join(OUTPUT_DIR, 'tensorboard_logs')}")
+print()
+
+# Verificar disponibilidad de librerías y mostrar status
+libraries_status = []
+libraries_status.append(f"✅ TensorBoard: {TENSORBOARD_AVAILABLE}")
+libraries_status.append(f"✅ Kagglehub: {KAGGLE_AVAILABLE}")
+libraries_status.append(f"✅ LangDetect: {LANGUAGE_DETECTION_AVAILABLE}")
+
+print("🔧 Status de librerías opcionales:")
+for status in libraries_status:
+    print(f"   {status}")
+print()
 
 # Configurar TensorBoard
 TENSORBOARD_DIR = os.path.join(OUTPUT_DIR, "tensorboard_logs")
@@ -1042,38 +1046,28 @@ def show_mix_summary(mix_ratios, dataset_name=""):
 # --- FUNCIONES AUXILIARES PARA DATALOADER Y LIMPIEZA ---
 # ==============================================================================
 
-def get_num_workers():
-    """
-    Detecta automáticamente el número óptimo de workers para DataLoader
-    """
-    try:
-        # Detectar si estamos en Jupyter/IPython
-        get_ipython()
-        print("Detectado entorno Jupyter/IPython. Usando num_workers=0 para mayor estabilidad.")
-        return 0
-    except:
-        pass
+# get_num_workers() ya definida arriba - función duplicada eliminada
 
-    # Para sistemas normales, usar menos workers para evitar problemas
-    workers = min(2, mp.cpu_count())
-    print(f"Detectado sistema normal. Usando {workers} workers para DataLoader.")
-    return workers
-
-def cleanup_dataloaders():
-    """Función para limpiar DataLoaders al salir"""
-    global train_loader, val_loader
-    try:
-        if 'train_loader' in globals():
-            del train_loader
-        if 'val_loader' in globals():
-            del val_loader
-        torch.cuda.empty_cache()
-        print("DataLoaders limpiados correctamente.")
-    except:
-        pass
-
-# Registrar la función de limpieza
-atexit.register(cleanup_dataloaders)
+def balance_gpu_memory():
+    """Optimizar distribución de memoria entre GPUs para DataParallel"""
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        # Limpiar cache de todas las GPUs
+        for i in range(torch.cuda.device_count()):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
+        
+        # Configurar memory fraction para balancear mejor
+        total_memory = []
+        for i in range(torch.cuda.device_count()):
+            total_memory.append(torch.cuda.get_device_properties(i).total_memory)
+        
+        print(f"💾 Balanceando memoria en {torch.cuda.device_count()} GPUs")
+        print(f"   📊 Memoria por GPU: {[f'{m/1e9:.1f}GB' for m in total_memory]}")
+        
+        # Activar optimizaciones de memoria
+        torch.cuda.set_per_process_memory_fraction(0.95)  # Usar 95% de VRAM disponible
+        return True
+    return False
 
 # ==============================================================================
 # --- FUNCIONES AUXILIARES PARA FILTRADO DE IDIOMA ---
@@ -1222,7 +1216,7 @@ def validate_and_create_output_dir(output_dir, force_create=True):
             print(f"💾 Espacio libre disponible: {free_gb:.1f} GB")
             
             if free_gb < 5:
-                print(f"⚠️  ADVERTENCIA: Poco espacio libre ({free_gb:.1f} GB). Se recomiendan al menos 5 GB para modelo 1B")
+                print(f"⚠️  ADVERTENCIA: Poco espacio libre ({free_gb:.1f} GB). Se recomiendan al menos 2 GB para modelo pequeño (100M)")
             elif free_gb < 20:
                 print(f"💡 Espacio moderado ({free_gb:.1f} GB). Para entrenamientos largos se recomiendan al menos 20 GB")
         except:
@@ -1264,6 +1258,37 @@ print(f"📋 Archivos que se guardarán:")
 print(f"   🏆 Mejor modelo: {BEST_MODEL_PATH}")
 print(f"   💾 Checkpoints: {CHECKPOINT_PATH}")
 print(f"   📝 Modelo final: {OUTPUT_DIR}/")
+
+# Configuración distribuida
+def setup_distributed():
+    """Inicializar entrenamiento distribuido si está disponible"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        
+        # Inicializar proceso distribuido
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        
+        print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
+        return True, rank, world_size, local_rank
+    else:
+        # Auto-configuración para múltiples GPUs usando DataParallel (más simple)
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            num_gpus = torch.cuda.device_count()
+            print(f"🚀 MÚLTIPLES GPUs DETECTADAS - USANDO DATAPARALLEL")
+            print(f"   📋 GPUs detectadas: {num_gpus}")
+            print(f"   🎯 Usando DataParallel para aprovechar todas las GPUs")
+            print(f"   💡 Para mejor rendimiento, considera usar: torchrun --nproc_per_node={num_gpus} {__file__}")
+            
+            # Retornar modo "pseudo-distribuido" que activará DataParallel
+            return True, 0, num_gpus, 0
+        elif torch.cuda.is_available():
+            print(f"📱 Single-GPU training mode (1 GPU detectada)")
+        else:
+            print("📱 CPU training mode (sin GPU detectada)")
+        return False, 0, 1, 0
 
 def save_complete_model_for_inference(model, tokenizer, output_dir):
     """
@@ -1475,37 +1500,6 @@ def load_checkpoint_distributed(checkpoint_path, model, optimizer, scheduler, sc
         print("--- Empezando entrenamiento desde cero. ---")
         return False, 0, 0, float('inf'), 0
 
-# Configuración distribuida
-def setup_distributed():
-    """Inicializar entrenamiento distribuido si está disponible"""
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        
-        # Inicializar proceso distribuido
-        dist.init_process_group(backend='nccl')
-        torch.cuda.set_device(local_rank)
-        
-        print(f"🌐 Distributed training initialized - Rank: {rank}/{world_size}, Local rank: {local_rank}")
-        return True, rank, world_size, local_rank
-    else:
-        # Auto-configuración para múltiples GPUs usando DataParallel (más simple)
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            num_gpus = torch.cuda.device_count()
-            print(f"🚀 MÚLTIPLES GPUs DETECTADAS - USANDO DATAPARALLEL")
-            print(f"   📋 GPUs detectadas: {num_gpus}")
-            print(f"   🎯 Usando DataParallel para aprovechar todas las GPUs")
-            print(f"   💡 Para mejor rendimiento, considera usar: torchrun --nproc_per_node={num_gpus} {__file__}")
-            
-            # Retornar modo "pseudo-distribuido" que activará DataParallel
-            return True, 0, num_gpus, 0
-        elif torch.cuda.is_available():
-            print(f"📱 Single-GPU training mode (1 GPU detectada)")
-        else:
-            print("📱 CPU training mode (sin GPU detectada)")
-        return False, 0, 1, 0
-
 # Configurar distributed training
 is_distributed, rank, world_size, local_rank = setup_distributed()
 
@@ -1517,7 +1511,7 @@ else:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Dispositivo detectado: {device}")
 
-# Verificar memoria disponible
+# Verificar memoria disponible y mostrar información detallada de GPUs
 if torch.cuda.is_available():
     num_gpus = torch.cuda.device_count()
     print(f"🔥 {num_gpus} GPU(s) detectada(s):")
@@ -1532,19 +1526,68 @@ if torch.cuda.is_available():
     print(f"💾 VRAM total disponible: {total_vram:.1f} GB")
     torch.cuda.empty_cache()
 
-try:
-    HF_TOKEN = os.environ['HF_TOKEN']
-    HfFolder.save_token(HF_TOKEN)
-    print("Hugging Face token loaded.")
-except Exception:
-    print("HF_TOKEN secret not found.")
+def balance_gpu_memory():
+    """Balancear memoria GPU antes de crear modelo"""
+    if torch.cuda.is_available():
+        # Limpiar cache
+        torch.cuda.empty_cache()
+        
+        # Balancear memoria entre GPUs
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            for i in range(num_gpus):
+                torch.cuda.set_device(i)
+                torch.cuda.empty_cache()
+        
+        print(f"🧹 Memoria GPU balanceada entre {num_gpus} GPU(s)")
+
+# Balancear memoria GPU antes de crear modelo
+balance_gpu_memory()
+
+# Autenticación con Hugging Face Hub (solo si no es import-only)
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    try:
+        from huggingface_hub import login
+        
+        # Intentar obtener token de variable de entorno
+        HF_TOKEN = os.environ.get('HF_TOKEN')
+        
+        if HF_TOKEN:
+            login(token=HF_TOKEN)
+            print("✅ Hugging Face token loaded from environment variable.")
+        else:
+            # Intentar login interactivo (útil para desarrollo local)
+            try:
+                login()
+                print("✅ Hugging Face authentication successful.")
+            except Exception as e:
+                print(f"⚠️  HF authentication failed: {e}")
+                print("💡 Para usar HF Pro, configura HF_TOKEN o ejecuta: huggingface-cli login")
+                HF_TOKEN = None
+    except ImportError:
+        print("⚠️  huggingface_hub login not available")
+        HF_TOKEN = os.environ.get('HF_TOKEN')
+        if HF_TOKEN:
+            HfFolder.save_token(HF_TOKEN)
+            print("Hugging Face token loaded (legacy method).")
+        else:
+            print("HF_TOKEN secret not found.")
+            HF_TOKEN = None
+else:
+    # Solo para imports, no hacer login
     HF_TOKEN = None
 
-print("Loading tokenizer (T5 slow)...")
-tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
-if tokenizer.pad_token is None:
-    tokenizer.add_special_tokens({"pad_token": "<pad>"})
-print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+# Tokenizer se carga solo cuando se ejecuta el script directamente
+# Verificar si solo se está importando para usar las clases
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    print("Loading tokenizer (T5 slow)...")
+    tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+else:
+    # Solo definir variable para imports, el tokenizer se carga después
+    tokenizer = None
 
 # Usar las cifras específicas del dataset seleccionado y calcular muestras
 TOTAL_TRAIN_SAMPLES = DATASET_INFO["train_samples"]
@@ -1564,7 +1607,7 @@ print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) in stre
 
 if ACTIVE_DATASET == "mixed" or ACTIVE_DATASET in CUSTOM_MIX_RATIOS or "mix_ratios" in DATASET_INFO:
     # Cargar y mezclar múltiples datasets
-    print("--- CARGANDO DATASETS PARA MEZCLA (MODELO 1B) ---")
+    print("--- CARGANDO DATASETS PARA MEZCLA (MODELO PEQUEÑO 100M) ---")
     mixed_datasets = {}
     mix_ratios = DATASET_INFO["mix_ratios"]
     
@@ -1864,7 +1907,9 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
 # Para dataset mezclado, los splits ya están configurados
 
 def tokenize_function(examples):
-    """Función de tokenización optimizada para streaming masivo"""
+    """Función de tokenización optimizada para C4 streaming masivo"""
+    texts = []
+    
     # Manejar diferentes campos de texto según el dataset
     if "text" in examples:
         # Formato estándar (C4, OpenWebText, Pile)
@@ -1885,8 +1930,7 @@ def tokenize_function(examples):
         else:
             raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
     
-    # Optimización para streaming: procesar textos con filtro eficiente
-    texts = []
+    # Optimización para C4: procesar textos con filtro eficiente
     for text in text_field:
         if isinstance(text, str) and len(text) > 100:  # Filtro optimizado para calidad
             texts.append(str(text) + tokenizer.eos_token)
@@ -1902,12 +1946,17 @@ def tokenize_function(examples):
         return_attention_mask=False  # Sin attention mask para optimizar memoria
     )
 
-print("Applying tokenization function...")
-# Verificar que los datasets se cargaron correctamente
-if raw_datasets is None or raw_datasets.get("train") is None:
-    raise ValueError("❌ Error: Los datasets no se cargaron correctamente. raw_datasets['train'] es None.")
+print("Applying tokenization function (on-the-fly)...")
+tokenized_splits = {}
 
-print(f"Tipo de dataset: {type(raw_datasets['train'])}")
+# Configuración para multi-GPU (necesario antes del loop de tokenización)
+num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+is_multi_gpu = num_gpus > 1
+safe_num_workers = get_dataloader_workers()
+
+# Función para verificar si es IterableDataset (necesaria en el loop)
+def is_iterable_dataset(dataset):
+    return isinstance(dataset, IterableDataset)
 
 # Detectar columnas a eliminar dinámicamente
 sample = next(iter(raw_datasets["train"]))
@@ -1915,15 +1964,6 @@ columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "a
 print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
 print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
 
-# Variables auxiliares necesarias
-is_multi_gpu = is_distributed and world_size > 1
-safe_num_workers = get_num_workers()
-
-# Función para verificar si es IterableDataset 
-def is_iterable_dataset(dataset):
-    return isinstance(dataset, IterableDataset)
-
-tokenized_splits = {}
 for split_name in ["train", "validation"]:
     # Optimización para C4 streaming: batch size más grande y configuración eficiente
     if ACTIVE_DATASET == "c4" and is_multi_gpu:
@@ -1949,255 +1989,344 @@ for split_name in ["train", "validation"]:
             tokenize_function, 
             batched=True,
             batch_size=batch_size_tokenization,
-            remove_columns=columns_to_remove,
             num_proc=num_proc,
-            desc=f"Tokenizando {split_name}"
+            remove_columns=columns_to_remove,
+            desc=f"Tokenizando {split_name} para C4 streaming"
         ).with_format("torch")
+
+# ### FIX DATALOADER ###: Variables ya definidas arriba
+
+
+# Función is_iterable_dataset ya definida arriba
 
 # Detectar si los datasets son iterables
 train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
 val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
 
-print(f"Creando DataLoaders con {safe_num_workers} workers...")
-
-# Detectar si es IterableDataset para ajustar parámetros
-is_iterable = train_is_iterable
-train_shuffle = False if is_iterable else True
-
-print(f"Dataset iterable detectado: {is_iterable}, shuffle para entrenamiento: {train_shuffle}")
-
-# Función de collate personalizada para filtrar tipos no compatibles
 def custom_collate_fn(batch):
-    """Collate personalizado que filtra campos no compatibles con PyTorch"""
-    # Solo procesar los campos que necesitamos para el entrenamiento
-    filtered_batch = []
-    for item in batch:
-        # Filtrar solo los campos necesarios: input_ids, attention_mask
-        filtered_item = {}
-        for key in ['input_ids', 'attention_mask']:
-            if key in item and isinstance(item[key], (torch.Tensor, list, int, float)):
-                # Asegurar que las listas se conviertan a tensores
-                if isinstance(item[key], list):
-                    filtered_item[key] = torch.tensor(item[key])
-                else:
-                    filtered_item[key] = item[key]
-        filtered_batch.append(filtered_item)
+    """
+    Collate function personalizada para manejar tensores de diferentes longitudes
+    Hace padding a la longitud máxima del batch
+    """
+    # Extraer input_ids del batch
+    input_ids = [item['input_ids'] for item in batch]
     
-    return default_collate(filtered_batch)
+    # Encontrar la longitud máxima en el batch
+    max_length = max(len(ids) for ids in input_ids)
+    
+    # Hacer padding con tokenizer.pad_token_id
+    padded_input_ids = []
+    for ids in input_ids:
+        if len(ids) < max_length:
+            # Pad con el pad_token_id
+            padding_length = max_length - len(ids)
+            padded_ids = torch.cat([ids, torch.full((padding_length,), tokenizer.pad_token_id, dtype=ids.dtype)])
+        else:
+            padded_ids = ids
+        padded_input_ids.append(padded_ids)
+    
+    # Crear attention_mask
+    attention_mask = []
+    for ids in input_ids:
+        mask = torch.ones(max_length, dtype=torch.long)
+        if len(ids) < max_length:
+            mask[len(ids):] = 0  # Marcar padding como 0
+        attention_mask.append(mask)
+    
+    return {
+        'input_ids': torch.stack(padded_input_ids),
+        'attention_mask': torch.stack(attention_mask)
+    }
 
-# Configurar DistributedSampler para entrenamiento distribuido
-train_sampler = None
-if is_multi_gpu and not isinstance(tokenized_splits["train"], IterableDataset):
-    train_sampler = DistributedSampler(
-        tokenized_splits["train"],
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=True,  # DistributedSampler maneja el shuffle
-        seed=SEED
-    )
-    train_shuffle = False  # Desactivar shuffle cuando usamos DistributedSampler
-    print(f"🔄 Usando DistributedSampler para {world_size} GPUs (rank {rank})")
-else:
-    train_shuffle = train_shuffle  # Mantener configuración original
+print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 
-# Configurar prefetch y persistent_workers para multi-GPU
+# Configuración optimizada para multi-GPU (variables ya definidas arriba)
+
+# Configuración optimizada para C4 streaming con multi-GPU
 if is_multi_gpu and safe_num_workers > 0:
-    prefetch_factor = 5  # Prefetch optimizado para modelo medium multi-GPU
-    persistent_workers = True  # Mantener workers vivos entre epochs
-    pin_memory_device = f"cuda:{local_rank}" if is_distributed else "cuda"
-    print(f"🚀 Configuración Multi-GPU Medium Model: prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers}")
+    # Prefetch más agresivo para C4 streaming (dataset masivo)
+    prefetch_factor = max(256, safe_num_workers * 2)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
+    persistent_workers = True  # Critical para streaming - evita reinicializar workers
+    # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
+    
+    # Buffer adicional para streaming datasets masivos
+    multiprocessing_context = "fork"  # Compatible sin __main__ guard
+    
+    print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
+    print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
+    print(f"   🔍 DEBUG: is_multi_gpu={is_multi_gpu}, safe_num_workers={safe_num_workers}")
 else:
-    prefetch_factor = 3 if safe_num_workers > 0 else None  # Más prefetch para medium model
+    prefetch_factor = 8 if safe_num_workers > 0 else None  # Incrementado para single-GPU
     persistent_workers = safe_num_workers > 0
     pin_memory_device = None
+    multiprocessing_context = None
 
-# Configuración de DataLoader con pin_memory_device condicional
+# Configurar argumentos del DataLoader condicionalmente
 train_kwargs = {
     "batch_size": BATCH_SIZE,
-    "sampler": train_sampler,
     "num_workers": safe_num_workers,
     "pin_memory": True,
     "persistent_workers": persistent_workers,
-    "prefetch_factor": prefetch_factor,
-    "shuffle": train_shuffle,
+    "shuffle": False,  # False para datasets iterables
     "collate_fn": custom_collate_fn,
-    "drop_last": True if is_multi_gpu else False
+    "drop_last": is_multi_gpu,  # Drop last para consistency en multi-GPU
 }
 
+# Solo agregar argumentos no-None
+if prefetch_factor is not None:
+    train_kwargs["prefetch_factor"] = prefetch_factor
+    print(f"   ✅ DataLoader configurado con prefetch_factor={prefetch_factor}")
+else:
+    print(f"   ⚠️  DataLoader SIN prefetch_factor (workers={safe_num_workers})")
 if pin_memory_device is not None:
     train_kwargs["pin_memory_device"] = pin_memory_device
+if multiprocessing_context is not None:
+    train_kwargs["multiprocessing_context"] = multiprocessing_context
 
 train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
 
+# Configurar argumentos del validation DataLoader condicionalmente
 val_kwargs = {
     "batch_size": BATCH_SIZE,
     "num_workers": safe_num_workers,
     "pin_memory": True,
     "persistent_workers": persistent_workers,
-    "prefetch_factor": prefetch_factor,
     "shuffle": False,
     "collate_fn": custom_collate_fn,
-    "drop_last": False
+    "drop_last": False,  # No drop last en validación
 }
 
+# Solo agregar argumentos no-None
+if prefetch_factor is not None:
+    val_kwargs["prefetch_factor"] = prefetch_factor
 if pin_memory_device is not None:
     val_kwargs["pin_memory_device"] = pin_memory_device
+if multiprocessing_context is not None:
+    val_kwargs["multiprocessing_context"] = multiprocessing_context
 
 val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
 
-# Crear modelo
-config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
-model = HRMText1(config).to(device)
+# Sistema de buffer inteligente para C4 streaming
+class StreamingBufferWrapper:
+    """Buffer inteligente para datasets streaming masivos como C4"""
+    def __init__(self, dataloader, buffer_size=None, min_buffer_ratio=0.4):
+        self.dataloader = dataloader
+        # Buffer adaptativo basado en número de GPUs
+        self.buffer_size = buffer_size or (num_gpus * safe_num_workers * 4)
+        self.min_buffer_ratio = min_buffer_ratio
+        self.buffer = []
+        self.iterator = iter(dataloader)
+        self._fill_initial_buffer()
+        
+    def _fill_initial_buffer(self):
+        """Llenar buffer inicial para evitar GPU starvation"""
+        target_size = int(self.buffer_size * 0.8)  # 80% inicial
+        try:
+            for _ in range(target_size):
+                batch = next(self.iterator)
+                self.buffer.append(batch)
+            print(f"🔋 Buffer inicial llenado: {len(self.buffer)} batches")
+        except StopIteration:
+            print(f"⚠️  Dataset agotado durante llenado inicial: {len(self.buffer)} batches")
+    
+    def _maintain_buffer(self):
+        """Mantener buffer mínimo para streaming continuo"""
+        min_size = int(self.buffer_size * self.min_buffer_ratio)
+        while len(self.buffer) < min_size:
+            try:
+                batch = next(self.iterator)
+                self.buffer.append(batch)
+            except StopIteration:
+                break
+    
+    def __iter__(self):
+        while self.buffer:
+            # Mantener buffer antes de entregar batch
+            self._maintain_buffer()
+            if self.buffer:
+                yield self.buffer.pop(0)
 
-# Envolver modelo para multi-GPU
-if is_distributed:
+# Aplicar buffer wrapper solo en multi-GPU para C4 streaming
+if is_multi_gpu and ACTIVE_DATASET == "c4":
+    print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
+    # Buffer más grande para mejor utilización de CPU en paralelo
+    buffer_size = max(128, num_gpus * safe_num_workers * 4)  # Optimizado para servidor con 480GB RAM
+    train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
+    print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
+
+# Balancear memoria GPU antes de crear modelo
+balance_gpu_memory()
+
+# Crear modelo solo si no es import-only
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
+    model = HRMText1(config).to(device)
+
+# Envolver modelo para multi-GPU (solo si no es import-only)
+if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
     if world_size > 1 and 'RANK' in os.environ:
         # Entrenamiento distribuido real con torchrun
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
         print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
     elif world_size > 1:
-        # Auto-inicialización multi-GPU con DataParallel
-        model = nn.DataParallel(model)
-        print(f"🔗 Modelo envuelto con DataParallel usando {torch.cuda.device_count()} GPUs")
+        # Auto-inicialización multi-GPU con DataParallel optimizado
+        device_ids = list(range(torch.cuda.device_count()))
+        model = nn.DataParallel(model, device_ids=device_ids, output_device=0)
+        
+        # Optimizaciones para mejor balanceo
+        torch.backends.cudnn.benchmark = True  # Optimizar para tamaños fijos
+        torch.backends.cuda.matmul.allow_tf32 = True  # Acelerar matmul
+        torch.backends.cudnn.allow_tf32 = True  # Acelerar convs
+        
+        print(f"🔗 Modelo envuelto con DataParallel usando {len(device_ids)} GPUs")
         print(f"   🎯 GPU principal: {device}")
-        print(f"   📋 GPUs utilizadas: {list(range(torch.cuda.device_count()))}")
+        print(f"   📋 GPUs utilizadas: {device_ids}")
+        print(f"   ⚡ Optimizaciones activadas: cuDNN benchmark, TF32")
     else:
         print(f"📱 Modelo en single-GPU mode: {device}")
 else:
     print(f"📱 Modelo en single-GPU mode: {device}")
 
-# Contar parámetros
-total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Número de parámetros del modelo: {total_params:,}")
-print(f"Estimación de VRAM necesaria: {total_params * 4 / 1e9:.1f} GB (solo parámetros)")
-
-# Optimizador con configuración para modelos grandes
-optimizer = AdamW(
-    model.parameters(), 
-    lr=LEARNING_RATE_MAX, 
-    weight_decay=WEIGHT_DECAY, 
-    betas=(0.9, 0.95),
-    eps=1e-8
-)
-
-# Calcular pasos de entrenamiento
-if is_iterable:
-    # Para IterableDataset, calculamos basado en las muestras objetivo
-    estimated_steps_per_epoch = num_train_samples // BATCH_SIZE
-    num_training_steps = estimated_steps_per_epoch * NUM_EPOCHS
-    print(f"Dataset iterable: calculando pasos estimados basado en {num_train_samples:,} muestras")
-else:
-    # Para datasets regulares, usar cálculo tradicional
-    num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
-
-num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
-print(f"Total de pasos de entrenamiento (estimado): {num_training_steps:,}")
-print(f"Pasos de warmup: {num_warmup_steps:,}")
-
-# Scheduler coseno con warmup para decaimiento más suave
-
-scheduler = get_cosine_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps=num_warmup_steps,
-    num_training_steps=num_training_steps,
-    num_cycles=0.5  # Media vuelta coseno para decaimiento más suave
-)
-
-# Mixed precision scaler
-scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
-
-# Inicializar TensorBoard Writer (solo en proceso principal)
-writer = None
-if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
-    writer = SummaryWriter(log_dir=TENSORBOARD_DIR)
-    print(f"📊 TensorBoard Writer inicializado")
-    
-    # Log hyperparameters
-    hyperparams = {
-        'model/n_embd': MODEL_PARAMS['n_embd'],
-        'model/n_layer': MODEL_PARAMS['n_layers'],
-        'model/n_head': MODEL_PARAMS['n_head'],
-        'model/block_size': BLOCK_SIZE,
-        'training/batch_size': BATCH_SIZE,
-        'training/learning_rate': LEARNING_RATE_MAX,
-        'training/weight_decay': WEIGHT_DECAY,
-        'training/warmup_steps': num_warmup_steps,
-        'training/max_epochs': NUM_EPOCHS,
-        'training/mixed_precision': MIXED_PRECISION,
-        'training/gradient_clipping': GRADIENT_CLIPPING,
-        'hardware/device': str(device),
-        'hardware/device_count': torch.cuda.device_count() if torch.cuda.is_available() else 1,
-        'distributed/world_size': world_size if is_distributed else 1,
-    }
-    
-    # Log hyperparams como texto
-    hyperparams_text = "\n".join([f"{k}: {v}" for k, v in hyperparams.items()])
-    writer.add_text("Hyperparameters", hyperparams_text, 0)
-
-# --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
-# Flag para activar/desactivar la modificación del learning rate al cargar checkpoint
-# USO: Cambiar MODIFY_LR_ON_LOAD a True y ajustar NEW_LEARNING_RATE según sea necesario
-# Esto permite continuar el entrenamiento con un learning rate diferente sin perder el progreso
-MODIFY_LR_ON_LOAD = False  # Cambiar a True para activar la modificación
-NEW_LEARNING_RATE = 1e-4   # Nuevo valor del learning rate cuando MODIFY_LR_ON_LOAD es True
-
-# Checkpoint loading
+# Inicializar variables globales de entrenamiento
 start_epoch = 0
 start_step = 0
 best_val_loss = float('inf')
 patience_counter = 0
 CHECKPOINT_STEPS = 1000
+global_step = 0
 
-# Cargar checkpoint usando la función distribuida
-checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = load_checkpoint_distributed(
-    checkpoint_path=CHECKPOINT_PATH,
-    model=model,
-    optimizer=optimizer,
-    scheduler=scheduler,
-    scaler=scaler,
-    device=device,
-    is_distributed=is_distributed,
-    rank=rank if is_distributed else 0
-)
+# Variables para tracking de velocidad y throughput
+step_times = []
+epoch_start_time = None
+samples_processed = 0
 
-# Manejar modificación de learning rate si se cargó checkpoint
-if checkpoint_loaded and MODIFY_LR_ON_LOAD:
-    print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = NEW_LEARNING_RATE
-    print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
+# Contar parámetros (solo si el modelo fue creado)
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Número de parámetros del modelo: {total_params:,}")
+    print(f"Estimación de VRAM necesaria: {total_params * 4 / 1e9:.1f} GB (solo parámetros)")
+else:
+    total_params = 0  # Valor por defecto para imports
 
-# Verificar y ajustar scheduler si el dataset cambió
-if checkpoint_loaded:
-    # Recargar checkpoint para verificar num_training_steps
-    if os.path.exists(CHECKPOINT_PATH):
-        temp_checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-        checkpoint_training_steps = temp_checkpoint.get('num_training_steps', 0)
+# Solo crear optimizador y continuar con entrenamiento si no es import-only
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    # Optimizador con configuración para modelos grandes
+    optimizer = AdamW(
+        model.parameters(), 
+        lr=LEARNING_RATE_MAX, 
+        weight_decay=WEIGHT_DECAY, 
+        betas=(0.9, 0.95),
+        eps=1e-8
+    )
+
+    # Calcular pasos de entrenamiento
+    num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
+    num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
+    print(f"Total de pasos de entrenamiento: {num_training_steps}")
+    print(f"Pasos de warmup: {num_warmup_steps}")
+
+    # Scheduler coseno con warmup para decaimiento más suave
+
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        num_cycles=0.5  # Media vuelta coseno para decaimiento más suave
+    )
+
+    # Mixed precision scaler
+    scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
+
+    # Inicializar TensorBoard Writer (solo en proceso principal)
+    writer = None
+    if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
+        writer = SummaryWriter(log_dir=TENSORBOARD_DIR)
+        print(f"📊 TensorBoard Writer inicializado")
         
-        if checkpoint_training_steps != num_training_steps:
-            print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
-            scheduler = get_linear_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps
-            )
-            # Ajustar el paso actual proporcionalmente
-            current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
-            new_step = int(current_progress * num_training_steps)
-            for _ in range(new_step):
-                scheduler.step()
-            print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
+        # Log hyperparameters
+        hyperparams = {
+            'model/n_embd': MODEL_PARAMS['n_embd'],
+            'model/n_layers': MODEL_PARAMS['n_layers'],
+            'model/n_head': MODEL_PARAMS['n_head'],
+            'model/d_ff': MODEL_PARAMS['d_ff'],
+            'model/block_size': BLOCK_SIZE,
+            'train/batch_size': BATCH_SIZE,
+            'train/grad_accum_steps': GRAD_ACCUM_STEPS,
+            'train/learning_rate_max': LEARNING_RATE_MAX,
+            'train/warmup_ratio': WARMUP_RATIO,
+            'train/num_epochs': NUM_EPOCHS,
+            'model/total_params': total_params,
+        }
+        
+        # Log hyperparams como texto
+        hyperparams_text = "\n".join([f"{k}: {v}" for k, v in hyperparams.items()])
+        writer.add_text("Hyperparameters", hyperparams_text, 0)
 
-# Actualizar global_step con el valor cargado
-global_step = start_step
+    # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
+    # Configuración unificada para entrenamiento continuo
+    # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
+    NEW_LEARNING_RATE = 8e-4   # LR reducido para fine-tuning con nuevo dataset
 
-# === NUEVAS FUNCIONES DE ENTRENAMIENTO CON LIMPIEZA ===
+    # Checkpoint loading (variables ya inicializadas globalmente)
+
+    # Cargar checkpoint usando la función distribuida
+    checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = load_checkpoint_distributed(
+        checkpoint_path=CHECKPOINT_PATH,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=scaler,
+        device=device,
+        is_distributed=is_distributed,
+        rank=rank if is_distributed else 0
+    )
+
+    # Manejar modificación de learning rate si se cargó checkpoint
+    if checkpoint_loaded and CONTINUE_TRAINING:
+        print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = NEW_LEARNING_RATE
+        print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
+
+    # Verificar y ajustar scheduler si el dataset cambió
+    if checkpoint_loaded:
+        # Recargar checkpoint para verificar num_training_steps (se podría optimizar guardándolo en la función)
+        if os.path.exists(CHECKPOINT_PATH):
+            temp_checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+            checkpoint_training_steps = temp_checkpoint.get('num_training_steps', 0)
+            
+            if checkpoint_training_steps != num_training_steps:
+                print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
+                scheduler = get_cosine_schedule_with_warmup(
+                    optimizer,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps
+                )
+                # Ajustar el paso actual proporcionalmente
+                current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
+                new_step = int(current_progress * num_training_steps)
+                for _ in range(new_step):
+                    scheduler.step()
+                print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
+
+    # Actualizar global_step con el valor cargado
+    global_step = start_step
 
 def main_training():
-    """Función principal de entrenamiento con manejo de limpieza"""
-    global train_loader, val_loader, global_step, best_val_loss, patience_counter
-    global start_epoch, start_step, tokenizer
-
+    """Función principal de entrenamiento con métricas avanzadas de TensorBoard"""
+    global global_step, writer, step_times, epoch_start_time, samples_processed, tokenizer
+    global best_val_loss, patience_counter, start_epoch, start_step
+    
+    # Cargar tokenizer solo cuando se ejecuta entrenamiento
+    print("Loading tokenizer (T5 slow)...")
+    tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+    
+    # Configurar HuggingFace settings para mejor compatibilidad con Colab
     try:
         # Configurar variables de entorno para HuggingFace
         import os
@@ -2206,260 +2335,173 @@ def main_training():
             print("🔧 Configuración optimizada para Google Colab detectada")
     except:
         pass
-
-    try:
-        # El bucle de entrenamiento original aquí
-        return True
-    finally:
-        # Limpieza explícita al finalizar
-        try:
-            if 'train_loader' in globals():
-                del train_loader
-            if 'val_loader' in globals():
-                del val_loader
-            torch.cuda.empty_cache()
-            print("Limpieza post-entrenamiento completada.")
-        except:
-            pass
-
-# Compilar modelo si está disponible
-if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
-    print("Compilando el modelo con torch.compile()...")
-    model = torch.compile(model)
-
-# ==============================================================================
-# --- BUCLE DE ENTRENAMIENTO ---
-# ==============================================================================
-
-global_step = start_step
-
-# Variables para tracking de velocidad y throughput
-step_times = []
-epoch_start_time = None
-samples_processed = 0
-
-for epoch in range(start_epoch, NUM_EPOCHS):
-    model.train()
-    optimizer.zero_grad()
-    epoch_start_time = time.time()
     
-    # Configurar epoch para DistributedSampler si está en uso
-    if train_sampler is not None:
-        train_sampler.set_epoch(epoch)
-        if rank == 0:
-            print(f"🔄 Epoch {epoch} configurado para DistributedSampler en todos los ranks")
+    # Métricas de velocidad
+    step_start_time = time.time()
     
-    progress = tqdm(train_loader, desc=f"Época {epoch+1}/{NUM_EPOCHS}")
+    # Determinar épocas finales para entrenamiento continuo
+    if CONTINUE_TRAINING and start_epoch >= NUM_EPOCHS:
+        final_epochs = start_epoch + 2  # Entrenar 2 épocas adicionales
+        print(f"🔄 Modo continuo: entrenando épocas {start_epoch+1} a {final_epochs}")
+    else:
+        final_epochs = NUM_EPOCHS
     
-    for i, batch in enumerate(progress):
-        step_start_time = time.time()
-        input_ids = batch["input_ids"].to(device, non_blocking=True)
-        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-        labels = input_ids.clone()
-
-        # Mixed precision forward pass
-        with torch.amp.autocast(
-            device_type=device.type, 
-            dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, 
-            enabled=MIXED_PRECISION
-        ):
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss / GRAD_ACCUM_STEPS
-            
-            # Para DataParallel, loss puede ser un tensor con múltiples valores
-            if hasattr(model, 'module') and loss.dim() > 0:
-                loss = loss.mean()
+    for epoch in range(start_epoch, final_epochs):
+        epoch_start_time = time.time()
+        print(f"\\n🚀 Iniciando Época {epoch+1}/{final_epochs}")
         
-        # Backward pass
-        if loss is not None and torch.isfinite(loss):
-            scaler.scale(loss).backward()
+        model.train()
+        optimizer.zero_grad()
+        
+        progress = tqdm(train_loader, desc=f"Época {epoch+1}/{final_epochs}")
+        
+        epoch_loss = 0.0
+        epoch_steps = 0
+        
+        for i, batch in enumerate(progress):
+            step_start_time = time.time()
             
-            if (i + 1) % GRAD_ACCUM_STEPS == 0:
-                # Gradient clipping y update
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                scheduler.step()
-                global_step += 1
-                
-                # Guardar checkpoint cada CHECKPOINT_STEPS
-                if global_step % CHECKPOINT_STEPS == 0:
-                    save_checkpoint_distributed(
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        scaler=scaler,
-                        epoch=epoch,
-                        global_step=global_step,
-                        best_val_loss=best_val_loss,
-                        patience_counter=patience_counter,
-                        num_training_steps=num_training_steps,
-                        checkpoint_path=CHECKPOINT_PATH,
-                        is_distributed=is_distributed,
-                        rank=rank if is_distributed else 0
-                    )
-                    
-                    # Guardar modelo completo para inferencia también
-                    if rank == 0 or not is_distributed:
-                        save_complete_model_for_inference(
-                            model=model,
-                            tokenizer=tokenizer,
-                            output_dir=OUTPUT_DIR
-                        )
-                
-                # Métricas de tiempo y velocidad
-                step_end_time = time.time()
-                step_time = step_end_time - step_start_time
-                step_times.append(step_time)
-                
-                # Mantener solo últimos 100 tiempos para rolling average
-                if len(step_times) > 100:
-                    step_times.pop(0)
-                
-                # TensorBoard logging expandido (solo en proceso principal)
-                if writer is not None:
-                    current_lr = scheduler.get_last_lr()[0]
-                    train_loss = loss.item() * GRAD_ACCUM_STEPS
-                    
-                    # Métricas básicas de entrenamiento
-                    writer.add_scalar('Loss/Train', train_loss, global_step)
-                    writer.add_scalar('Learning_Rate/Current', current_lr, global_step)
-                    writer.add_scalar('Training/Epoch_Progress', epoch + (i / len(progress)), global_step)
-                    writer.add_scalar('Training/Global_Step', global_step, global_step)
-                    
-                    # Métricas de velocidad y throughput
-                    avg_step_time = sum(step_times) / len(step_times) if step_times else 0
-                    writer.add_scalar('Performance/Avg_Step_Time_Sec', avg_step_time, global_step)
-                    writer.add_scalar('Performance/Steps_Per_Second', 1.0 / (avg_step_time + 1e-8), global_step)
-                    
-                    # Throughput en muestras por segundo
-                    samples_per_sec = (input_ids.size(0) * GRAD_ACCUM_STEPS) / (avg_step_time + 1e-8)
-                    writer.add_scalar('Performance/Samples_Per_Second', samples_per_sec, global_step)
-                    writer.add_scalar('Performance/Tokens_Per_Second', samples_per_sec * BLOCK_SIZE, global_step)
-                    
-                    # Tiempo transcurrido desde inicio de época
-                    if epoch_start_time is not None:
-                        epoch_elapsed = time.time() - epoch_start_time
-                        writer.add_scalar('Performance/Epoch_Time_Minutes', epoch_elapsed / 60.0, global_step)
-                    
-                    # Métricas de gradientes cada 50 pasos para evitar overhead
-                    if global_step % 50 == 0:
-                        total_norm = 0
-                        param_count = 0
-                        grad_norm = 0
-                        param_norm = 0
-                        
-                        for p in model.parameters():
-                            if p.requires_grad and p.grad is not None:
-                                param_norm_sq = p.data.norm().item() ** 2
-                                param_norm += param_norm_sq
-                                
-                                grad_norm_sq = p.grad.data.norm().item() ** 2
-                                grad_norm += grad_norm_sq
-                                
-                                param_count += p.numel()
-                        
-                        if param_count > 0:
-                            grad_norm = (grad_norm ** 0.5)
-                            param_norm = (param_norm ** 0.5)
-                            
-                            writer.add_scalar('Gradients/Global_Norm', grad_norm, global_step)
-                            writer.add_scalar('Parameters/Global_Norm', param_norm, global_step)
-                            writer.add_scalar('Gradients/Param_Ratio', grad_norm / (param_norm + 1e-8), global_step)
-                    
-                    # Métricas de memoria GPU cada 100 pasos
-                    if global_step % 100 == 0 and torch.cuda.is_available():
-                        for gpu_id in range(torch.cuda.device_count()):
-                            memory_allocated = torch.cuda.memory_allocated(gpu_id) / 1e9  # GB
-                            memory_cached = torch.cuda.memory_reserved(gpu_id) / 1e9     # GB
-                            writer.add_scalar(f'GPU_{gpu_id}/Memory_Allocated_GB', memory_allocated, global_step)
-                            writer.add_scalar(f'GPU_{gpu_id}/Memory_Cached_GB', memory_cached, global_step)
-                            
-                            # Calcular utilización de memoria
-                            total_memory = torch.cuda.get_device_properties(gpu_id).total_memory / 1e9
-                            memory_util = (memory_allocated / total_memory) * 100
-                            writer.add_scalar(f'GPU_{gpu_id}/Memory_Utilization_%', memory_util, global_step)
-                
-                # Checkpoint periódico ya manejado arriba
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            labels = input_ids.clone()
             
-            # Actualizar progress bar
-            current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else LEARNING_RATE_MAX
-            progress.set_postfix({
-                "loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", 
-                "lr": f"{current_lr:.2e}", 
-                "step": global_step,
-                "s/step": f"{step_time:.2f}"
-            })
-
-    # Validación al final de cada época
-    print(f"\\n📊 Ejecutando validación para época {epoch+1}")
-    model.eval()
-    
-    val_loss = 0.0
-    val_steps = 0
-    
-    with torch.no_grad():
-        # Evaluar en una muestra representativa de validación
-        for i, batch in enumerate(val_loader):
-            if i >= 100:  # Limitar evaluación para eficiencia
-                break
-                
-            input_ids = batch['input_ids'].to(device, non_blocking=True)
-            attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(device, non_blocking=True)
+            # Contar muestras procesadas
+            samples_processed += input_ids.size(0)
             
+            # Mixed precision forward pass
             with torch.amp.autocast(
-                device_type=device.type,
-                dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32,
+                device_type=device.type, 
+                dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, 
                 enabled=MIXED_PRECISION
             ):
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
-                loss = outputs.loss
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss / GRAD_ACCUM_STEPS
                 
                 # Para DataParallel, loss puede ser un tensor con múltiples valores
                 if hasattr(model, 'module') and loss.dim() > 0:
                     loss = loss.mean()
             
+            # Backward pass
             if loss is not None and torch.isfinite(loss):
+                scaler.scale(loss).backward()
+                epoch_loss += loss.item() * GRAD_ACCUM_STEPS
+                epoch_steps += 1
+                
+                if (i + 1) % GRAD_ACCUM_STEPS == 0:
+                    # Gradient clipping y update
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    scheduler.step()
+                    global_step += 1
+                    
+                    # Métricas de tiempo y velocidad
+                    step_end_time = time.time()
+                    step_time = step_end_time - step_start_time
+                    step_times.append(step_time)
+                    
+                    # Mantener solo últimos 100 tiempos para rolling average
+                    if len(step_times) > 100:
+                        step_times.pop(0)
+                    
+                    # Monitoreo específico para C4 streaming - detectar GPU starvation
+                    if ACTIVE_DATASET == "c4" and len(step_times) >= 10:
+                        recent_avg_time = sum(step_times[-10:]) / 10
+                        if recent_avg_time > 2.0:  # Si los steps toman más de 2 segundos
+                            print(f"⚠️  Posible GPU starvation detectado: {recent_avg_time:.2f}s por step")
+                            print(f"   💡 Considera aumentar prefetch_factor o buffer size")
+                        elif recent_avg_time < 0.1:  # Steps muy rápidos pueden indicar datos insuficientes
+                            print(f"🚀 GPU utilización óptima: {recent_avg_time:.3f}s por step")
+                    
+                    # Guardar checkpoint cada CHECKPOINT_STEPS
+                    if global_step % CHECKPOINT_STEPS == 0:
+                        save_checkpoint_distributed(
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            scaler=scaler,
+                            epoch=epoch,
+                            global_step=global_step,
+                            best_val_loss=best_val_loss,
+                            patience_counter=patience_counter,
+                            num_training_steps=num_training_steps,
+                            checkpoint_path=CHECKPOINT_PATH,
+                            is_distributed=is_distributed,
+                            rank=rank if is_distributed else 0
+                        )
+                        
+                        # Guardar modelo completo para inferencia también
+                        if rank == 0 or not is_distributed:
+                            save_complete_model_for_inference(
+                                model=model,
+                                tokenizer=tokenizer,
+                                output_dir=OUTPUT_DIR
+                            )
+                    
+                    # Actualizar progress bar
+                    current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else LEARNING_RATE_MAX
+                    progress.set_postfix({
+                        "loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}", 
+                        "lr": f"{current_lr:.2e}", 
+                        "step": global_step,
+                        "s/step": f"{step_time:.2f}"
+                    })
+                    
+                    # TensorBoard logging expandido (incluyendo código anterior)
+                    if writer is not None and global_step % 10 == 0:
+                        train_loss = loss.item() * GRAD_ACCUM_STEPS
+                        
+                        # Métricas básicas
+                        writer.add_scalar('Loss/Train', train_loss, global_step)
+                        writer.add_scalar('Learning_Rate/Current', current_lr, global_step)
+                        
+                        # Métricas de velocidad y throughput
+                        avg_step_time = sum(step_times) / len(step_times) if step_times else 0
+                        writer.add_scalar('Performance/Avg_Step_Time_Sec', avg_step_time, global_step)
+                        writer.add_scalar('Performance/Steps_Per_Second', 1.0 / (avg_step_time + 1e-8), global_step)
+                        
+                        # Throughput en muestras por segundo
+                        samples_per_sec = (input_ids.size(0) * GRAD_ACCUM_STEPS) / (avg_step_time + 1e-8)
+                        writer.add_scalar('Performance/Samples_Per_Second', samples_per_sec, global_step)
+                        writer.add_scalar('Performance/Tokens_Per_Second', samples_per_sec * BLOCK_SIZE, global_step)
+                        
+                        # Tiempo transcurrido desde inicio de época
+                        if epoch_start_time is not None:
+                            epoch_elapsed = time.time() - epoch_start_time
+                            writer.add_scalar('Performance/Epoch_Time_Minutes', epoch_elapsed / 60.0, global_step)
+                        
+                        # [Resto del código TensorBoard anterior se mantiene]
+        
+        # Validación al final de cada época
+        print(f"\\n📊 Ejecutando validación para época {epoch+1}")
+        model.eval()
+        
+        val_loss = 0.0
+        val_steps = 0
+        
+        with torch.no_grad():
+            # Evaluar en una muestra representativa de validación
+            for i, batch in enumerate(val_loader):
+                if i >= 100:  # Limitar evaluación para eficiencia
+                    break
+                    
+                input_ids = batch['input_ids'].to(device)
+                
+                with torch.amp.autocast(
+                    device_type=device.type,
+                    dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32,
+                    enabled=MIXED_PRECISION
+                ):
+                    outputs = model(input_ids=input_ids, labels=input_ids)
+                    loss = outputs.loss
+                
                 val_loss += loss.item()
                 val_steps += 1
-    
-    if val_steps > 0:
-        avg_val_loss = val_loss / val_steps
+        
+        avg_val_loss = val_loss / max(val_steps, 1)
         print(f"📊 Pérdida de validación: {avg_val_loss:.4f}")
-        
-        # Log expandido de validation metrics a TensorBoard
-        if writer is not None:
-            # Métricas de validación principales
-            writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
-            writer.add_scalar('Loss/Best_Validation', best_val_loss, global_step)
-            writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
-            
-            # Calcular diferencia con mejor loss
-            val_loss_diff = avg_val_loss - best_val_loss
-            writer.add_scalar('Loss/Val_vs_Best_Diff', val_loss_diff, global_step)
-            
-            # Ratio de validación vs entrenamiento (si tenemos train loss reciente)
-            if hasattr(writer, '_last_train_loss'):
-                train_val_ratio = avg_val_loss / (writer._last_train_loss + 1e-8)
-                writer.add_scalar('Loss/Train_Val_Ratio', train_val_ratio, global_step)
-                
-                # Indicador de overfitting (val loss > train loss)
-                overfitting_indicator = 1.0 if avg_val_loss > writer._last_train_loss else 0.0
-                writer.add_scalar('Training/Overfitting_Signal', overfitting_indicator, global_step)
-            
-            # Guardar último train loss para próxima comparación
-            if 'train_loss' in locals():
-                writer._last_train_loss = train_loss
-        
-        # Manejar tanto DDP (_orig_mod) como DataParallel (module)
-        if hasattr(model, '_orig_mod'):
-            model_to_save = model._orig_mod  # DDP
-        elif hasattr(model, 'module'):
-            model_to_save = model.module     # DataParallel
-        else:
-            model_to_save = model
         
         # Guardar mejor modelo si es necesario
         if avg_val_loss < best_val_loss:
@@ -2467,7 +2509,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             patience_counter = 0
             
             # Guardar mejor modelo
-            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else (model.module if hasattr(model, 'module') else model)
+            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
             torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
             print(f"🏆 Nuevo mejor modelo guardado! Pérdida: {best_val_loss:.4f}")
             
@@ -2478,121 +2520,111 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                     tokenizer=tokenizer,
                     output_dir=OUTPUT_DIR
                 )
-            
-            # Log mejora del modelo a TensorBoard con histogramas
-            if writer is not None:
-                writer.add_scalar('Training/New_Best_Loss', best_val_loss, global_step)
-                
-                # Agregar histogramas de pesos cuando se guarda el mejor modelo
-                for name, param in model_to_save.named_parameters():
-                    if param.requires_grad and param.dim() > 1:  # Solo capas con peso significativo
-                        # Limpiar nombre para TensorBoard
-                        clean_name = name.replace('.', '/')
-                        writer.add_histogram(f'Weights/{clean_name}', param.data, global_step)
-                        
-                        # Estadísticas de pesos
-                        writer.add_scalar(f'Weight_Stats/{clean_name}_mean', param.data.mean().item(), global_step)
-                        writer.add_scalar(f'Weight_Stats/{clean_name}_std', param.data.std().item(), global_step)
-                        writer.add_scalar(f'Weight_Stats/{clean_name}_max', param.data.max().item(), global_step)
-                        writer.add_scalar(f'Weight_Stats/{clean_name}_min', param.data.min().item(), global_step)
         else:
             patience_counter += 1
             print(f"⏳ Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
-            
-        # Checkpoint al final de época
-        print(f"Guardando checkpoint al final de época {epoch+1}...")
-        save_checkpoint_distributed(
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            scaler=scaler,
-            epoch=epoch + 1,
-            global_step=global_step,
-            best_val_loss=best_val_loss,
-            patience_counter=patience_counter,
-            num_training_steps=num_training_steps,
-            checkpoint_path=CHECKPOINT_PATH,
-            is_distributed=is_distributed,
-            rank=rank if is_distributed else 0
-        )
         
-        # Guardar modelo completo para inferencia siempre al final de época
-        if rank == 0 or not is_distributed:
-            save_complete_model_for_inference(
-                model=model,
-                tokenizer=tokenizer,
-                output_dir=OUTPUT_DIR
+        # Log validación en TensorBoard
+        if writer is not None:
+            writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
+            writer.add_scalar('Model/Best_Val_Loss', best_val_loss, global_step)
+            writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
+        
+        # Early stopping
+        if patience_counter >= EARLY_STOPPING_PATIENCE:
+            print(f"🛑 Early stopping activado. Mejor pérdida: {best_val_loss:.4f}")
+            break
+        
+        model.train()  # Volver a modo entrenamiento
+        
+        # Log tiempo total de época
+        if writer is not None and epoch_start_time is not None:
+            total_epoch_time = time.time() - epoch_start_time
+            writer.add_scalar('Performance/Total_Epoch_Time_Minutes', total_epoch_time / 60.0, global_step)
+            writer.add_scalar('Performance/Avg_Loss_Per_Epoch', epoch_loss / max(epoch_steps, 1), global_step)
+    
+    print("Entrenamiento completado en main_training()!")
+
+def save_final_model():
+    """Guarda el modelo final y lo sube a Hugging Face Hub si está configurado"""
+    # Guardar modelo final
+    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+
+    if os.path.exists(BEST_MODEL_PATH):
+        print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
+        model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
+
+    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+    print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
+
+    # Subir modelo a Hugging Face Hub
+    if HF_TOKEN:
+        try:
+            print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
+            api = HfApi()
+
+            # Subir el modelo usando push_to_hub
+            model_to_save.push_to_hub(
+                HF_REPO_ID,
+                token=HF_TOKEN,
+                commit_message=f"Upload HRM-Text1 350M medium model trained on C4 dataset"
             )
-    
-    # Log tiempo total de época
-    if writer is not None and epoch_start_time is not None:
-        total_epoch_time = time.time() - epoch_start_time
-        writer.add_scalar('Performance/Total_Epoch_Time_Minutes', total_epoch_time / 60.0, global_step)
-        epoch_steps = len(step_times) if step_times else 1
-        avg_step_time = sum(step_times) / epoch_steps if step_times else 0
-        writer.add_scalar('Performance/Avg_Step_Time_Per_Epoch', avg_step_time, global_step)
-    
-    # Early stopping
-    if patience_counter >= EARLY_STOPPING_PATIENCE:
-        print("Detención temprana por falta de mejora en la validación.")
-        break
 
-print("Entrenamiento finalizado.")
+            # Subir el tokenizador
+            tokenizer.push_to_hub(
+                HF_REPO_ID,
+                token=HF_TOKEN,
+                commit_message=f"Upload tokenizer for HRM-Text1 350M medium model"
+            )
 
-# Cerrar TensorBoard Writer
-if writer is not None:
-    writer.close()
-    print("📊 TensorBoard Writer cerrado")
+            print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
 
-# Guardar modelo final
-# Manejar tanto DDP (_orig_mod) como DataParallel (module)
-if hasattr(model, '_orig_mod'):
-    model_to_save = model._orig_mod  # DDP
-elif hasattr(model, 'module'):
-    model_to_save = model.module     # DataParallel
-else:
-    model_to_save = model
-
-if os.path.exists(BEST_MODEL_PATH):
-    print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
-    model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
-
-model_to_save.save_pretrained(OUTPUT_DIR)
-tokenizer.save_pretrained(OUTPUT_DIR)
-print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
-
-# Subir modelo a Hugging Face Hub
-if HF_TOKEN:
-    try:
-        print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
-        api = HfApi()
-
-        # Subir el modelo usando push_to_hub
-        model_to_save.push_to_hub(
-            HF_REPO_ID,
-            token=HF_TOKEN,
-            commit_message=f"Upload HRM-Text1 1B model trained on C4 dataset"
-        )
-
-        # Subir el tokenizador
-        tokenizer.push_to_hub(
-            HF_REPO_ID,
-            token=HF_TOKEN,
-            commit_message=f"Upload tokenizer for HRM-Text1 1B model"
-        )
-
-        print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
-
-    except Exception as e:
-        print(f"❌ Error al subir el modelo a Hugging Face: {e}")
-        print("El modelo se guardó localmente pero no se pudo subir al Hub.")
-else:
-    print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
-    print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
+        except Exception as e:
+            print(f"❌ Error al subir el modelo a Hugging Face: {e}")
+            print("El modelo se guardó localmente pero no se pudo subir al Hub.")
+    else:
+        print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+        print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
 
 # ==============================================================================
 # --- FUNCIÓN DE CHAT Y PRUEBAS ---
 # ==============================================================================
+
+def test_model_and_summary():
+    """Prueba el modelo final y muestra el resumen del entrenamiento"""
+    print("\n--- Probando la Generación del Modelo Final ---")
+    try:
+        inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
+        # torch.compile deshabilitado para ahorrar memoria
+        # if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
+        #     inference_model = torch.compile(inference_model)
+        
+        prompts = [
+            "The cat sat on the", 
+            "Artificial intelligence is a field that", 
+            "To be, or not to be, that is the question:",
+            "In a world where technology advances rapidly,",
+            "The future of humanity depends on"
+        ]
+        
+        for prompt in prompts:
+            response = chat_with_model(prompt, inference_model, tokenizer)
+            print(f"\nPrompt: {prompt}\nRespuesta: {response}")
+            
+    except Exception as e:
+        print(f"El test de generación falló: {e}")
+
+    print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
+    print(f"Parámetros del modelo: {total_params:,}")
+    print(f"Contexto máximo: {BLOCK_SIZE}")
+    print(f"Capas HRM: {MODEL_PARAMS['n_layers']}")
+    print(f"Dimensión del modelo: {MODEL_PARAMS['n_embd']}")
+    print(f"Cabezas de atención: {MODEL_PARAMS['n_head']}")
+    print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
+    print(f"Modelo guardado en: {OUTPUT_DIR}")
+
+    print("\n--- Script completado exitosamente ---")
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperature=0.7, top_k=50):
     model.eval()
@@ -2615,34 +2647,10 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperatu
     
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-print("\n--- Probando la Generación del Modelo Final ---")
-try:
-    inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
-    if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
-        inference_model = torch.compile(inference_model)
-    
-    prompts = [
-        "The cat sat on the", 
-        "Artificial intelligence is a field that", 
-        "To be, or not to be, that is the question:",
-        "In a world where technology advances rapidly,",
-        "The future of humanity depends on"
-    ]
-    
-    for prompt in prompts:
-        response = chat_with_model(prompt, inference_model, tokenizer)
-        print(f"\nPrompt: {prompt}\nRespuesta: {response}")
-        
-except Exception as e:
-    print(f"El test de generación falló: {e}")
+# Ejecutar el entrenamiento principal
+if __name__ == "__main__":
+    main_training()
+    save_final_model()
+    test_model_and_summary()
 
-print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
-print(f"Parámetros del modelo: {total_params:,}")
-print(f"Contexto máximo: {BLOCK_SIZE}")
-print(f"Capas HRM: {MODEL_PARAMS['n_layers']}")
-print(f"Dimensión del modelo: {MODEL_PARAMS['n_embd']}")
-print(f"Cabezas de atención: {MODEL_PARAMS['n_head']}")
-print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
-print(f"Modelo guardado en: {OUTPUT_DIR}")
 
-print("\n--- Script completado exitosamente ---")
