@@ -934,20 +934,27 @@ if TENSORBOARD_AVAILABLE:
 # ==============================================================================
 
 def get_dataloader_workers():
-    """Determina el número óptimo de workers para DataLoader basado en entorno y configuración multi-GPU"""
+    """Determina el número óptimo de workers para DataLoader basado en entorno y configuración"""
+    # Para entrenamiento distribuido, usar workers para mejor CPU utilization
+    if is_distributed and world_size > 1:
+        # En multi-GPU distribuido, usar 2-4 workers por GPU para mejor paralelismo
+        optimal_workers = min(256, max(128, mp.cpu_count() // world_size))
+        print(f"🚀 Modo distribuido: usando {optimal_workers} workers por proceso (total CPUs: {mp.cpu_count()})")
+        return optimal_workers
+    
     try:
         # Detectar si estamos en Google Colab
         if 'google.colab' in str(get_ipython()):
-            print("Detectado entorno Google Colab. Usando num_workers=0 para evitar problemas de multiprocessing.")
-            return 0
+            print("Detectado entorno Google Colab. Usando num_workers=2 para mejor rendimiento.")
+            return 2  # Cambiar de 0 a 2 para mejor rendimiento
     except:
         pass
 
     try:
         # Detectar si estamos en Jupyter/IPython
         get_ipython()
-        print("Detectado entorno Jupyter/IPython. Usando num_workers=0 para mayor estabilidad.")
-        return 0
+        print("Detectado entorno Jupyter/IPython. Usando num_workers=2 para mejor rendimiento.")
+        return 2  # Cambiar de 0 a 2 para mejor rendimiento
     except:
         pass
 
@@ -956,13 +963,13 @@ def get_dataloader_workers():
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     
     if num_gpus > 1:
-        # Multi-GPU: 4 workers por GPU para máxima utilización
-        optimal_workers = min(num_gpus * 4, total_cpus - 2, 16)  # 4 workers por GPU
-        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (4 por GPU) para máxima utilización.")
+        # Multi-GPU: 8 workers por GPU para máxima utilización
+        optimal_workers = min(num_gpus * 8, 32, 64)  # 8 workers por GPU
+        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (8 por GPU) para máxima utilización.")
     else:
-        # Single-GPU: Configuración intermedia para modelo medium
-        optimal_workers = min(5, total_cpus // 2)
-        print(f"Single-GPU Medium Model. Usando {optimal_workers} workers para DataLoader.")
+        # Single-GPU: Configuración conservadora
+        optimal_workers = min(4, total_cpus // 2)
+        print(f"Single-GPU. Usando {optimal_workers} workers para DataLoader.")
     
     return optimal_workers
 
@@ -1857,28 +1864,43 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
 # Para dataset mezclado, los splits ya están configurados
 
 def tokenize_function(examples):
-    """Función de tokenización flexible que maneja diferentes formatos de dataset"""
-    text_field_name = next((f for f in ['text', 'content', 'document'] if f in examples), None)
-    if not text_field_name:
-        raise ValueError(f"No se encontró campo de texto válido. Campos: {list(examples.keys())}")
-    
-    # Procesar cada ejemplo individualmente para mantener la correspondencia
-    texts = []
-    for text in examples[text_field_name]:
-        if isinstance(text, str) and len(text) > 100:
-            texts.append(text + tokenizer.eos_token)
+    """Función de tokenización optimizada para streaming masivo"""
+    # Manejar diferentes campos de texto según el dataset
+    if "text" in examples:
+        # Formato estándar (C4, OpenWebText, Pile)
+        text_field = examples["text"]
+    elif "content" in examples:
+        # Algunos datasets usan 'content'
+        text_field = examples["content"]
+    elif "document" in examples:
+        # Algunos datasets usan 'document'
+        text_field = examples["document"]
+    else:
+        # Intentar encontrar el primer campo que parezca texto
+        for key in examples.keys():
+            if isinstance(examples[key][0], str) and len(examples[key][0]) > 50:
+                text_field = examples[key]
+                print(f"Usando campo '{key}' como texto")
+                break
         else:
-            # Si el texto no es válido, usar placeholder
-            texts.append(tokenizer.eos_token * 10)
+            raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
     
-    # Tokenizar todos los textos
-    tokenized = tokenizer(texts, truncation=True, max_length=BLOCK_SIZE, padding="max_length", add_special_tokens=False)
+    # Optimización para streaming: procesar textos con filtro eficiente
+    texts = []
+    for text in text_field:
+        if isinstance(text, str) and len(text) > 100:  # Filtro optimizado para calidad
+            texts.append(str(text) + tokenizer.eos_token)
     
-    # Para datasets streaming, devolver solo los campos del tokenizer
-    return {
-        'input_ids': tokenized['input_ids'],
-        'attention_mask': tokenized['attention_mask']
-    }
+    # Tokenización optimizada para streaming masivo
+    # Sin padding para mayor eficiencia en memoria y procesamiento
+    return tokenizer(
+        texts, 
+        truncation=True, 
+        max_length=BLOCK_SIZE, 
+        padding=False,  # Eliminado padding para streaming efficiency
+        add_special_tokens=False,  # Ya agregamos EOS token manualmente
+        return_attention_mask=False  # Sin attention mask para optimizar memoria
+    )
 
 print("Applying tokenization function...")
 # Verificar que los datasets se cargaron correctamente
