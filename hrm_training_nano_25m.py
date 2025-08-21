@@ -833,6 +833,7 @@ LEARNING_RATE_MAX = 8e-4  # Reducido significativamente para datasets grandes
 LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
+GRADIENT_CLIPPING = 1.0   # Gradient clipping para estabilidad de entrenamiento
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -1790,6 +1791,10 @@ for split_name in ["train", "validation"]:
             desc=f"Tokenizando {split_name}"
         ).with_format("torch")
 
+# Función para verificar si es IterableDataset
+def is_iterable_dataset(dataset):
+    return isinstance(dataset, IterableDataset)
+
 # Detectar si los datasets son iterables
 train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
 val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
@@ -1890,19 +1895,22 @@ if multiprocessing_context is not None:
 
 train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
 
-val_loader = DataLoader(
-    tokenized_splits["validation"],
-    batch_size=BATCH_SIZE,
-    num_workers=safe_num_workers,
-    pin_memory=True,
-    pin_memory_device=pin_memory_device,
-    persistent_workers=persistent_workers,
-    prefetch_factor=prefetch_factor,
-    shuffle=False,
-    sampler=val_sampler,
-    collate_fn=custom_collate_fn,
-    drop_last=False  # No drop last en validación
-)
+val_kwargs = {
+    "batch_size": BATCH_SIZE,
+    "num_workers": safe_num_workers,
+    "pin_memory": True,
+    "persistent_workers": persistent_workers,
+    "prefetch_factor": prefetch_factor,
+    "shuffle": False,
+    "sampler": val_sampler,
+    "collate_fn": custom_collate_fn,
+    "drop_last": False
+}
+
+if pin_memory_device is not None:
+    val_kwargs["pin_memory_device"] = pin_memory_device
+
+val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
 
 class StreamingBufferWrapper:
     """Buffer inteligente para datasets streaming masivos como C4"""
@@ -2129,37 +2137,37 @@ def main_training():
                     loss = outputs.loss / GRAD_ACCUM_STEPS
                     
                     # Para DataParallel, loss puede ser un tensor con múltiples valores
-            if hasattr(model, 'module') and loss.dim() > 0:
-                loss = loss.mean()
-        
-        if loss is not None and torch.isfinite(loss):
-            scaler.scale(loss).backward()
-            
-            if (i + 1) % GRAD_ACCUM_STEPS == 0 or i + 1 == loader_len:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                scheduler.step()
-                global_step += 1
+                    if hasattr(model, 'module') and loss.dim() > 0:
+                        loss = loss.mean()
                 
-                # Guardar checkpoint cada CHECKPOINT_STEPS
-                if global_step % CHECKPOINT_STEPS == 0:
-                    save_checkpoint_distributed(
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        scaler=scaler,
-                        epoch=epoch,
-                        global_step=global_step,
-                        best_val_loss=best_val_loss,
-                        patience_counter=patience_counter,
-                        num_training_steps=num_training_steps,
-                        checkpoint_path=CHECKPOINT_PATH,
-                        is_distributed=is_distributed,
-                        rank=rank if is_distributed else 0
-                    )
+                if loss is not None and torch.isfinite(loss):
+                    scaler.scale(loss).backward()
+                    
+                    if (i + 1) % GRAD_ACCUM_STEPS == 0 or i + 1 == loader_len:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad()
+                        scheduler.step()
+                        global_step += 1
+                
+                        # Guardar checkpoint cada CHECKPOINT_STEPS
+                        if global_step % CHECKPOINT_STEPS == 0:
+                            save_checkpoint_distributed(
+                                model=model,
+                                optimizer=optimizer,
+                                scheduler=scheduler,
+                                scaler=scaler,
+                                epoch=epoch,
+                                global_step=global_step,
+                                best_val_loss=best_val_loss,
+                                patience_counter=patience_counter,
+                                num_training_steps=num_training_steps,
+                                checkpoint_path=CHECKPOINT_PATH,
+                                is_distributed=is_distributed,
+                                rank=rank if is_distributed else 0
+                            )
                     
                     # Guardar modelo completo para inferencia también
                     if rank == 0 or not is_distributed:
@@ -2306,18 +2314,18 @@ def main_training():
                 writer.add_scalar('Model/Best_Val_Loss', best_val_loss, global_step)
                 writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
             
-            # Early stopping (MEJORADO DESDE MICRO)
-            if patience_counter >= EARLY_STOPPING_PATIENCE:
-                print(f"🛑 Early stopping activado. Mejor pérdida: {best_val_loss:.4f}")
-                break
-            
             model.train()  # Volver a modo entrenamiento
             
             # Log tiempo total de época
             if writer is not None and epoch_start_time is not None:
                 total_epoch_time = time.time() - epoch_start_time
                 writer.add_scalar('Performance/Total_Epoch_Time_Minutes', total_epoch_time / 60.0, global_step)
-
+            
+            # Early stopping (check at end of each epoch)
+            if patience_counter >= EARLY_STOPPING_PATIENCE:
+                print(f"🛑 Early stopping activado. Mejor pérdida: {best_val_loss:.4f}")
+                break
+            
         print("Entrenamiento completado!")
 
     except Exception as e:

@@ -841,6 +841,7 @@ LEARNING_RATE_MAX = 6e-4  # Reducido significativamente para datasets grandes
 LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
+GRADIENT_CLIPPING = 1.0   # Gradient clipping para estabilidad de entrenamiento
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -2009,32 +2010,39 @@ else:
     persistent_workers = safe_num_workers > 0
     pin_memory_device = None
 
-train_loader = DataLoader(
-    tokenized_splits["train"],
-    batch_size=BATCH_SIZE,
-    sampler=train_sampler,
-    num_workers=safe_num_workers,
-    pin_memory=True,
-    pin_memory_device=pin_memory_device,
-    persistent_workers=persistent_workers,
-    prefetch_factor=prefetch_factor,
-    shuffle=train_shuffle,
-    collate_fn=custom_collate_fn,
-    drop_last=True if is_multi_gpu else False  # Drop last para consistency en multi-GPU
-)
+# Configuración de DataLoader con pin_memory_device condicional
+train_kwargs = {
+    "batch_size": BATCH_SIZE,
+    "sampler": train_sampler,
+    "num_workers": safe_num_workers,
+    "pin_memory": True,
+    "persistent_workers": persistent_workers,
+    "prefetch_factor": prefetch_factor,
+    "shuffle": train_shuffle,
+    "collate_fn": custom_collate_fn,
+    "drop_last": True if is_multi_gpu else False
+}
 
-val_loader = DataLoader(
-    tokenized_splits["validation"],
-    batch_size=BATCH_SIZE,
-    num_workers=safe_num_workers,
-    pin_memory=True,
-    pin_memory_device=pin_memory_device,
-    persistent_workers=persistent_workers,
-    prefetch_factor=prefetch_factor,
-    shuffle=False,
-    collate_fn=custom_collate_fn,
-    drop_last=False  # No drop last en validación
-)
+if pin_memory_device is not None:
+    train_kwargs["pin_memory_device"] = pin_memory_device
+
+train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
+
+val_kwargs = {
+    "batch_size": BATCH_SIZE,
+    "num_workers": safe_num_workers,
+    "pin_memory": True,
+    "persistent_workers": persistent_workers,
+    "prefetch_factor": prefetch_factor,
+    "shuffle": False,
+    "collate_fn": custom_collate_fn,
+    "drop_last": False
+}
+
+if pin_memory_device is not None:
+    val_kwargs["pin_memory_device"] = pin_memory_device
+
+val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
 
 # Crear modelo
 config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
