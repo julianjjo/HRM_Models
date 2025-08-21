@@ -1312,6 +1312,66 @@ def setup_distributed():
             print("📱 CPU training mode (sin GPU detectada)")
         return False, 0, 1, 0
 
+def save_complete_model_for_inference(model, tokenizer, output_dir):
+    """
+    Guarda el modelo completo en formato compatible con hrm_llm_inference.py
+    Crea config.json, pytorch_model.bin y archivos del tokenizer
+    """
+    try:
+        # Obtener el modelo sin wrapper DDP/DataParallel
+        model_to_save = model
+        if hasattr(model, '_orig_mod'):
+            model_to_save = model._orig_mod  # DDP
+        elif hasattr(model, 'module'):
+            model_to_save = model.module     # DataParallel
+        
+        print(f"\n💾 Guardando modelo completo para inferencia en: {output_dir}")
+        
+        # Crear directorio si no existe
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 1. Guardar config.json
+        config_dict = model_to_save.config.to_dict() if hasattr(model_to_save.config, 'to_dict') else vars(model_to_save.config)
+        config_path = os.path.join(output_dir, "config.json")
+        with open(config_path, 'w', encoding='utf-8') as f:
+            import json
+            json.dump(config_dict, f, indent=2, ensure_ascii=False)
+        print(f"✅ config.json guardado")
+        
+        # 2. Guardar pytorch_model.bin
+        model_path = os.path.join(output_dir, "pytorch_model.bin")
+        torch.save(model_to_save.state_dict(), model_path)
+        print(f"✅ pytorch_model.bin guardado")
+        
+        # 3. Guardar tokenizer
+        if tokenizer is not None:
+            tokenizer.save_pretrained(output_dir)
+            print(f"✅ Tokenizer guardado")
+        
+        # 4. Guardar generation_config.json
+        generation_config = {
+            'max_length': model_to_save.config.block_size,
+            'do_sample': True,
+            'temperature': 0.8,
+            'top_p': 0.9,
+            'top_k': 50,
+            'repetition_penalty': 1.1,
+            'pad_token_id': getattr(tokenizer, 'pad_token_id', None) if tokenizer else None,
+            'eos_token_id': getattr(tokenizer, 'eos_token_id', None) if tokenizer else None,
+        }
+        gen_config_path = os.path.join(output_dir, "generation_config.json")
+        with open(gen_config_path, 'w', encoding='utf-8') as f:
+            import json
+            json.dump(generation_config, f, indent=2, ensure_ascii=False)
+        print(f"✅ generation_config.json guardado")
+        
+        print(f"✅ Modelo completo guardado exitosamente para hrm_llm_inference.py")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error al guardar modelo completo: {e}")
+        return False
+
 def save_checkpoint_distributed(model, optimizer, scheduler, scaler, epoch, global_step, 
                                best_val_loss, patience_counter, num_training_steps, 
                                checkpoint_path, is_distributed=False, rank=0):
@@ -1378,9 +1438,9 @@ def save_checkpoint_distributed(model, optimizer, scheduler, scaler, epoch, glob
             'training_metadata': {
                 'dataset_name': ACTIVE_DATASET if 'ACTIVE_DATASET' in globals() else None,
                 'block_size': model_to_save.config.block_size,
-                'learning_rate': LEARNING_RATE if 'LEARNING_RATE' in globals() else None,
+                'learning_rate': LEARNING_RATE_MAX if 'LEARNING_RATE_MAX' in globals() else None,
                 'batch_size': BATCH_SIZE if 'BATCH_SIZE' in globals() else None,
-                'grad_accumulation_steps': GRAD_ACCUMULATION_STEPS if 'GRAD_ACCUMULATION_STEPS' in globals() else None,
+                'grad_accumulation_steps': GRAD_ACCUM_STEPS if 'GRAD_ACCUM_STEPS' in globals() else None,
                 'seed': SEED if 'SEED' in globals() else None,
             }
         }
@@ -2151,128 +2211,133 @@ if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
 else:
     print(f"📱 Modelo en single-GPU mode: {device}")
 
-# Contar parámetros
-total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Número de parámetros del modelo: {total_params:,}")
-print(f"Estimación de VRAM necesaria: {total_params * 4 / 1e9:.1f} GB (solo parámetros)")
+# Contar parámetros (solo si el modelo fue creado)
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Número de parámetros del modelo: {total_params:,}")
+    print(f"Estimación de VRAM necesaria: {total_params * 4 / 1e9:.1f} GB (solo parámetros)")
+else:
+    total_params = 0  # Valor por defecto para imports
 
-# Optimizador con configuración para modelos grandes
-optimizer = AdamW(
-    model.parameters(), 
-    lr=LEARNING_RATE_MAX, 
-    weight_decay=WEIGHT_DECAY, 
-    betas=(0.9, 0.95),
-    eps=1e-8
-)
+# Solo crear optimizador y continuar con entrenamiento si no es import-only
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    # Optimizador con configuración para modelos grandes
+    optimizer = AdamW(
+        model.parameters(), 
+        lr=LEARNING_RATE_MAX, 
+        weight_decay=WEIGHT_DECAY, 
+        betas=(0.9, 0.95),
+        eps=1e-8
+    )
 
-# Calcular pasos de entrenamiento
-num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
-num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
-print(f"Total de pasos de entrenamiento: {num_training_steps}")
-print(f"Pasos de warmup: {num_warmup_steps}")
+    # Calcular pasos de entrenamiento
+    num_training_steps = (num_train_samples // (BATCH_SIZE * GRAD_ACCUM_STEPS)) * NUM_EPOCHS
+    num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
+    print(f"Total de pasos de entrenamiento: {num_training_steps}")
+    print(f"Pasos de warmup: {num_warmup_steps}")
 
-# Scheduler coseno con warmup para decaimiento más suave
+    # Scheduler coseno con warmup para decaimiento más suave
 
-scheduler = get_cosine_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps=num_warmup_steps,
-    num_training_steps=num_training_steps,
-    num_cycles=0.5  # Media vuelta coseno para decaimiento más suave
-)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        num_cycles=0.5  # Media vuelta coseno para decaimiento más suave
+    )
 
-# Mixed precision scaler
-scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
+    # Mixed precision scaler
+    scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and device.type == 'cuda'))
 
-# Inicializar TensorBoard Writer (solo en proceso principal)
-writer = None
-if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
-    writer = SummaryWriter(log_dir=TENSORBOARD_DIR)
-    print(f"📊 TensorBoard Writer inicializado")
-    
-    # Log hyperparameters
-    hyperparams = {
-        'model/n_embd': MODEL_PARAMS['n_embd'],
-        'model/n_layers': MODEL_PARAMS['n_layers'],
-        'model/n_head': MODEL_PARAMS['n_head'],
-        'model/d_ff': MODEL_PARAMS['d_ff'],
-        'model/block_size': BLOCK_SIZE,
-        'train/batch_size': BATCH_SIZE,
-        'train/grad_accum_steps': GRAD_ACCUM_STEPS,
-        'train/learning_rate_max': LEARNING_RATE_MAX,
-        'train/warmup_ratio': WARMUP_RATIO,
-        'train/num_epochs': NUM_EPOCHS,
-        'model/total_params': total_params,
-    }
-    
-    # Log hyperparams como texto
-    hyperparams_text = "\n".join([f"{k}: {v}" for k, v in hyperparams.items()])
-    writer.add_text("Hyperparameters", hyperparams_text, 0)
-
-# --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
-# Configuración unificada para entrenamiento continuo
-# NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-NEW_LEARNING_RATE = 5e-5   # LR reducido para fine-tuning con nuevo dataset
-
-# Checkpoint loading
-start_epoch = 0
-start_step = 0
-best_val_loss = float('inf')
-patience_counter = 0
-CHECKPOINT_STEPS = 1000
-
-# Cargar checkpoint usando la función distribuida
-checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = load_checkpoint_distributed(
-    checkpoint_path=CHECKPOINT_PATH,
-    model=model,
-    optimizer=optimizer,
-    scheduler=scheduler,
-    scaler=scaler,
-    device=device,
-    is_distributed=is_distributed,
-    rank=rank if is_distributed else 0
-)
-
-# Manejar modificación de learning rate si se cargó checkpoint
-if checkpoint_loaded and CONTINUE_TRAINING:
-    print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = NEW_LEARNING_RATE
-    print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
-
-# Verificar y ajustar scheduler si el dataset cambió
-if checkpoint_loaded:
-    # Recargar checkpoint para verificar num_training_steps (se podría optimizar guardándolo en la función)
-    if os.path.exists(CHECKPOINT_PATH):
-        temp_checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-        checkpoint_training_steps = temp_checkpoint.get('num_training_steps', 0)
+    # Inicializar TensorBoard Writer (solo en proceso principal)
+    writer = None
+    if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
+        writer = SummaryWriter(log_dir=TENSORBOARD_DIR)
+        print(f"📊 TensorBoard Writer inicializado")
         
-        if checkpoint_training_steps != num_training_steps:
-            print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps
-            )
-            # Ajustar el paso actual proporcionalmente
-            current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
-            new_step = int(current_progress * num_training_steps)
-            for _ in range(new_step):
-                scheduler.step()
-            print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
+        # Log hyperparameters
+        hyperparams = {
+            'model/n_embd': MODEL_PARAMS['n_embd'],
+            'model/n_layers': MODEL_PARAMS['n_layers'],
+            'model/n_head': MODEL_PARAMS['n_head'],
+            'model/d_ff': MODEL_PARAMS['d_ff'],
+            'model/block_size': BLOCK_SIZE,
+            'train/batch_size': BATCH_SIZE,
+            'train/grad_accum_steps': GRAD_ACCUM_STEPS,
+            'train/learning_rate_max': LEARNING_RATE_MAX,
+            'train/warmup_ratio': WARMUP_RATIO,
+            'train/num_epochs': NUM_EPOCHS,
+            'model/total_params': total_params,
+        }
+        
+        # Log hyperparams como texto
+        hyperparams_text = "\n".join([f"{k}: {v}" for k, v in hyperparams.items()])
+        writer.add_text("Hyperparameters", hyperparams_text, 0)
 
-# Inicializar valores por defecto si no se cargó checkpoint
-if not checkpoint_loaded:
+    # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
+    # Configuración unificada para entrenamiento continuo
+    # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
+    NEW_LEARNING_RATE = 5e-5   # LR reducido para fine-tuning con nuevo dataset
+
+    # Checkpoint loading
     start_epoch = 0
     start_step = 0
     best_val_loss = float('inf')
     patience_counter = 0
+    CHECKPOINT_STEPS = 1000
 
-global_step = start_step
+    # Cargar checkpoint usando la función distribuida
+    checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = load_checkpoint_distributed(
+        checkpoint_path=CHECKPOINT_PATH,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=scaler,
+        device=device,
+        is_distributed=is_distributed,
+        rank=rank if is_distributed else 0
+    )
 
-# Variables para tracking de velocidad y throughput
-step_times = []
-epoch_start_time = None
-samples_processed = 0
+    # Manejar modificación de learning rate si se cargó checkpoint
+    if checkpoint_loaded and CONTINUE_TRAINING:
+        print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = NEW_LEARNING_RATE
+        print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
+
+    # Verificar y ajustar scheduler si el dataset cambió
+    if checkpoint_loaded:
+        # Recargar checkpoint para verificar num_training_steps (se podría optimizar guardándolo en la función)
+        if os.path.exists(CHECKPOINT_PATH):
+            temp_checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+            checkpoint_training_steps = temp_checkpoint.get('num_training_steps', 0)
+            
+            if checkpoint_training_steps != num_training_steps:
+                print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
+                scheduler = get_cosine_schedule_with_warmup(
+                    optimizer,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps
+                )
+                # Ajustar el paso actual proporcionalmente
+                current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
+                new_step = int(current_progress * num_training_steps)
+                for _ in range(new_step):
+                    scheduler.step()
+                print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
+
+    # Inicializar valores por defecto si no se cargó checkpoint
+    if not checkpoint_loaded:
+        start_epoch = 0
+        start_step = 0
+        best_val_loss = float('inf')
+        patience_counter = 0
+
+    global_step = start_step
+
+    # Variables para tracking de velocidad y throughput
+    step_times = []
+    epoch_start_time = None
+    samples_processed = 0
 
 def main_training():
     """Función principal de entrenamiento con métricas avanzadas de TensorBoard"""
@@ -2390,6 +2455,14 @@ def main_training():
                             is_distributed=is_distributed,
                             rank=rank if is_distributed else 0
                         )
+                        
+                        # Guardar modelo completo para inferencia también
+                        if rank == 0 or not is_distributed:
+                            save_complete_model_for_inference(
+                                model=model,
+                                tokenizer=tokenizer,
+                                output_dir=OUTPUT_DIR
+                            )
                     
                     # Actualizar progress bar
                     current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else LEARNING_RATE_MAX
@@ -2428,7 +2501,65 @@ def main_training():
         # Validación al final de cada época
         print(f"\\n📊 Ejecutando validación para época {epoch+1}")
         model.eval()
-        # [El código de validación se mantiene igual]
+        
+        val_loss = 0.0
+        val_steps = 0
+        
+        with torch.no_grad():
+            # Evaluar en una muestra representativa de validación
+            for i, batch in enumerate(val_loader):
+                if i >= 100:  # Limitar evaluación para eficiencia
+                    break
+                    
+                input_ids = batch['input_ids'].to(device)
+                
+                with torch.amp.autocast(
+                    device_type=device.type,
+                    dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32,
+                    enabled=MIXED_PRECISION
+                ):
+                    outputs = model(input_ids=input_ids, labels=input_ids)
+                    loss = outputs.loss
+                
+                val_loss += loss.item()
+                val_steps += 1
+        
+        avg_val_loss = val_loss / max(val_steps, 1)
+        print(f"📊 Pérdida de validación: {avg_val_loss:.4f}")
+        
+        # Guardar mejor modelo si es necesario
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            
+            # Guardar mejor modelo
+            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+            print(f"🏆 Nuevo mejor modelo guardado! Pérdida: {best_val_loss:.4f}")
+            
+            # Guardar modelo completo para inferencia cuando es el mejor
+            if rank == 0 or not is_distributed:
+                save_complete_model_for_inference(
+                    model=model,
+                    tokenizer=tokenizer,
+                    output_dir=OUTPUT_DIR
+                )
+        else:
+            patience_counter += 1
+            print(f"⏳ Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
+        
+        # Log validación en TensorBoard
+        if writer is not None:
+            writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
+            writer.add_scalar('Model/Best_Val_Loss', best_val_loss, global_step)
+            writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
+        
+        # Early stopping
+        if patience_counter >= EARLY_STOPPING_PATIENCE:
+            print(f"🛑 Early stopping activado. Mejor pérdida: {best_val_loss:.4f}")
+            break
+        
+        model.train()  # Volver a modo entrenamiento
         
         # Log tiempo total de época
         if writer is not None and epoch_start_time is not None:
