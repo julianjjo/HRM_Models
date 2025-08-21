@@ -2071,8 +2071,11 @@ if checkpoint_loaded and MODIFY_LR_ON_LOAD:
         param_group['lr'] = NEW_LEARNING_RATE
     print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
 
-# Actualizar global_step con el valor cargado
+# Inicializar variables globales de entrenamiento (MEJORADO DESDE MICRO)
+# Estas ya están inicializadas arriba, pero las consolidamos aquí por claridad
 global_step = start_step
+
+# Variables para tracking de velocidad y throughput ya están inicializadas abajo
 
 print("torch.compile() deshabilitado para optimizar memoria")
 
@@ -2119,13 +2122,13 @@ def main_training():
                 
                 input_ids = batch["input_ids"].to(device, non_blocking=True)
                 attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-        labels = input_ids.clone()
+                labels = input_ids.clone()
 
-        with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss / GRAD_ACCUM_STEPS
-            
-            # Para DataParallel, loss puede ser un tensor con múltiples valores
+                with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs.loss / GRAD_ACCUM_STEPS
+                    
+                    # Para DataParallel, loss puede ser un tensor con múltiples valores
             if hasattr(model, 'module') and loss.dim() > 0:
                 loss = loss.mean()
         
@@ -2247,289 +2250,93 @@ def main_training():
                     "s/step": f"{step_time:.2f}"
                 })
 
-    # Validación al final de cada época
-    model.eval()
-    total_val_loss, val_batches = 0.0, 0
-    
-    with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validando..."):
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = input_ids.clone()
+            # Validación al final de cada época (MEJORADA DESDE MICRO)
+            print(f"\n📊 Ejecutando validación para época {epoch+1}")
+            model.eval()
             
-            with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                
-                # Para DataParallel, loss puede ser un tensor con múltiples valores
-                val_loss = outputs.loss
-                if hasattr(model, 'module') and val_loss.dim() > 0:
-                    val_loss = val_loss.mean()
-
-            if val_loss is not None and torch.isfinite(val_loss):
-                total_val_loss += val_loss.item()
-                val_batches += 1
-    
-    if val_batches > 0:
-        avg_val_loss = total_val_loss / val_batches
-        print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
-        
-        # Log expandido de validation metrics a TensorBoard
-        if writer is not None:
-            # Métricas de validación principales
-            writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
-            writer.add_scalar('Loss/Best_Validation', best_val_loss, global_step)
-            writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
+            val_loss = 0.0
+            val_steps = 0
             
-            # Calcular diferencia con mejor loss
-            val_loss_diff = avg_val_loss - best_val_loss
-            writer.add_scalar('Loss/Val_vs_Best_Diff', val_loss_diff, global_step)
+            with torch.no_grad():
+                # Evaluar en una muestra representativa de validación (optimización del micro)
+                for i, batch in enumerate(val_loader):
+                    if i >= 100:  # Limitar evaluación para eficiencia
+                        break
+                        
+                    input_ids = batch['input_ids'].to(device)
+                    
+                    with torch.amp.autocast(
+                        device_type=device.type,
+                        dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32,
+                        enabled=MIXED_PRECISION
+                    ):
+                        outputs = model(input_ids=input_ids, labels=input_ids)
+                        loss = outputs.loss
+                    
+                    val_loss += loss.item()
+                    val_steps += 1
             
-            # Ratio de validación vs entrenamiento (si tenemos train loss reciente)
-            if hasattr(writer, '_last_train_loss'):
-                train_val_ratio = avg_val_loss / (writer._last_train_loss + 1e-8)
-                writer.add_scalar('Loss/Train_Val_Ratio', train_val_ratio, global_step)
-                
-                # Indicador de overfitting (val loss > train loss)
-                overfitting_indicator = 1.0 if avg_val_loss > writer._last_train_loss else 0.0
-                writer.add_scalar('Training/Overfitting_Signal', overfitting_indicator, global_step)
+            avg_val_loss = val_loss / max(val_steps, 1)
+            print(f"📊 Pérdida de validación: {avg_val_loss:.4f}")
             
-            # Guardar último train loss para próxima comparación
-            if 'train_loss' in locals():
-                writer._last_train_loss = train_loss
-        
-        # Solo rank 0 guarda checkpoints y modelos
-        if not is_distributed or rank == 0:
-            # Manejar tanto DDP (_orig_mod) como DataParallel (module)
-            if hasattr(model, '_orig_mod'):
-                model_to_save = model._orig_mod  # DDP
-            elif hasattr(model, 'module'):
-                model_to_save = model.module     # DataParallel
-            else:
-                model_to_save = model
-            
+            # Guardar mejor modelo si es necesario (MEJORADO DESDE MICRO)
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-                torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
                 patience_counter = 0
                 
-                # Log mejora del modelo a TensorBoard con histogramas
-                if writer is not None:
-                    writer.add_scalar('Training/New_Best_Loss', best_val_loss, global_step)
-                    
-                    # Agregar histogramas de pesos cuando se guarda el mejor modelo
-                    for name, param in model_to_save.named_parameters():
-                        if param.requires_grad and param.dim() > 1:  # Solo capas con peso significativo
-                            # Limpiar nombre para TensorBoard
-                            clean_name = name.replace('.', '/')
-                            writer.add_histogram(f'Weights/{clean_name}', param.data, global_step)
-                            
-                            # Estadísticas de pesos
-                            writer.add_scalar(f'Weight_Stats/{clean_name}_mean', param.data.mean().item(), global_step)
-                            writer.add_scalar(f'Weight_Stats/{clean_name}_std', param.data.std().item(), global_step)
-                            writer.add_scalar(f'Weight_Stats/{clean_name}_max', param.data.max().item(), global_step)
-                            writer.add_scalar(f'Weight_Stats/{clean_name}_min', param.data.min().item(), global_step)
+                # Guardar mejor modelo
+                model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
+                torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+                print(f"🏆 Nuevo mejor modelo guardado! Pérdida: {best_val_loss:.4f}")
+                
+                # Guardar modelo completo para inferencia cuando es el mejor
+                if rank == 0 or not is_distributed:
+                    save_complete_model_for_inference(
+                        model=model,
+                        tokenizer=tokenizer,
+                        output_dir=OUTPUT_DIR
+                    )
             else:
                 patience_counter += 1
-                
-            print(f"Guardando checkpoint al final de época {epoch+1}...")
-            save_checkpoint_distributed(
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                epoch=epoch + 1,
-                global_step=global_step,
-                best_val_loss=best_val_loss,
-                patience_counter=patience_counter,
-                num_training_steps=num_training_steps,
-                checkpoint_path=CHECKPOINT_PATH,
-                is_distributed=is_distributed,
-                rank=rank if is_distributed else 0
-            )
+                print(f"⏳ Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
             
-            # Guardar modelo completo para inferencia siempre al final de época
-            if rank == 0 or not is_distributed:
-                save_complete_model_for_inference(
-                    model=model,
-                    tokenizer=tokenizer,
-                    output_dir=OUTPUT_DIR
-                )
-        
-        # Sincronizar best_val_loss y patience_counter entre todos los procesos
-        if is_distributed:
-            # Broadcast best_val_loss desde rank 0 a todos los procesos
-            best_val_loss_tensor = torch.tensor(best_val_loss, device=device)
-            patience_counter_tensor = torch.tensor(patience_counter, device=device, dtype=torch.int)
-            dist.broadcast(best_val_loss_tensor, src=0)
-            dist.broadcast(patience_counter_tensor, src=0)
-            best_val_loss = best_val_loss_tensor.item()
-            patience_counter = patience_counter_tensor.item()
-    
-        # Log tiempo total de época
-        if writer is not None and epoch_start_time is not None:
-            total_epoch_time = time.time() - epoch_start_time
-            writer.add_scalar('Performance/Total_Epoch_Time_Minutes', total_epoch_time / 60.0, global_step)
-            epoch_loss = sum([st for st in step_times]) / len(step_times) if step_times else 0
-            writer.add_scalar('Performance/Avg_Loss_Per_Epoch', epoch_loss, global_step)
-    
-    if patience_counter >= EARLY_STOPPING_PATIENCE:
-        print("Detención temprana por falta de mejora en la validación.")
-        break
+            # Log validación en TensorBoard (MEJORADO DESDE MICRO)
+            if writer is not None:
+                writer.add_scalar('Loss/Validation', avg_val_loss, global_step)
+                writer.add_scalar('Model/Best_Val_Loss', best_val_loss, global_step)
+                writer.add_scalar('Training/Patience_Counter', patience_counter, global_step)
+            
+            # Early stopping (MEJORADO DESDE MICRO)
+            if patience_counter >= EARLY_STOPPING_PATIENCE:
+                print(f"🛑 Early stopping activado. Mejor pérdida: {best_val_loss:.4f}")
+                break
+            
+            model.train()  # Volver a modo entrenamiento
+            
+            # Log tiempo total de época
+            if writer is not None and epoch_start_time is not None:
+                total_epoch_time = time.time() - epoch_start_time
+                writer.add_scalar('Performance/Total_Epoch_Time_Minutes', total_epoch_time / 60.0, global_step)
 
-print("Entrenamiento finalizado.")
+        print("Entrenamiento completado!")
 
-# Cerrar TensorBoard Writer
-if writer is not None:
-    writer.close()
-    print("📊 TensorBoard Writer cerrado")
-
-# Solo el proceso principal (rank 0) debe guardar el modelo
-if not is_distributed or rank == 0:
-    # Manejar tanto DDP (_orig_mod) como DataParallel (module)
-    if hasattr(model, '_orig_mod'):
-        model_to_save = model._orig_mod  # DDP
-    elif hasattr(model, 'module'):
-        model_to_save = model.module     # DataParallel
-    else:
-        model_to_save = model
-    if os.path.exists(BEST_MODEL_PATH):
-        print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
-        model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
-
-    # FIX: Added safe_serialization=False to handle the RuntimeError with tied weights
-    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
-
-    # Subir modelo a Hugging Face Hub
-    if HF_TOKEN:
-        try:
-            print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
-            model_to_save.push_to_hub(HF_REPO_ID, token=HF_TOKEN, commit_message=f"Upload HRM-Text1 model", safe_serialization=False)
-            tokenizer.push_to_hub(HF_REPO_ID, token=HF_TOKEN, commit_message=f"Upload tokenizer")
-            print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
-        except Exception as e:
-            print(f"❌ Error al subir el modelo a Hugging Face: {e}")
-    else:
-        print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
-else:
-    print(f"🔇 Rank {rank}: Saltando guardado del modelo (solo rank 0 guarda)")
-
-# ==============================================================================
-# --- FUNCIÓN DE CHAT Y PRUEBAS ---
-# ==============================================================================
-
-def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperature=0.7, top_k=50):
-    model.eval()
-    inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
-    
-    with torch.inference_mode(), torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, enabled=MIXED_PRECISION):
-        output_ids = model.generate(
-            **inputs, max_new_tokens=max_new_tokens, temperature=temperature, 
-            top_k=top_k, do_sample=True, pad_token_id=tokenizer.eos_token_id,
-            use_cache=False
-        )
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
-# Solo rank 0 ejecuta las pruebas finales
-if not is_distributed or rank == 0:
-    print("\n--- Probando la Generación del Modelo Final ---")
-    try:
-        inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
-        prompts = [
-            "The cat sat on the", "Artificial intelligence is a field that",
-            "To be, or not to be, that is the question:", "In a world where technology advances rapidly,",
-            "The future of humanity depends on"
-        ]
-        for prompt in prompts:
-            response = chat_with_model(prompt, inference_model, tokenizer)
-            print(f"\nPrompt: {prompt}\nRespuesta: {response}")
     except Exception as e:
-        print(f"El test de generación falló: {e}")
+        print(f"❌ Error durante el entrenamiento: {e}")
+        import traceback
+        traceback.print_exc()
+        raise e
 
-    print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
-    print(f"Parámetros del modelo: {total_params:,}")
-    print(f"Contexto máximo: {BLOCK_SIZE}")
-    print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
-    print(f"Modelo guardado en: {OUTPUT_DIR}")
-else:
-    print(f"🔇 Rank {rank}: Saltando pruebas de generación (solo rank 0 ejecuta)")
+    finally:
+        # Limpieza final
+        if writer is not None:
+            writer.close()
+        if 'train_loader' in locals():
+            del train_loader
+        if 'val_loader' in locals():
+            del val_loader
+        torch.cuda.empty_cache()
 
-# Limpiar procesos distribuidos
-if is_distributed:
-    print("🧹 Limpiando procesos distribuidos...")
-    dist.destroy_process_group()
-
-def save_final_model():
-    """Guarda el modelo final y lo sube a Hugging Face Hub si está configurado"""
-    # Guardar modelo final
-    model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-
-    if os.path.exists(BEST_MODEL_PATH):
-        print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
-        model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
-
-    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
-
-    # Subir modelo a Hugging Face Hub
-    if HF_TOKEN:
-        try:
-            print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
-            api = HfApi()
-
-            # Subir el modelo usando push_to_hub
-            model_to_save.push_to_hub(
-                HF_REPO_ID,
-                token=HF_TOKEN,
-                commit_message=f"Upload HRM-Text1 25M nano model trained on C4 dataset"
-            )
-
-            # Subir el tokenizador
-            tokenizer.push_to_hub(
-                HF_REPO_ID,
-                token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Text1 25M nano model"
-            )
-
-            print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
-
-        except Exception as e:
-            print(f"❌ Error al subir el modelo a Hugging Face: {e}")
-            print("El modelo se guardó localmente pero no se pudo subir al Hub.")
-    else:
-        print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
-        print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
-
-def test_model_and_summary():
-    """Prueba el modelo final y muestra el resumen del entrenamiento"""
-    print("\n--- Probando la Generación del Modelo Final ---")
-    try:
-        inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
-        # torch.compile deshabilitado para ahorrar memoria
-        # if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
-        #     inference_model = torch.compile(inference_model)
-        
-        prompts = [
-            "The cat sat on the", 
-            "Artificial intelligence is a field that", 
-            "To be, or not to be, that is the question:",
-            "In a world where technology advances rapidly,",
-            "The future of humanity depends on"
-        ]
-        
-        for prompt in prompts:
-            response = chat_with_model(prompt, inference_model, tokenizer)
-            print(f"\nPrompt: {prompt}\nRespuesta: {response}")
-    except Exception as e:
-        print(f"El test de generación falló: {e}")
-
-    print(f"\n=== RESUMEN DEL ENTRENAMIENTO ===")
-    print(f"Parámetros del modelo: {total_params:,}")
-    print(f"Contexto máximo: {BLOCK_SIZE}")
-    print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
-    print(f"Modelo guardado en: {OUTPUT_DIR}")
-
-print("\n--- Script completado exitosamente ---")
+# Ejecutar entrenamiento si este archivo se ejecuta directamente
+if __name__ == '__main__':
+    print("🚀 Iniciando entrenamiento de HRM-Text1 Nano (25M parámetros)...")
+    main_training()

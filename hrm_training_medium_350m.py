@@ -2385,34 +2385,40 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             })
 
     # Validación al final de cada época
+    print(f"\\n📊 Ejecutando validación para época {epoch+1}")
     model.eval()
-    total_val_loss, val_batches = 0.0, 0
+    
+    val_loss = 0.0
+    val_steps = 0
     
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validando..."):
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = input_ids.clone()
+        # Evaluar en una muestra representativa de validación
+        for i, batch in enumerate(val_loader):
+            if i >= 100:  # Limitar evaluación para eficiencia
+                break
+                
+            input_ids = batch['input_ids'].to(device, non_blocking=True)
+            attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(device, non_blocking=True)
             
             with torch.amp.autocast(
-                device_type=device.type, 
-                dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, 
+                device_type=device.type,
+                dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32,
                 enabled=MIXED_PRECISION
             ):
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+                loss = outputs.loss
                 
                 # Para DataParallel, loss puede ser un tensor con múltiples valores
-                val_loss = outputs.loss
-                if hasattr(model, 'module') and val_loss.dim() > 0:
-                    val_loss = val_loss.mean()
-
-            if val_loss is not None and torch.isfinite(val_loss):
-                total_val_loss += val_loss.item()
-                val_batches += 1
+                if hasattr(model, 'module') and loss.dim() > 0:
+                    loss = loss.mean()
+            
+            if loss is not None and torch.isfinite(loss):
+                val_loss += loss.item()
+                val_steps += 1
     
-    if val_batches > 0:
-        avg_val_loss = total_val_loss / val_batches
-        print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
+    if val_steps > 0:
+        avg_val_loss = val_loss / val_steps
+        print(f"📊 Pérdida de validación: {avg_val_loss:.4f}")
         
         # Log expandido de validation metrics a TensorBoard
         if writer is not None:
@@ -2446,12 +2452,23 @@ for epoch in range(start_epoch, NUM_EPOCHS):
         else:
             model_to_save = model
         
-        # Guardar mejor modelo
+        # Guardar mejor modelo si es necesario
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
             patience_counter = 0
+            
+            # Guardar mejor modelo
+            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else (model.module if hasattr(model, 'module') else model)
+            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+            print(f"🏆 Nuevo mejor modelo guardado! Pérdida: {best_val_loss:.4f}")
+            
+            # Guardar modelo completo para inferencia cuando es el mejor
+            if rank == 0 or not is_distributed:
+                save_complete_model_for_inference(
+                    model=model,
+                    tokenizer=tokenizer,
+                    output_dir=OUTPUT_DIR
+                )
             
             # Log mejora del modelo a TensorBoard con histogramas
             if writer is not None:
@@ -2471,6 +2488,7 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                         writer.add_scalar(f'Weight_Stats/{clean_name}_min', param.data.min().item(), global_step)
         else:
             patience_counter += 1
+            print(f"⏳ Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
             
         # Checkpoint al final de época
         print(f"Guardando checkpoint al final de época {epoch+1}...")

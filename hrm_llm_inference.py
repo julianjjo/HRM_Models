@@ -18,7 +18,7 @@ from hrm_training_micro_10m import HRMText1
 # Configuración simple - el modelo carga su configuración automáticamente
 T5_TOKENIZER_REPO = "t5-small"
 
-def generate_text(model, tokenizer, prompt_text, max_new_tokens=15, temperature=0.7, top_k=50):
+def generate_text(model, tokenizer, prompt_text, max_new_tokens=500, temperature=0.7, top_k=50):
     """Generates text using the HRMText1 model."""
     model.eval()
     device = next(model.parameters()).device

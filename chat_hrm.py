@@ -111,7 +111,7 @@ def interactive_chat():
     print("=" * 50)
     
     # Ruta del modelo (ajustar según sea necesario)
-    model_path = os.path.expanduser("~/Documents/HRM/hrm_text1_c4_micro_10m_output")
+    model_path = os.path.expanduser("/Users/julianmican/Documents/model10MFinalTraning/HRM_Models/hrm_text1_c4_micro_10m_output")
     
     # Cargar modelo
     model, tokenizer, device = load_model_and_tokenizer(model_path)

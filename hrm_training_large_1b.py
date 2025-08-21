@@ -1100,7 +1100,7 @@ if DISTRIBUTED:
         print(f"   📊 Effective batch size: {BATCH_SIZE * GRAD_ACCUM_STEPS * WORLD_SIZE}")
 else:
     # Para GPU única con modelo de 1B parámetros: batch size muy conservador
-    BATCH_SIZE = 8
+    BATCH_SIZE = 1
     GRAD_ACCUM_STEPS = 8  # Batch efectivo: 64
     print(f"🔢 Configuración GPU única (1B params):")
     print(f"   📦 Batch size: {BATCH_SIZE}")
@@ -2135,57 +2135,27 @@ best_val_loss = float('inf')
 patience_counter = 0
 CHECKPOINT_STEPS = 1000
 
-if os.path.exists(CHECKPOINT_PATH):
-    print(f"--- Reanudando entrenamiento desde el checkpoint: {CHECKPOINT_PATH} ---")
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-    
-    model_to_load = model._orig_mod if hasattr(model, '_orig_mod') else model
-    model_to_load.load_state_dict(checkpoint['model_state_dict'])
+checkpoint_loaded, start_epoch, start_step, best_val_loss, patience_counter = load_checkpoint_distributed(
+    checkpoint_path=CHECKPOINT_PATH,
+    model=model,
+    optimizer=optimizer,
+    scheduler=scheduler,
+    scaler=scaler,
+    device=device,
+    is_distributed=is_distributed,
+    rank=rank if is_distributed else 0
+)
 
+if checkpoint_loaded:
     # Modificar el learning rate si el flag está activado
     if MODIFY_LR_ON_LOAD:
         print(f"--- Modificando learning rate de {optimizer.param_groups[0]['lr']:.6f} a {NEW_LEARNING_RATE:.6f} ---")
-        # Modificar el learning rate en el checkpoint del optimizer antes de cargarlo
-        for param_group in checkpoint['optimizer_state_dict']['param_groups']:
+        for param_group in optimizer.param_groups:
             param_group['lr'] = NEW_LEARNING_RATE
-        print(f"Learning rate modificado en el checkpoint del optimizer")
+        print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
     
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    
-    # Verificar que el learning rate se aplicó correctamente
-    if MODIFY_LR_ON_LOAD:
-        actual_lr = optimizer.param_groups[0]['lr']
-        print(f"Learning rate después de cargar: {actual_lr:.6f}")
-        if abs(actual_lr - NEW_LEARNING_RATE) > 1e-8:
-            print(f"⚠️  Advertencia: El learning rate no se aplicó correctamente")
-        else:
-            print(f"✅ Learning rate modificado exitosamente a: {NEW_LEARNING_RATE:.6f}")
-    
-    start_epoch = checkpoint['epoch']
-    start_step = checkpoint.get('step', 0)
-    best_val_loss = checkpoint['best_val_loss']
-    patience_counter = checkpoint.get('patience_counter', 0)
-    
-    # VERIFICAR SI EL DATASET CAMBIÓ Y REAJUSTAR SCHEDULER
-    checkpoint_training_steps = checkpoint.get('num_training_steps', 0)
-    if checkpoint_training_steps != num_training_steps:
-        print(f"Dataset cambió. Reajustando scheduler: {checkpoint_training_steps} -> {num_training_steps}")
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps
-        )
-        # Ajustar el paso actual proporcionalmente
-        current_progress = start_step / checkpoint_training_steps if checkpoint_training_steps > 0 else 0
-        new_step = int(current_progress * num_training_steps)
-        for _ in range(new_step):
-            scheduler.step()
-        print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
-    
-    print(f"Checkpoint cargado. Reanudando desde la época {start_epoch + 1}, paso {start_step}.")
-    print(f"Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
+    print(f"✅ Checkpoint cargado. Reanudando desde la época {start_epoch + 1}, paso {start_step}.")
+    print(f"🏆 Mejor pérdida de validación hasta ahora: {best_val_loss:.4f}")
 else:
     print("--- No se encontró checkpoint. Empezando entrenamiento desde cero. ---")
 
@@ -2377,29 +2347,36 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             })
 
     # Validación al final de cada época
+    print(f"\\n📊 Ejecutando validación para época {epoch+1}")
     model.eval()
-    total_val_loss, val_batches = 0.0, 0
+    
+    val_loss = 0.0
+    val_steps = 0
     
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validando..."):
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = input_ids.clone()
+        # Evaluar en una muestra representativa de validación
+        for i, batch in enumerate(val_loader):
+            if i >= 100:  # Limitar evaluación para eficiencia
+                break
+                
+            input_ids = batch['input_ids'].to(device, non_blocking=True)
+            attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(device, non_blocking=True)
             
             with torch.amp.autocast(
-                device_type=device.type, 
-                dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32, 
+                device_type=device.type,
+                dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32,
                 enabled=MIXED_PRECISION
             ):
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-
-            if outputs.loss is not None and torch.isfinite(outputs.loss):
-                total_val_loss += outputs.loss.item()
-                val_batches += 1
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+                loss = outputs.loss
+            
+            if loss is not None and torch.isfinite(loss):
+                val_loss += loss.item()
+                val_steps += 1
     
-    if val_batches > 0:
-        avg_val_loss = total_val_loss / val_batches
-        print(f"Época {epoch+1}: Pérdida de Validación = {avg_val_loss:.4f}")
+    if val_steps > 0:
+        avg_val_loss = val_loss / val_steps
+        print(f"📊 Pérdida de validación: {avg_val_loss:.4f}")
         
         # Log expandido de validation metrics a TensorBoard
         if writer is not None:
@@ -2425,14 +2402,23 @@ for epoch in range(start_epoch, NUM_EPOCHS):
             if 'train_loss' in locals():
                 writer._last_train_loss = train_loss
         
-        model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
-        
-        # Guardar mejor modelo
+        # Guardar mejor modelo si es necesario
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            print(f"Nueva mejor pérdida de validación. Guardando modelo en {BEST_MODEL_PATH}")
-            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
             patience_counter = 0
+            
+            # Guardar mejor modelo
+            model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else (model.module if hasattr(model, 'module') else model)
+            torch.save(model_to_save.state_dict(), BEST_MODEL_PATH)
+            print(f"🏆 Nuevo mejor modelo guardado! Pérdida: {best_val_loss:.4f}")
+            
+            # Guardar modelo completo para inferencia cuando es el mejor
+            if rank == 0 or not is_distributed:
+                save_complete_model_for_inference(
+                    model=model,
+                    tokenizer=tokenizer,
+                    output_dir=OUTPUT_DIR
+                )
             
             # Log mejora del modelo a TensorBoard con histogramas
             if writer is not None:
@@ -2452,20 +2438,32 @@ for epoch in range(start_epoch, NUM_EPOCHS):
                         writer.add_scalar(f'Weight_Stats/{clean_name}_min', param.data.min().item(), global_step)
         else:
             patience_counter += 1
+            print(f"⏳ Paciencia: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
             
         # Checkpoint al final de época
         print(f"Guardando checkpoint al final de época {epoch+1}...")
-        torch.save({
-            'epoch': epoch + 1,
-            'step': global_step,
-            'model_state_dict': model_to_save.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'scaler_state_dict': scaler.state_dict(),
-            'best_val_loss': best_val_loss,
-            'patience_counter': patience_counter,
-            'num_training_steps': num_training_steps,  # Guardar para verificar cambios
-        }, CHECKPOINT_PATH)
+        save_checkpoint_distributed(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            epoch=epoch + 1,
+            global_step=global_step,
+            best_val_loss=best_val_loss,
+            patience_counter=patience_counter,
+            num_training_steps=num_training_steps,
+            checkpoint_path=CHECKPOINT_PATH,
+            is_distributed=is_distributed,
+            rank=rank if is_distributed else 0
+        )
+        
+        # Guardar modelo completo para inferencia siempre al final de época
+        if rank == 0 or not is_distributed:
+            save_complete_model_for_inference(
+                model=model,
+                tokenizer=tokenizer,
+                output_dir=OUTPUT_DIR
+            )
     
     # Log tiempo total de época
     if writer is not None and epoch_start_time is not None:
