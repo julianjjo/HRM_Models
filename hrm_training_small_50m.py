@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO MICRO ~10M PARÁMETROS  
-VERSIÓN MICRO: Configuración para ~10M parámetros con contexto ultra-reducido (128 tokens)
-- Arquitectura HRM micro-eficiente (4 capas, 128 dim)
+HRM-Text1 Training Script - MODELO SMALL ~50M PARÁMETROS  
+VERSIÓN SMALL: Configuración para ~50M parámetros con contexto moderado (1024 tokens)
+- Arquitectura HRM small-eficiente (8 capas, 384 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
 - Optimizaciones extremas de memoria para recursos muy limitados
-- Configuración optimizada para hardware básico (T4, etc.)
+- Configuración optimizada para hardware intermedio (RTX 3090, A100, etc.)
 """
 
 import os, random, multiprocessing as mp, atexit, math, time
@@ -795,14 +795,14 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Micro-10M"
+HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Small-50M"
 SEED = 42
-NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
+NUM_EPOCHS = 4             # Épocas para entrenamiento 50M
 CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
-BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
+BLOCK_SIZE = 1024        # Contexto expandido para mejor calidad de modelo (1024 tokens)
 
-# Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 80        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+# Configuración de entrenamiento para modelo 50M optimizada para A100/H100
+BATCH_SIZE = 32        # Batch balanceado para modelo 50M (~8GB uso estimado)
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
@@ -821,18 +821,18 @@ USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM com
 # Configuración micro expandida para aprovechar mejor hardware potente (H200)
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 256,                     # Dimensión expandida para H200 (256)
-    "n_head": 8,                       # 8 cabezas de atención (256/8 = 32 dim por cabeza)
-    "n_layers": 6,                     # 6 capas HRM (más capacidad)
-    "d_ff": 1024,                      # 4 * n_embd para FFN (256 * 4)
+    "n_embd": 384,                     # Dimensión para ~50M params (384)
+    "n_head": 12,                      # 12 cabezas de atención (384/12 = 32 dim por cabeza)
+    "n_layers": 8,                     # 8 capas HRM (capacidad 50M)
+    "d_ff": 1536,                      # 4 * n_embd para FFN (384 * 4)
     "dropout": 0.1,
-    "halt_max_steps": 4,               # Pasos optimizados para modelo expandido
+    "halt_max_steps": 6,               # Pasos optimizados para modelo 50M
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
-    "h_update_period": 2,              # H-module se actualiza cada 2 pasos 
+    "h_update_period": 3,              # H-module se actualiza cada 3 pasos para 50M 
 }
 
 T5_TOKENIZER_REPO = "t5-small"
@@ -905,7 +905,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_micro_10m_output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_small_50m_output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -2647,10 +2647,10 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperatu
     
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
+
 # Ejecutar el entrenamiento principal
 if __name__ == "__main__":
     main_training()
     save_final_model()
     test_model_and_summary()
-
 
