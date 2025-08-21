@@ -1893,6 +1893,14 @@ columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "a
 print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
 print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
 
+# Variables auxiliares necesarias
+is_multi_gpu = is_distributed and world_size > 1
+safe_num_workers = get_num_workers()
+
+# Función para verificar si es IterableDataset 
+def is_iterable_dataset(dataset):
+    return isinstance(dataset, IterableDataset)
+
 tokenized_splits = {}
 for split_name in ["train", "validation"]:
     # Optimización para C4 streaming: batch size más grande y configuración eficiente
@@ -1928,12 +1936,7 @@ for split_name in ["train", "validation"]:
 train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
 val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
 
-safe_num_workers = get_num_workers()
 print(f"Creando DataLoaders con {safe_num_workers} workers...")
-
-# Función para verificar si es IterableDataset (necesaria en el loop)
-def is_iterable_dataset(dataset):
-    return isinstance(dataset, IterableDataset)
 
 # Detectar si es IterableDataset para ajustar parámetros
 is_iterable = train_is_iterable
@@ -1959,9 +1962,6 @@ def custom_collate_fn(batch):
         filtered_batch.append(filtered_item)
     
     return default_collate(filtered_batch)
-
-# Configuración optimizada para multi-GPU distributed training
-is_multi_gpu = is_distributed and world_size > 1
 
 # Configurar DistributedSampler para entrenamiento distribuido
 train_sampler = None
