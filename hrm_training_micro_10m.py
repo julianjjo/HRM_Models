@@ -820,7 +820,7 @@ DATASET_CONFIG = DATASET_INFO["config"]
 HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Micro-10M"
 SEED = 42
 NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
-CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
+CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
