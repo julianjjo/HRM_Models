@@ -722,6 +722,14 @@ DATASETS_CONFIG = {
         "repo_suffix": "Spanish",
         "description": "Texto en español del dataset C4"
     },
+    "c4-english": {
+        "name": "allenai/c4",
+        "config": "en",
+        "train_samples": 365_000_000,
+        "val_samples": None,  # Se usará split automático
+        "repo_suffix": "English",
+        "description": "Texto en inglés del dataset C4"
+    },
     "fineweb": {
         "name": "HuggingFaceFW/fineweb",
         "config": "default",
@@ -739,24 +747,6 @@ DATASETS_CONFIG = {
         "description": "Dataset SlimPajama de 627B tokens (multilingüe)",
         "language_filter": None  # Usar todo el dataset
     },
-    "slimpajama_es": {
-        "name": "cerebras/SlimPajama-627B",
-        "config": None,
-        "train_samples": 50_000_000_000,  # Estimación para contenido en español
-        "val_samples": None,
-        "repo_suffix": "SlimPajama-ES",
-        "description": "SlimPajama filtrado para contenido en español",
-        "language_filter": "es"  # Filtrar solo español
-    },
-    "slimpajama_en": {
-        "name": "cerebras/SlimPajama-627B",
-        "config": None,
-        "train_samples": 400_000_000_000,  # Estimación para contenido en inglés
-        "val_samples": None,
-        "repo_suffix": "SlimPajama-EN",
-        "description": "SlimPajama filtrado para contenido en inglés",
-        "language_filter": None  # Deshabilitado para evitar datasets vacíos
-    },
     "mixed": {
         "name": "mixed",  # Identificador especial
         "config": None,
@@ -765,22 +755,10 @@ DATASETS_CONFIG = {
         "repo_suffix": "Mixed",
         "description": "Combinación de múltiples datasets",
         "mix_ratios": {  # Proporción de cada dataset en la mezcla
-            "c4": 0.35,
+            "c4-english": 0.30,
             "fineweb": 0.20,
-            "slimpajama": 0.35,
-            "spanish": 0.10
-        }
-    },
-    "mixed_es": {
-        "name": "mixed",  # Identificador especial
-        "config": None,
-        "train_samples": 150_000_000,  # Estimación para español
-        "val_samples": 75_000,
-        "repo_suffix": "Mixed-ES",
-        "description": "Combinación de datasets con contenido en español",
-        "mix_ratios": {  # Proporción de cada dataset en la mezcla
-            "slimpajama_es": 0.6,
-            "spanish": 0.4
+            "slimpajama": 0.30,
+            "spanish": 0.20
         }
     },
     "human_conversations": {
@@ -2033,10 +2011,10 @@ if TENSORBOARD_AVAILABLE and (not is_distributed or rank == 0):
         'model/n_head': MODEL_PARAMS['n_head'],
         'model/block_size': BLOCK_SIZE,
         'training/batch_size': BATCH_SIZE,
-        'training/learning_rate': LEARNING_RATE_MAX,
+        'training/learning_rate': LEARNING_RATE,
         'training/weight_decay': WEIGHT_DECAY,
-        'training/warmup_steps': num_warmup_steps,
-        'training/max_epochs': NUM_EPOCHS,
+        'training/warmup_steps': WARMUP_STEPS,
+        'training/max_epochs': MAX_EPOCHS,
         'training/grad_accum_steps': GRAD_ACCUM_STEPS,
         'training/mixed_precision': MIXED_PRECISION,
         'training/gradient_clipping': GRADIENT_CLIPPING,
