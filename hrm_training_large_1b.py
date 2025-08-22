@@ -2317,7 +2317,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
 def main_training():
     """Función principal de entrenamiento con métricas avanzadas de TensorBoard"""
     global global_step, writer, step_times, epoch_start_time, samples_processed, tokenizer
-    global best_val_loss, patience_counter, start_epoch, start_step
+    global best_val_loss, patience_counter, start_epoch, start_step, model, optimizer
     
     # Cargar tokenizer solo cuando se ejecuta entrenamiento
     print("Loading tokenizer (T5 slow)...")
