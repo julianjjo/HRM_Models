@@ -2321,8 +2321,11 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
                 for _ in range(new_step):
                     scheduler.step()
                 print(f"Scheduler reajustado. Progreso: {current_progress:.2%}, nuevo paso: {new_step}")
+                # CRITICAL FIX: Actualizar start_step al nuevo valor calculado
+                start_step = new_step
+                print(f"🔄 start_step actualizado de checkpoint para nuevo dataset: {start_step}")
 
-    # Actualizar global_step con el valor cargado
+    # Actualizar global_step con el valor cargado (ahora potencialmente ajustado)
     global_step = start_step
 
 def main_training():
