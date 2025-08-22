@@ -938,42 +938,58 @@ if TENSORBOARD_AVAILABLE:
 # ==============================================================================
 
 def get_dataloader_workers():
-    """Determina el número óptimo de workers para DataLoader basado en entorno y configuración"""
-    # Para entrenamiento distribuido, usar workers para mejor CPU utilization
+    """Determina el número óptimo de workers para DataLoader basado en entorno y hf_transfer"""
+    # Con hf_transfer habilitado, las descargas son mucho más rápidas
+    # Por lo tanto, necesitamos menos workers para DataLoader
+    hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
+    
+    # Para entrenamiento distribuido
     if is_distributed and world_size > 1:
-        # En multi-GPU distribuido, usar 2-4 workers por GPU para mejor paralelismo
-        optimal_workers = min(256, max(128, mp.cpu_count() // world_size))
-        print(f"🚀 Modo distribuido: usando {optimal_workers} workers por proceso (total CPUs: {mp.cpu_count()})")
+        # Con hf_transfer: 2 workers por GPU son suficientes
+        # Sin hf_transfer: 4 workers por GPU para compensar descargas lentas
+        workers_per_gpu = 2 if hf_transfer_enabled else 4
+        optimal_workers = min(workers_per_gpu * world_size, mp.cpu_count() // 2)
+        transfer_status = "🚀 hf_transfer" if hf_transfer_enabled else "🐌 standard download"
+        print(f"🚀 Modo distribuido ({transfer_status}): usando {optimal_workers} workers por proceso")
         return optimal_workers
     
     try:
         # Detectar si estamos en Google Colab
         if 'google.colab' in str(get_ipython()):
-            print("Detectado entorno Google Colab. Usando num_workers=2 para mejor rendimiento.")
-            return 2  # Cambiar de 0 a 2 para mejor rendimiento
+            # Colab tiene recursos limitados, usar configuración conservadora
+            workers = 2 if hf_transfer_enabled else 4
+            transfer_status = "con hf_transfer" if hf_transfer_enabled else "sin hf_transfer"
+            print(f"Detectado entorno Google Colab ({transfer_status}). Usando num_workers={workers}.")
+            return workers
     except:
         pass
 
     try:
         # Detectar si estamos en Jupyter/IPython
         get_ipython()
-        print("Detectado entorno Jupyter/IPython. Usando num_workers=2 para mejor rendimiento.")
-        return 2  # Cambiar de 0 a 2 para mejor rendimiento
+        workers = 2 if hf_transfer_enabled else 4
+        transfer_status = "con hf_transfer" if hf_transfer_enabled else "sin hf_transfer"
+        print(f"Detectado entorno Jupyter/IPython ({transfer_status}). Usando num_workers={workers}.")
+        return workers
     except:
         pass
 
-    # Para sistemas normales, calcular workers óptimos para multi-GPU
+    # Para sistemas normales
     total_cpus = mp.cpu_count()
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     
     if num_gpus > 1:
-        # Multi-GPU: 8 workers por GPU para máxima utilización
-        optimal_workers = min(num_gpus * 8, 32, 64)  # 8 workers por GPU
-        print(f"🚀 Multi-GPU detectado ({num_gpus} GPUs). Usando {optimal_workers} workers (8 por GPU) para máxima utilización.")
+        # Multi-GPU con hf_transfer: 2-4 workers por GPU son suficientes
+        # Multi-GPU sin hf_transfer: 4-6 workers por GPU para compensar I/O lento
+        workers_per_gpu = 3 if hf_transfer_enabled else 6
+        optimal_workers = min(num_gpus * workers_per_gpu, total_cpus // 2, 16)
+        transfer_status = "🚀 hf_transfer optimizado" if hf_transfer_enabled else "🐌 standard I/O"
+        print(f"Multi-GPU detectado ({num_gpus} GPUs, {transfer_status}). Usando {optimal_workers} workers.")
     else:
-        # Single-GPU: Configuración conservadora
-        optimal_workers = min(4, total_cpus // 2)
-        print(f"Single-GPU. Usando {optimal_workers} workers para DataLoader.")
+        # Single-GPU: Configuración conservadora y eficiente
+        optimal_workers = 3 if hf_transfer_enabled else 4
+        transfer_status = "hf_transfer" if hf_transfer_enabled else "standard"
+        print(f"Single-GPU ({transfer_status}). Usando {optimal_workers} workers para DataLoader.")
     
     return optimal_workers
 
@@ -2038,6 +2054,30 @@ def custom_collate_fn(batch):
         'attention_mask': torch.stack(attention_mask)
     }
 
+def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
+    """Calcula prefetch_factor optimizado considerando hf_transfer"""
+    if num_workers == 0:
+        return None
+    
+    hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
+    
+    if hf_transfer_enabled:
+        # Con hf_transfer, las descargas son rápidas, necesitamos menos prefetch
+        if is_multi_gpu:
+            # Multi-GPU: 4-6 items por worker es suficiente
+            return min(max(4, num_workers), 12)
+        else:
+            # Single-GPU: 2-4 items por worker
+            return min(max(2, num_workers), 6)
+    else:
+        # Sin hf_transfer, necesitamos más prefetch para compensar descargas lentas
+        if is_multi_gpu:
+            # Multi-GPU: 8-16 items por worker
+            return min(max(8, num_workers * 2), 32)
+        else:
+            # Single-GPU: 4-8 items por worker
+            return min(max(4, num_workers), 12)
+
 print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 
 # Configuración optimizada para multi-GPU (variables ya definidas arriba)
@@ -2045,26 +2085,24 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para C4 streaming con multi-GPU
 # Configuración de DataLoader basada en workers disponibles
 if safe_num_workers > 0:
+    prefetch_factor = get_optimized_prefetch_factor(safe_num_workers, is_multi_gpu)
+    persistent_workers = True
+    
     if is_multi_gpu:
-        # Prefetch más agresivo para C4 streaming multi-GPU (dataset masivo)
-        prefetch_factor = max(256, safe_num_workers * 2)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
-        persistent_workers = True  # Critical para streaming - evita reinicializar workers
         # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
         pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
-        
-        # Buffer adicional para streaming datasets masivos
         multiprocessing_context = "fork"  # Compatible sin __main__ guard
         
-        print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
-        print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
+        hf_status = "🚀 hf_transfer optimizado" if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1' else "🐌 standard I/O"
+        print(f"🚀 Configuración Multi-GPU ({hf_status}): prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
+        print(f"   📊 Buffer optimizado para streaming dataset")
     else:
-        # Single-GPU con workers
-        prefetch_factor = 8  # Incrementado para single-GPU
-        persistent_workers = True
         pin_memory_device = None
         multiprocessing_context = None
-        print(f"🔧 Configuración Single-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
+        
+        hf_status = "hf_transfer" if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1' else "standard"
+        print(f"🔧 Configuración Single-GPU ({hf_status}): prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
 else:
     # Sin workers - modo import o configuración incorrecta
     prefetch_factor = None
