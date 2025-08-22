@@ -1,0 +1,17 @@
+# HRM Training Scripts - Minimal Requirements
+# Only the absolutely essential dependencies for basic model usage
+
+torch==2.6.0
+transformers==4.55.2
+datasets==4.0.0
+huggingface_hub==0.34.4
+tqdm==4.67.1
+
+# Installation:
+# pip install -r requirements-minimal.txt
+#
+# Note: This minimal setup will work for basic training but lacks:
+# - TensorBoard monitoring
+# - Language detection filtering  
+# - Kaggle dataset support
+# - Flash Attention optimization
