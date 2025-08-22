@@ -905,7 +905,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_text1_c4_nano_25m_output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "hrm_models_c4_nano_25m_output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 

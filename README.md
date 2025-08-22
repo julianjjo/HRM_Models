@@ -382,17 +382,17 @@ python hrm_training_small_50m.py
 
 ```
 HRM_Models/
-├── hrm_text1_c4_micro_10m_output/
+├── hrm_models_c4_micro_10m_output/
 │   ├── config.json              # Model configuration
 │   ├── pytorch_model.bin        # Final trained model
 │   ├── best_model.bin          # Best checkpoint by validation loss
 │   ├── checkpoint.pth          # Training state for resuming
 │   └── tensorboard_logs/       # TensorBoard training logs
-├── hrm_text1_c4_nano_25m_output/
-├── hrm_text1_c4_small_50m_output/
-├── hrm_text1_c4_medium_100m_output/  
-├── hrm_text1_c4_medium_350m_output/
-└── hrm_text1_c4_large_1b_output/
+├── hrm_models_c4_nano_25m_output/
+├── hrm_models_c4_small_50m_output/
+├── hrm_models_c4_medium_100m_output/  
+├── hrm_models_c4_medium_350m_output/
+└── hrm_models_c4_large_1b_output/
 ```
 
 ## 🏷️ Model Releases
