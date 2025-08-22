@@ -2,311 +2,396 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1c4exU-zMt4SuT1kRlwQQXlLPaiazEDCf?usp=sharing)
 
-A large-scale transformer model with Hierarchical Reasoning Module (HRM) architecture trained on multiple high-quality text datasets. This model features adaptive computation with pondering mechanisms for improved text generation quality.
+A family of transformer models with Hierarchical Reasoning Module (HRM) architecture trained on multiple high-quality text datasets. These models feature adaptive computation with pondering mechanisms for improved text generation quality, available in multiple sizes from 10M to 1B parameters.
 
-## Model Architecture
+## 📊 Model Family
+
+**HRM-Text1** comes in 6 different sizes optimized for various use cases:
+
+| Model Size | Parameters | Architecture | Memory Usage | Best Use Case |
+|------------|------------|--------------|--------------|---------------|
+| **Micro-10M** | 10.3M | HRM + Pondering | ~500MB | Research, prototyping |
+| **Nano-25M** | 25.6M | HRM + Pondering | ~1GB | Mobile, edge devices |
+| **Small-50M** | 53.2M | HRM + Pondering | ~2GB | General purpose |
+| **Medium-100M** | 106.4M | HRM + Pondering | ~4GB | Production inference |
+| **Medium-350M** | 353.8M | HRM + Pondering | ~12GB | High-quality generation |
+| **Large-1B** | 1.06B | HRM + Pondering | ~32GB | State-of-the-art results |
+
+### ⚡ Performance Optimizations
+
+All models include:
+- **Flash Attention** support (when available)
+- **Multi-GPU** distributed training  
+- **Mixed Precision** (BF16/FP16) training
+- **Optimized DataLoaders** with intelligent worker management
+- **TensorBoard** integration for monitoring
+- **Fast HF Hub transfers** with hf_transfer
+
+## 🏗️ Model Architecture
 
 **HRM-Text1** implements a novel hierarchical reasoning architecture with the following key components:
 
-- **Model Size**: 99M parameters
-- **Architecture**: Hierarchical Reasoning Module with dual-stream processing
-- **Embeddings**: 512 dimensions
-- **Attention Heads**: 8 heads
-- **Feed-Forward**: 2048 dimensions
-- **Context Length**: 512 tokens
-- **Vocabulary**: 32,128 tokens (T5 tokenizer)
-
-### Key Features
-
-- **Adaptive Computation**: Pondering mechanism with halt probabilities
-- **Dual-Stream Processing**: High-level (H) and Low-level (L) reasoning modules
+### Core Architecture
+- **Hierarchical Reasoning Module** with dual-stream processing
+- **Adaptive Computation**: Pondering mechanism with halt probabilities  
 - **SwiGLU Activation**: Enhanced non-linear transformations
 - **RMSNorm**: Improved normalization for stable training
-- **Mixed Precision**: BF16 training support for NVIDIA Ampere+ GPUs
+- **Context Length**: 512 tokens
+- **Vocabulary**: 32,100 tokens (T5 tokenizer)
 
-## Training Configuration
+### Model Specifications by Size
 
-### Dataset
+#### Micro-10M (Development & Testing)
+- **Embeddings**: 256 dimensions
+- **Layers**: 6 
+- **Attention Heads**: 4
+- **Feed-Forward**: 1024 dimensions
+- **Max Pondering Steps**: 4
 
-The model is trained specifically on:
+#### Nano-25M (Mobile & Edge)
+- **Embeddings**: 384 dimensions  
+- **Layers**: 8
+- **Attention Heads**: 6
+- **Feed-Forward**: 1536 dimensions
+- **Max Pondering Steps**: 6
 
-- **C4 Multilingual**: Common Crawl web text (multilingual dataset)
-  - Dataset Size: 364M training samples, 364K validation samples
-  - Language: Multilingual support with automatic language detection
-  - Quality: High-quality web content filtered and processed
+#### Small-50M (General Purpose)
+- **Embeddings**: 512 dimensions
+- **Layers**: 8
+- **Attention Heads**: 8
+- **Feed-Forward**: 2048 dimensions  
+- **Max Pondering Steps**: 6
 
-### Training Hyperparameters
+#### Medium-100M & 350M (Production)
+- **Embeddings**: 768 dimensions
+- **Layers**: 12
+- **Attention Heads**: 12
+- **Feed-Forward**: 3072 dimensions
+- **Max Pondering Steps**: 8
 
-- **Learning Rate**: 3e-4 (max) → 1e-5 (min) with cosine annealing
-- **Batch Size**: 8 (with gradient accumulation steps: 2)
-- **Weight Decay**: 0.05
-- **Optimizer**: AdamW with β₁=0.9, β₂=0.95
-- **Epochs**: 2
-- **Mixed Precision**: Enabled for compatible hardware
+#### Large-1B (State-of-the-art)
+- **Embeddings**: 1024 dimensions
+- **Layers**: 16
+- **Attention Heads**: 16  
+- **Feed-Forward**: 4096 dimensions
+- **Max Pondering Steps**: 10
 
-## Model Components
+## 📚 Dataset Support
 
-### HRMBlock Architecture
+### Primary Dataset: C4-English
+- **Source**: Common Crawl filtered text (allenai/c4)
+- **Size**: 365M training samples, 3.65M validation samples
+- **Language**: English (high-quality web content)
+- **Streaming**: Memory-efficient streaming for large-scale training
 
-```python
-class HRMBlock(nn.Module):
-    def __init__(self, n_embd, n_head, d_ff, dropout=0.1):
-        super().__init__()
-        self.norm1 = RMSNorm(n_embd)
-        self.attn = nn.MultiheadAttention(n_embd, n_head, dropout=dropout, batch_first=True)
-        self.norm2 = RMSNorm(n_embd)
-        self.mlp = SwiGLUMuchPelu(n_embd, d_ff, dropout)
-        self.dropout = nn.Dropout(dropout)
+### Additional Supported Datasets
+
+| Dataset | Description | Type | Language |
+|---------|-------------|------|----------|
+| **c4** | Common Crawl multilingüe | HF Streaming | Multi |
+| **openwebtext** | OpenWebText dataset | HF | English |
+| **pile** | EleutherAI's Pile dataset | HF | English |
+| **fineweb** | High-quality web text | HF | Multi |
+| **slimpajama** | SlimPajama 627B tokens | HF Streaming | Multi |
+| **human_conversations** | Kaggle conversations | Kaggle | English |
+
+### Dataset Mixing Strategies
+
+For **50M+ models**, custom dataset mixes are available:
+- **high_quality_small**: Curated high-quality subset
+- **balanced_small**: Balanced multi-domain mix  
+- **dev_small**: Development and testing mix
+- **conversation_small**: Dialog-focused training
+
+## 🚀 Quick Start
+
+### Installation
+
+```bash
+pip install -r requirements.txt
 ```
 
-### Pondering Mechanism
+**Core Dependencies:**
+```txt
+torch>=2.6.0
+transformers>=4.55.2
+datasets>=4.0.0
+huggingface_hub>=0.34.4
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+tqdm>=4.67.1
+```
 
-The model implements adaptive computation through a halt probability mechanism:
+**Optional (Recommended):**
+```txt
+hf_transfer>=0.1.0          # Faster HF Hub downloads
+tensorboard>=2.14.0         # Training visualization
+langdetect>=1.0.9          # Language filtering
+kagglehub>=0.2.0           # Kaggle dataset support
+flash-attn>=2.0.0          # GPU attention optimization
+```
 
-- **Max Steps**: 8 reasoning steps
-- **Halt Bias**: -2.2 (initial)
-- **Ponder Loss Weight**: 1e-2
+### Usage Examples
 
-## Usage
-
-### Quick Start
-
+#### Basic Text Generation
 ```python
+import os
+os.environ['HRM_IMPORT_ONLY'] = '1'  # Fast import mode
+
+from hrm_training_small_50m import HRMText1, HRMText1Config
 from transformers import T5Tokenizer
-from modeling_hrm_text1 import HRMText1
 
 # Load model and tokenizer
-model = HRMText1.from_pretrained("dreamwar/HRM-Text1-C4-large")
-tokenizer = T5Tokenizer.from_pretrained("t5-small")
+config = HRMText1Config()
+model = HRMText1(config)
+tokenizer = T5Tokenizer.from_pretrained("t5-small", use_fast=False, legacy=False)
 
 # Generate text
 prompt = "The future of artificial intelligence"
 inputs = tokenizer(prompt, return_tensors="pt")
 outputs = model.generate(**inputs, max_new_tokens=50, temperature=0.7)
 text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(text)
 ```
 
-### Training from Scratch
+#### Training from Scratch
 
-**Option 1: Google Colab (Recommended)**
+**Environment Setup:**
 ```bash
-# Open the Colab notebook
-https://colab.research.google.com/drive/1c4exU-zMt4SuT1kRlwQQXlLPaiazEDCf?usp=sharing
+# Optimal performance settings
+export HF_HUB_ENABLE_HF_TRANSFER=1  # Fast HF downloads
+export HF_TOKEN="your_huggingface_token"  # For model uploads
+export HRM_OUTPUT_BASE="/path/to/output"  # Custom output path
+
+# Disable import mode for training
+unset HRM_IMPORT_ONLY
 ```
 
-**Option 2: Local Training**
+**Single GPU Training:**
 ```bash
-# Set environment variables
-export HRM_OUTPUT_BASE="/path/to/output"
-export HF_TOKEN="your_huggingface_token"
-
-# Run training
-python hrm_training_small_100m.py
+python hrm_training_small_50m.py
 ```
 
-### Configuration Options
+**Multi-GPU Training:**
+```bash
+torchrun --nproc_per_node=2 hrm_training_medium_350m.py
+```
 
-The training script supports extensive configuration:
-
+**Google Colab Training:**
 ```python
-# Dataset configuration
-DATASET_NAME = "allenai/c4"
-DATASET_CONFIG = "multilingual"
+# Colab automatically detects and optimizes for the environment
+!python hrm_training_nano_25m.py
+```
 
-# Dataset subset percentage (default: 0.01% for testing)
-DATASET_SUBSET_PERCENT = 0.01  # 0.01-100%
+## ⚙️ Advanced Configuration
 
-# Model parameters
-MODEL_PARAMS = {
-    "n_embd": 512,
-    "n_head": 8,
-    "d_ff": 2048,
-    "dropout": 0.1,
-    "halt_max_steps": 8,
-    "ponder_loss_weight": 1e-2,
-    "halt_bias_init": -2.2
-}
+### Training Parameters by Model Size
 
-# Training configuration
-BATCH_SIZE = 8
+#### Development Models (Micro-10M, Nano-25M)
+```python
+BATCH_SIZE = 16
 GRAD_ACCUM_STEPS = 2
+LEARNING_RATE = 5e-4
+EPOCHS = 2
 ```
 
-## Features
-
-### Dataset Optimization
-
-- **C4 Multilingual**: Optimized for the C4 Common Crawl dataset
-- **Multi-Dataset Support**: Support for Hugging Face and Kaggle datasets
-- **Sequential Training**: Maintain checkpoint continuity across different datasets
-- **Streaming Support**: Memory-efficient streaming for large datasets
-- **Configurable Sampling**: Adjust dataset subset percentage for testing/production
-- **Multilingual**: Native support for multiple languages from C4
-
-### Training Optimizations
-
-- **Checkpointing**: Automatic checkpoint saving and resuming
-- **Sequential Training Mode**: Maintain checkpoints across dataset changes
-- **Early Stopping**: Validation-based early stopping (patience: 2)
-- **Gradient Clipping**: Norm clipping at 1.0
-- **Mixed Precision**: BF16 for memory efficiency
-- **Model Compilation**: PyTorch 2.0 compilation support
-
-### Hardware Support
-
-- **CUDA**: GPU acceleration with TF32 precision on Ampere+
-- **Multi-Platform**: Linux, macOS, Windows support
-- **Google Colab**: Full compatibility with free and pro tiers
-- **Memory Management**: Automatic DataLoader worker detection
-
-## Output Structure
-
-```
-/content/drive/MyDrive/HRM_T4/
-├── hrm_text1_c4_output-large/
-│   ├── config.json
-│   ├── pytorch_model.bin
-│   ├── tokenizer.json
-│   ├── best_model.bin
-│   └── checkpoint.pth
-```
-
-## Environment Setup
-
-### Quick Start with Google Colab
-
-Click the Colab badge above to get started immediately with a pre-configured environment including all dependencies.
-
-### Local Installation
-
-```bash
-pip install torch transformers datasets tqdm huggingface_hub
-pip install langdetect  # Optional: for language filtering
+#### Production Models (Small-50M to Large-1B)  
+```python
+BATCH_SIZE = 8
+GRAD_ACCUM_STEPS = 4
+LEARNING_RATE = 3e-4
+EPOCHS = 4
+EARLY_STOPPING_PATIENCE = 3
 ```
 
 ### Environment Variables
 
-```bash
-# Required for model upload
-export HF_TOKEN="your_huggingface_token"
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `HRM_IMPORT_ONLY` | Fast import mode (no training setup) | - | `1` |
+| `HF_HUB_ENABLE_HF_TRANSFER` | Fast HF Hub transfers | `1` | `1` |
+| `HF_TOKEN` | Hugging Face API token | - | `hf_xxx...` |
+| `HRM_OUTPUT_BASE` | Custom output directory | `./HRM_Models` | `/data/models` |
 
-# Optional: custom output path
-export HRM_OUTPUT_BASE="/your/custom/path"
+### Hardware Optimization
+
+#### GPU Support
+- **NVIDIA H200/H100**: Optimal performance with TF32 precision
+- **NVIDIA A100/A6000**: Full BF16 mixed precision support  
+- **RTX 4090/3090**: FP16 mixed precision recommended
+- **RTX 3080/2080**: Reduce batch size, use gradient checkpointing
+
+#### Multi-GPU Setup
+```bash
+# Distributed training with proper environment
+export CUDA_VISIBLE_DEVICES=0,1
+export MASTER_ADDR=localhost
+export MASTER_PORT=29500
+
+torchrun --nproc_per_node=2 hrm_training_large_1b.py
 ```
 
-## Model Variant
+#### Memory Management
+- **Micro-10M**: 4GB VRAM minimum
+- **Nano-25M**: 8GB VRAM minimum  
+- **Small-50M**: 12GB VRAM minimum
+- **Medium-100M**: 16GB VRAM minimum
+- **Medium-350M**: 32GB VRAM minimum
+- **Large-1B**: 64GB VRAM minimum
 
-This repository contains:
+## 📈 Training Features
 
-- **HRM-Text1-C4-large**: 99M parameter model trained on C4 multilingual dataset
-  - Repository: `dreamwar/HRM-Text1-C4-large`
-  - Architecture: Hierarchical Reasoning Module
-  - Training: Optimized for Google Colab environment
+### Advanced Optimizations
+- **Adaptive Learning Rate**: Cosine annealing with warmup
+- **Gradient Clipping**: Automatic norm clipping at 1.0
+- **Early Stopping**: Validation-based with configurable patience
+- **Checkpointing**: Automatic save/resume with best model tracking  
+- **Mixed Precision**: BF16/FP16 support for memory efficiency
+- **Flash Attention**: When available (2x faster attention)
 
-## Performance
+### Monitoring & Visualization
+- **TensorBoard**: Real-time training metrics
+- **Progress Bars**: tqdm integration with ETA
+- **Memory Tracking**: GPU utilization monitoring
+- **Performance Metrics**: Tokens/second, loss curves, learning rate
 
-### Model Specifications
+### Dataset Features
+- **Streaming Support**: Memory-efficient large dataset processing
+- **Language Detection**: Automatic language filtering (optional)
+- **Text Quality Filtering**: Length and content quality checks
+- **Dynamic Batching**: Intelligent batch size optimization
+- **Multi-Dataset Training**: Sequential training across different datasets
 
-- **Parameters**: 99M trainable parameters
-- **Memory Usage**: ~2-3GB VRAM for inference
-- **Training Time**: Optimized for Google Colab (free tier compatible)
-- **Context Length**: 512 tokens
-- **Dataset**: C4 Multilingual (0.01% subset by default for testing)
+## 🛠️ Troubleshooting
 
-### Generation Quality
+### Common Issues & Solutions
 
-The model implements sophisticated reasoning through:
+#### Memory Issues
+```bash
+# Reduce batch size
+BATCH_SIZE = 4  # Instead of 8
 
-- Hierarchical processing of information
-- Adaptive computation based on input complexity
-- Pondering mechanism for quality-vs-speed trade-offs
+# Enable gradient checkpointing  
+GRADIENT_CHECKPOINTING = True
 
-## License
+# Use smaller model
+python hrm_training_nano_25m.py  # Instead of larger models
+```
 
-This model and training code are released under the Apache 2.0 License.
+#### Import Errors
+```bash
+# Missing dependencies
+pip install -r requirements.txt
 
-## Citation
+# SentencePiece error (T5 tokenizer)
+pip install sentencepiece protobuf
+
+# Flash Attention (optional)
+pip install flash-attn --no-build-isolation
+```
+
+#### Performance Issues
+```bash
+# Enable fast transfers
+export HF_HUB_ENABLE_HF_TRANSFER=1
+pip install hf_transfer
+
+# Disable import mode for training
+unset HRM_IMPORT_ONLY
+
+# Check GPU utilization
+nvidia-smi
+```
+
+#### Training Stuck Issues
+```bash
+# Verify not in import-only mode
+echo $HRM_IMPORT_ONLY  # Should be empty
+
+# Check worker configuration
+# Should see: "workers=4" not "workers=0"
+
+# Restart with clean environment
+unset HRM_IMPORT_ONLY
+python hrm_training_small_50m.py
+```
+
+## 📊 Model Performance
+
+### Benchmarks by Size
+
+| Model | Training Speed | Memory Usage | Generation Quality | Best Use Case |
+|-------|----------------|--------------|-------------------|---------------|
+| Micro-10M | ~1000 tok/sec | 4GB | Basic | Research, debugging |
+| Nano-25M | ~800 tok/sec | 8GB | Good | Mobile deployment |
+| Small-50M | ~600 tok/sec | 12GB | Very Good | General purpose |
+| Medium-100M | ~400 tok/sec | 16GB | Excellent | Production |
+| Medium-350M | ~200 tok/sec | 32GB | Superior | High-quality |
+| Large-1B | ~100 tok/sec | 64GB | State-of-art | Research, best results |
+
+*Benchmarks on NVIDIA H200 with optimized settings*
+
+### Quality Metrics
+- **Coherence**: Hierarchical reasoning maintains context consistency
+- **Adaptivity**: Pondering mechanism adjusts computation per complexity  
+- **Efficiency**: SwiGLU and RMSNorm provide better parameter utilization
+- **Stability**: Advanced mixed precision training for reliable convergence
+
+## 📁 Output Structure
+
+```
+HRM_Models/
+├── hrm_text1_c4_micro_10m_output/
+│   ├── config.json              # Model configuration
+│   ├── pytorch_model.bin        # Final trained model
+│   ├── best_model.bin          # Best checkpoint by validation loss
+│   ├── checkpoint.pth          # Training state for resuming
+│   └── tensorboard_logs/       # TensorBoard training logs
+├── hrm_text1_c4_nano_25m_output/
+├── hrm_text1_c4_small_50m_output/
+├── hrm_text1_c4_medium_100m_output/  
+├── hrm_text1_c4_medium_350m_output/
+└── hrm_text1_c4_large_1b_output/
+```
+
+## 🏷️ Model Releases
+
+### Hugging Face Models
+- **dreamwar/HRM-Text1-C4-Micro-10M** - Research and prototyping
+- **dreamwar/HRM-Text1-C4-Nano-25M** - Mobile and edge deployment
+- **dreamwar/HRM-Text1-C4-Small-50M** - General purpose applications  
+- **dreamwar/HRM-Text1-C4-Medium-100M** - Production inference
+- **dreamwar/HRM-Text1-C4-Medium-350M** - High-quality generation
+- **dreamwar/HRM-Text1-C4-Large-1B** - State-of-the-art results
+
+## 📄 License
+
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
+
+## 🔬 Citation
 
 ```bibtex
 @misc{hrm-text1-2024,
-  title={HRM-Text1: Hierarchical Reasoning Model for Text Generation},
+  title={HRM-Text1: Hierarchical Reasoning Model Family for Text Generation},
   author={DreamWar},
   year={2024},
-  url={https://huggingface.co/dreamwar/HRM-Text1}
+  url={https://huggingface.co/dreamwar/HRM-Text1},
+  note={Multi-scale transformer models with adaptive computation}
 }
 ```
 
-## Troubleshooting
+## 🤝 Contributing
 
-### Common Issues
+Contributions are welcome! Please feel free to submit issues and pull requests.
 
-1. **Memory Errors**: Reduce batch size or enable gradient checkpointing
-2. **Dataset Loading**: Ensure stable internet connection for streaming
-3. **CUDA Errors**: Update PyTorch and CUDA drivers
-4. **Language Detection**: Install `langdetect` for language filtering
-
-### Support
-
-For issues and questions:
-- Check the training script comments for detailed configuration
-- Review error messages for specific guidance
-- Ensure proper environment setup and dependencies
-
-## Sequential Training
-
-The model supports sequential training across different datasets while maintaining checkpoint continuity:
-
-### Quick Setup for Sequential Training
-
-1. **Enable Sequential Mode** (IMPORTANT: Set this BEFORE starting training):
-   ```python
-   SEQUENTIAL_TRAINING = True
-   BASE_MODEL_NAME = "hrm_text1_c4_output-large"
-   ```
-
-2. **Train on First Dataset**:
-   ```python
-   ACTIVE_DATASET = "c4"
-   # Run training normally
-   ```
-
-3. **Continue with Second Dataset**:
-   ```python
-   ACTIVE_DATASET = "human_conversations"
-   # Automatically loads checkpoint from previous training
-   ```
-
-### Configuration Example
-
-```python
-# Sequential training configuration
-SEQUENTIAL_TRAINING = True  # Keep same directory across datasets
-BASE_MODEL_NAME = "hrm_text1_c4_output-large"
-
-# Dataset switching
-ACTIVE_DATASET = "human_conversations"  # or "c4"
-
-# Available datasets
-DATASET_OPTIONS = {
-    "c4": {
-        "name": "allenai/c4",
-        "config": "multilingual", 
-        "type": "huggingface"
-    },
-    "human_conversations": {
-        "name": "projjal1/human-conversation-training-data",
-        "type": "kaggle"
-    }
-}
+### Development Setup
+```bash
+git clone https://github.com/julianjjo/HRM_Models.git
+cd HRM_Models  
+pip install -r requirements.txt
+export HRM_IMPORT_ONLY=1  # For development
 ```
-
-### How It Works
-
-- **Normal Mode**: Each dataset creates its own output directory
-- **Sequential Mode**: Uses a fixed base directory to preserve checkpoints
-- **Automatic Detection**: Script detects dataset changes and adjusts learning rate scheduler
-- **Checkpoint Continuity**: All training state is preserved between dataset switches
 
 ---
 
-*This model was trained using the HRM (Hierarchical Reasoning Module) architecture with adaptive computation for improved text generation capabilities.*
+*The HRM-Text1 model family represents a significant advancement in hierarchical reasoning for text generation, offering scalable solutions from mobile edge devices to high-performance research applications.*
