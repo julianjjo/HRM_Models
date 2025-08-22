@@ -937,113 +937,129 @@ if TENSORBOARD_AVAILABLE:
 # --- FUNCIONES AUXILIARES PARA DATALOADER ---
 # ==============================================================================
 
+def get_system_info():
+    """Obtiene información precisa del sistema"""
+    try:
+        # Intentar obtener CPU count de diferentes formas
+        import psutil
+        logical_cpus = psutil.cpu_count(logical=True)
+        physical_cpus = psutil.cpu_count(logical=False)
+        cpu_info = f"CPUs: {physical_cpus} físicos, {logical_cpus} lógicos"
+        print(f"🖥️  Sistema detectado - {cpu_info}")
+        return logical_cpus, physical_cpus
+    except ImportError:
+        # Fallback a multiprocessing
+        logical_cpus = mp.cpu_count()
+        physical_cpus = logical_cpus // 2  # Estimación conservadora
+        print(f"🖥️  Sistema detectado - CPUs: ~{physical_cpus} físicos, {logical_cpus} lógicos (estimado)")
+        return logical_cpus, physical_cpus
+
 def get_dataloader_workers():
-    """Determina el número óptimo de workers para DataLoader basado en entorno y hf_transfer"""
-    # Con hf_transfer habilitado, las descargas son mucho más rápidas
-    # Por lo tanto, necesitamos menos workers para DataLoader
+    """Determina workers para DataLoader de forma conservadora y eficiente"""
     hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
+    logical_cpus, physical_cpus = get_system_info()
     
     # Para entrenamiento distribuido
     if is_distributed and world_size > 1:
-        # Con hf_transfer: 2 workers por GPU son suficientes
-        # Sin hf_transfer: 4 workers por GPU para compensar descargas lentas
-        workers_per_gpu = 2 if hf_transfer_enabled else 4
-        optimal_workers = min(workers_per_gpu * world_size, mp.cpu_count() // 2)
-        transfer_status = "🚀 hf_transfer" if hf_transfer_enabled else "🐌 standard download"
-        print(f"🚀 Modo distribuido ({transfer_status}): usando {optimal_workers} workers por proceso")
+        # Conservador: 1-2 workers por proceso para evitar contención
+        workers_per_process = 1 if hf_transfer_enabled else 2
+        optimal_workers = min(workers_per_process, logical_cpus // world_size, 4)
+        transfer_status = "🚀 hf_transfer" if hf_transfer_enabled else "🐌 standard"
+        print(f"🚀 Distribuido ({transfer_status}): {optimal_workers} workers por proceso")
         return optimal_workers
     
     try:
-        # Detectar si estamos en Google Colab
+        # Google Colab: muy conservador
         if 'google.colab' in str(get_ipython()):
-            # Colab tiene recursos limitados, usar configuración conservadora
-            workers = 2 if hf_transfer_enabled else 4
-            transfer_status = "con hf_transfer" if hf_transfer_enabled else "sin hf_transfer"
-            print(f"Detectado entorno Google Colab ({transfer_status}). Usando num_workers={workers}.")
+            workers = 1 if hf_transfer_enabled else 2
+            print(f"Google Colab: {workers} workers (hf_transfer={hf_transfer_enabled})")
             return workers
     except:
         pass
 
     try:
-        # Detectar si estamos en Jupyter/IPython
+        # Jupyter/IPython: conservador
         get_ipython()
-        workers = 2 if hf_transfer_enabled else 4
-        transfer_status = "con hf_transfer" if hf_transfer_enabled else "sin hf_transfer"
-        print(f"Detectado entorno Jupyter/IPython ({transfer_status}). Usando num_workers={workers}.")
+        workers = 2 if hf_transfer_enabled else 3
+        print(f"Jupyter/IPython: {workers} workers (hf_transfer={hf_transfer_enabled})")
         return workers
     except:
         pass
 
-    # Para sistemas normales
-    total_cpus = mp.cpu_count()
+    # Sistema normal: usar máximo 25-50% de CPUs físicos
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    max_workers = max(1, physical_cpus // 2)  # Máximo 50% de CPUs físicos
     
-    if num_gpus > 1:
-        # Multi-GPU con hf_transfer: 2-4 workers por GPU son suficientes
-        # Multi-GPU sin hf_transfer: 4-6 workers por GPU para compensar I/O lento
-        workers_per_gpu = 3 if hf_transfer_enabled else 6
-        optimal_workers = min(num_gpus * workers_per_gpu, total_cpus // 2, 16)
-        transfer_status = "🚀 hf_transfer optimizado" if hf_transfer_enabled else "🐌 standard I/O"
-        print(f"Multi-GPU detectado ({num_gpus} GPUs, {transfer_status}). Usando {optimal_workers} workers.")
+    if hf_transfer_enabled:
+        # Con hf_transfer, I/O es rápido, pocos workers
+        optimal_workers = min(2, max_workers)
     else:
-        # Single-GPU: Configuración conservadora y eficiente
-        optimal_workers = 3 if hf_transfer_enabled else 4
-        transfer_status = "hf_transfer" if hf_transfer_enabled else "standard"
-        print(f"Single-GPU ({transfer_status}). Usando {optimal_workers} workers para DataLoader.")
+        # Sin hf_transfer, I/O lento, más workers pero limitado
+        optimal_workers = min(4, max_workers)
+    
+    # Limitar adicional para evitar saturación
+    optimal_workers = min(optimal_workers, 6)
+    
+    gpu_info = f"{num_gpus} GPU{'s' if num_gpus > 1 else ''}"
+    transfer_status = "hf_transfer" if hf_transfer_enabled else "standard"
+    print(f"Sistema ({gpu_info}, {transfer_status}): {optimal_workers} workers")
     
     return optimal_workers
 
 def get_tokenization_workers():
-    """Determina el número óptimo de workers para tokenización (independiente de DataLoader)"""
-    # La tokenización no depende de hf_transfer, sino de CPU cores disponibles
-    total_cpus = mp.cpu_count()
+    """Determina workers para tokenización de forma conservadora (independiente de DataLoader)"""
+    logical_cpus, physical_cpus = get_system_info()
     
-    # Para entrenamiento distribuido
+    # Para entrenamiento distribuido: muy conservador
     if is_distributed and world_size > 1:
-        # Distribuido: 2-4 workers por proceso
-        optimal_workers = min(4, max(2, total_cpus // world_size))
+        optimal_workers = min(2, max(1, physical_cpus // world_size))
+        print(f"Tokenización distribuida: {optimal_workers} workers por proceso")
         return optimal_workers
     
     try:
-        # Detectar si estamos en Google Colab (recursos limitados)
+        # Google Colab: extremadamente conservador
         if 'google.colab' in str(get_ipython()):
-            return min(4, max(2, total_cpus // 2))  # Conservador en Colab
+            workers = min(2, max(1, physical_cpus // 2))
+            print(f"Tokenización Colab: {workers} workers")
+            return workers
     except:
         pass
 
     try:
-        # Detectar si estamos en Jupyter/IPython
+        # Jupyter/IPython: conservador
         get_ipython()
-        return min(6, max(2, total_cpus // 2))  # Moderado en Jupyter
+        workers = min(3, max(2, physical_cpus // 2))
+        print(f"Tokenización Jupyter: {workers} workers")
+        return workers
     except:
         pass
 
-    # Para sistemas normales, usar más workers para tokenización
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    # Sistema normal: usar máximo 50-75% de CPUs físicos para tokenización
+    # pero limitado para evitar saturación
+    max_workers = min(6, max(2, (physical_cpus * 3) // 4))  # 75% de CPUs físicos, máximo 6
     
-    if num_gpus > 1:
-        # Multi-GPU: 4-8 workers para tokenización eficiente
-        return min(8, max(4, total_cpus // 2))
-    else:
-        # Single-GPU: 4-6 workers para tokenización
-        return min(6, max(4, total_cpus // 4))
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    gpu_info = f"{num_gpus} GPU{'s' if num_gpus > 1 else ''}"
+    print(f"Tokenización sistema ({gpu_info}): {max_workers} workers")
+    
+    return max_workers
 
 def get_optimized_buffer_size(num_gpus, dataset_size_hint='medium'):
-    """Calcula buffer size óptimo independiente de workers"""
-    # Buffer base según tamaño del dataset
+    """Calcula buffer size óptimo conservativo para evitar saturación de memoria"""
+    # Buffer base más conservativo
     if dataset_size_hint == 'large':  # Streaming datasets masivos
-        base_buffer = 256
+        base_buffer = 32  # Reducido de 256 a 32
     elif dataset_size_hint == 'medium':  # Datasets normales
-        base_buffer = 128
+        base_buffer = 16  # Reducido de 128 a 16
     else:  # small datasets
-        base_buffer = 64
+        base_buffer = 8   # Reducido de 64 a 8
     
-    # Escalar por número de GPUs
-    gpu_multiplier = max(1, num_gpus)
+    # Escalado conservativo por número de GPUs
+    gpu_multiplier = min(max(1, num_gpus), 4)  # Máximo 4x
     buffer_size = base_buffer * gpu_multiplier
     
-    # Límites razonables
-    return min(max(buffer_size, 64), 512)
+    # Límites muy conservativos para evitar saturar memoria
+    return min(max(buffer_size, 8), 128)  # Máximo 128, mínimo 8
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
@@ -2113,28 +2129,28 @@ def custom_collate_fn(batch):
     }
 
 def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
-    """Calcula prefetch_factor optimizado considerando hf_transfer"""
+    """Calcula prefetch_factor ultra-conservativo para evitar rate limits y saturación"""
     if num_workers == 0:
         return None
     
     hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
     
     if hf_transfer_enabled:
-        # Con hf_transfer, las descargas son rápidas, necesitamos menos prefetch
+        # Con hf_transfer, usar prefetch mínimo para evitar rate limits
         if is_multi_gpu:
-            # Multi-GPU: 4-6 items por worker es suficiente
-            return min(max(4, num_workers), 12)
+            # Multi-GPU: máximo 2-3 items por worker
+            return min(2, max(1, num_workers // 2))
         else:
-            # Single-GPU: 2-4 items por worker
-            return min(max(2, num_workers), 6)
+            # Single-GPU: 1-2 items por worker
+            return min(2, max(1, num_workers))
     else:
-        # Sin hf_transfer, necesitamos más prefetch para compensar descargas lentas
+        # Sin hf_transfer, mantener conservativo pero algo más alto
         if is_multi_gpu:
-            # Multi-GPU: 8-16 items por worker
-            return min(max(8, num_workers * 2), 32)
+            # Multi-GPU: 2-4 items por worker máximo
+            return min(4, max(2, num_workers))
         else:
-            # Single-GPU: 4-8 items por worker
-            return min(max(4, num_workers), 12)
+            # Single-GPU: 2-3 items por worker máximo
+            return min(3, max(2, num_workers))
 
 print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 
