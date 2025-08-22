@@ -368,6 +368,12 @@ HRM_Models/
 
 This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
+## 🙏 Credits
+
+This project is based on the original HRM-Text implementation by qingy1337:
+- **Original Repository**: [https://github.com/qingy1337/HRM-Text](https://github.com/qingy1337/HRM-Text)
+- **Extensions**: Multi-scale model family (10M-1B parameters), optimized training, and production improvements
+
 ## 🔬 Citation
 
 ```bibtex
@@ -376,7 +382,7 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
   author={DreamWar},
   year={2024},
   url={https://github.com/julianjjo/HRM_Models},
-  note={Multi-scale transformer models with adaptive computation}
+  note={Multi-scale transformer models with adaptive computation, based on HRM-Text by qingy1337}
 }
 ```
 
