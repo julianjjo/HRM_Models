@@ -1,6 +1,7 @@
 datasets==4.0.0
 hf_transfer>=0.1.0
 huggingface_hub==0.34.4
+sentencepiece>=0.1.99
 torch==2.6.0
 tqdm==4.67.1
 transformers==4.55.2
