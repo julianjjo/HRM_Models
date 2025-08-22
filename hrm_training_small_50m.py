@@ -2649,8 +2649,8 @@ def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperatu
     return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
 
-# Ejecutar el entrenamiento principal
-if __name__ == "__main__":
+# Ejecutar el entrenamiento principal (solo si no es import-only)
+if __name__ == "__main__" and not os.environ.get('HRM_IMPORT_ONLY'):
     main_training()
     save_final_model()
     test_model_and_summary()
