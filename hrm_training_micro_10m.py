@@ -2043,11 +2043,11 @@ for split_name in ["train", "validation"]:
     if ACTIVE_DATASET == "c4" and is_multi_gpu:
         # Configuración optimizada para C4 streaming masivo
         batch_size_tokenization = 2000  # Batch más grande para C4
-        num_proc = min(safe_num_workers, 8)  # Paralelización limitada
-        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc}")
+        num_proc = min(tokenization_workers, 8)  # Usar tokenization_workers en lugar de safe_num_workers
+        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc} (tokenization_workers={tokenization_workers})")
     else:
         batch_size_tokenization = 1000
-        num_proc = min(safe_num_workers, 4)
+        num_proc = min(tokenization_workers, 6)  # Usar tokenization_workers y aumentar límite a 6
     
     # Para IterableDataset no usar num_proc ni desc (no soportados)
     if is_iterable_dataset(raw_datasets[split_name]):
@@ -2220,8 +2220,8 @@ class StreamingBufferWrapper:
     """Buffer inteligente para datasets streaming masivos como C4"""
     def __init__(self, dataloader, buffer_size=None, min_buffer_ratio=0.4):
         self.dataloader = dataloader
-        # Buffer adaptativo basado en número de GPUs
-        self.buffer_size = buffer_size or (num_gpus * safe_num_workers * 4)
+        # Buffer adaptativo basado en número de GPUs - optimizado independiente de workers
+        self.buffer_size = buffer_size or get_optimized_buffer_size(num_gpus, 'large')
         self.min_buffer_ratio = min_buffer_ratio
         self.buffer = []
         self.iterator = iter(dataloader)
