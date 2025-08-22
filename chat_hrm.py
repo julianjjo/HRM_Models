@@ -111,7 +111,7 @@ def interactive_chat():
     print("=" * 50)
     
     # Ruta del modelo (ajustar según sea necesario)
-    model_path = os.path.expanduser("/Users/julianmican/Documents/model10MFinalTraning/HRM_Models/hrm_models_c4_micro_10m_output")
+    model_path = os.path.expanduser("/Users/julianmican/Documents/model10MFinalTraning/HRM_Models/hrm_models_micro_10m_output")
     
     # Cargar modelo
     model, tokenizer, device = load_model_and_tokenizer(model_path)
@@ -194,7 +194,7 @@ def demo_chat():
     print("🎯 Modo Demostración - HRM-Models")
     print("=" * 50)
     
-    model_path = os.path.expanduser("~/Documents/HRM/hrm_models_c4_micro_10m_output")
+    model_path = os.path.expanduser("~/Documents/HRM/hrm_models_micro_10m_output")
     model, tokenizer, device = load_model_and_tokenizer(model_path)
     if model is None:
         return

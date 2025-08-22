@@ -210,11 +210,11 @@ wandb/
 .clinerules
 .github
 .roo
-hrm_models_c4_output-large
+hrm_models_output-large
 *.pub
 
-# HRM-Models model outputs and training artifacts
-hrm_models_c4_*_output/
+# HRM-Models model outputs and training artifacts  
+hrm_models_*_output/
 *.bin
 *.safetensors
 tensorboard_logs/
