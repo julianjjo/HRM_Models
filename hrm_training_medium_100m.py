@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO MEDIUM ~100M PARÁMETROS  
+HRM-Models Training Script - MODELO MEDIUM ~100M PARÁMETROS  
 VERSIÓN MEDIUM: Configuración para ~100M parámetros con contexto extendido (1024 tokens)
 - Arquitectura HRM medium-eficiente (12 capas, 512 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación

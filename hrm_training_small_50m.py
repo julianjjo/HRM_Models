@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO SMALL ~50M PARÁMETROS  
+HRM-Models Training Script - MODELO SMALL ~50M PARÁMETROS  
 VERSIÓN SMALL: Configuración para ~50M parámetros con contexto moderado (1024 tokens)
 - Arquitectura HRM small-eficiente (8 capas, 384 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación

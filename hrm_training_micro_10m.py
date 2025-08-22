@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO MICRO ~10M PARÁMETROS  
+HRM-Models Training Script - MODELO MICRO ~10M PARÁMETROS  
 VERSIÓN MICRO: Configuración para ~10M parámetros con contexto ultra-reducido (128 tokens)
 - Arquitectura HRM micro-eficiente (4 capas, 128 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación

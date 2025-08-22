@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Script de Chat Interactivo para HRM-Text1 Micro 10M
+Script de Chat Interactivo para HRM-Models Micro 10M
 Utiliza el modelo entrenado por hrm_training_micro_10m.py
 """
 
@@ -107,7 +107,7 @@ def chat_with_model(prompt_text, model, tokenizer, device, max_new_tokens=100, t
 
 def interactive_chat():
     """Función principal de chat interactivo"""
-    print("🤖 HRM-Text1 Chat Interactivo")
+    print("🤖 HRM-Models Chat Interactivo")
     print("=" * 50)
     
     # Ruta del modelo (ajustar según sea necesario)
@@ -172,7 +172,7 @@ def interactive_chat():
                 continue
             
             # Generar respuesta
-            print("🤖 HRM-Text1: ", end="", flush=True)
+            print("🤖 HRM-Models: ", end="", flush=True)
             response = chat_with_model(
                 user_input, 
                 model, 
@@ -191,7 +191,7 @@ def interactive_chat():
 
 def demo_chat():
     """Función de demostración con prompts predefinidos"""
-    print("🎯 Modo Demostración - HRM-Text1")
+    print("🎯 Modo Demostración - HRM-Models")
     print("=" * 50)
     
     model_path = os.path.expanduser("~/Documents/HRM/hrm_text1_c4_micro_10m_output")
@@ -218,7 +218,7 @@ def demo_chat():
         print(response)
 
 if __name__ == "__main__":
-    print("🚀 Iniciando HRM-Text1 Chat")
+    print("🚀 Iniciando HRM-Models Chat")
     
     if len(sys.argv) > 1 and sys.argv[1] == "--demo":
         demo_chat()

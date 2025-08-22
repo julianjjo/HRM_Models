@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 # ---------------------------------------------------------
 # HRM Architecture (w/ Positional Embeddings for CausalLM)
-# I shall refer to it as HRM-Text1
+# I shall refer to it as HRM-Models
 class RMSNorm(nn.Module):
     def __init__(self, n_embd, eps=1e-8):
         super().__init__()

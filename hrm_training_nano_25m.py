@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO NANO ~25M PARÁMETROS  
+HRM-Models Training Script - MODELO NANO ~25M PARÁMETROS  
 VERSIÓN NANO: Configuración para ~25M parámetros con contexto optimizado (512 tokens)
 - Arquitectura HRM nano-eficiente (8 capas, 320 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Script de lanzamiento distribuido para HRM-Text1 Multi-GPU Training
+Script de lanzamiento distribuido para HRM-Models Multi-GPU Training
 
 Uso:
     # Para 8 GPUs en un solo nodo:
@@ -23,7 +23,7 @@ import os
 import sys
 
 def main():
-    parser = argparse.ArgumentParser(description='Lanzar entrenamiento distribuido HRM-Text1')
+    parser = argparse.ArgumentParser(description='Lanzar entrenamiento distribuido HRM-Models')
     
     # Argumentos básicos
     parser.add_argument('--script', required=True, help='Script de entrenamiento a ejecutar')

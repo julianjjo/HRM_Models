@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Text1 Training Script - MODELO LARGE ~1B PARÁMETROS  
+HRM-Models Training Script - MODELO LARGE ~1B PARÁMETROS  
 VERSIÓN LARGE: Configuración para ~1B parámetros con contexto extendido (2048 tokens)
 - Arquitectura HRM large-eficiente (24 capas, 1536 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación

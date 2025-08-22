@@ -1,7 +1,7 @@
 """
-HRM-Text1 Inference Script
+HRM-Models Inference Script
 
-This script allows running inference with a trained HRM-Text1 model. It takes a model weights file as input, prompts for text, and generates a short sequence of tokens.
+This script allows running inference with a trained HRM-Models model. It takes a model weights file as input, prompts for text, and generates a short sequence of tokens.
 """
 
 import argparse
@@ -62,7 +62,7 @@ def generate_text(model, tokenizer, prompt_text, max_new_tokens=500, temperature
 
 def main():
     """Main function to run the inference script."""
-    parser = argparse.ArgumentParser(description="Run inference with a trained HRM-Text1 model.")
+    parser = argparse.ArgumentParser(description="Run inference with a trained HRM-Models model.")
     parser.add_argument(
         "--model_path",
         type=str,
