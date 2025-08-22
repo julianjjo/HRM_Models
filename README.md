@@ -370,19 +370,37 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ## 🙏 Credits
 
-This project is based on the original HRM-Text implementation by qingy1337:
+This project is based on the **Hierarchical Reasoning Model (HRM)** architecture and implementation:
+
+### Academic Foundation
+- **Research Paper**: "Hierarchical Reasoning Model" by Wang et al. (2024)
+- **arXiv**: [https://arxiv.org/abs/2506.21734](https://arxiv.org/abs/2506.21734)
+- **Key Innovation**: Hierarchical recurrent architecture with dual-timescale processing inspired by human brain cognition
+- **Architecture**: Two interdependent modules - high-level for abstract planning, low-level for detailed computations
+
+### Implementation Base
 - **Original Repository**: [https://github.com/qingy1337/HRM-Text](https://github.com/qingy1337/HRM-Text)
 - **Extensions**: Multi-scale model family (10M-1B parameters), optimized training, and production improvements
 
 ## 🔬 Citation
 
+If you use HRM-Models in your research, please cite both the original HRM paper and this implementation:
+
 ```bibtex
+@article{wang2024hierarchical,
+  title={Hierarchical Reasoning Model},
+  author={Wang, Guan and Li, Jin and Sun, Yuhao and Chen, Xing and Liu, Changling and Wu, Yue and Lu, Meng and Song, Sen and Yadkori, Yasin Abbasi},
+  journal={arXiv preprint arXiv:2506.21734},
+  year={2024},
+  url={https://arxiv.org/abs/2506.21734}
+}
+
 @misc{hrm-models-2024,
   title={HRM-Models: Hierarchical Reasoning Model Family for Text Generation},
   author={DreamWar},
   year={2024},
   url={https://github.com/julianjjo/HRM_Models},
-  note={Multi-scale transformer models with adaptive computation, based on HRM-Text by qingy1337}
+  note={Multi-scale implementation of HRM architecture with 6 model sizes (10M-1B parameters)}
 }
 ```
 
