@@ -650,7 +650,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 100   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 0.01   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -797,12 +797,12 @@ DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
 SEED = 42
-NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
-CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
+NUM_EPOCHS = 2             # Épocas totales para entrenamiento continuo
+CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 80        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+BATCH_SIZE = 3        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
