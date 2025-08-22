@@ -993,6 +993,58 @@ def get_dataloader_workers():
     
     return optimal_workers
 
+def get_tokenization_workers():
+    """Determina el número óptimo de workers para tokenización (independiente de DataLoader)"""
+    # La tokenización no depende de hf_transfer, sino de CPU cores disponibles
+    total_cpus = mp.cpu_count()
+    
+    # Para entrenamiento distribuido
+    if is_distributed and world_size > 1:
+        # Distribuido: 2-4 workers por proceso
+        optimal_workers = min(4, max(2, total_cpus // world_size))
+        return optimal_workers
+    
+    try:
+        # Detectar si estamos en Google Colab (recursos limitados)
+        if 'google.colab' in str(get_ipython()):
+            return min(4, max(2, total_cpus // 2))  # Conservador en Colab
+    except:
+        pass
+
+    try:
+        # Detectar si estamos en Jupyter/IPython
+        get_ipython()
+        return min(6, max(2, total_cpus // 2))  # Moderado en Jupyter
+    except:
+        pass
+
+    # Para sistemas normales, usar más workers para tokenización
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    
+    if num_gpus > 1:
+        # Multi-GPU: 4-8 workers para tokenización eficiente
+        return min(8, max(4, total_cpus // 2))
+    else:
+        # Single-GPU: 4-6 workers para tokenización
+        return min(6, max(4, total_cpus // 4))
+
+def get_optimized_buffer_size(num_gpus, dataset_size_hint='medium'):
+    """Calcula buffer size óptimo independiente de workers"""
+    # Buffer base según tamaño del dataset
+    if dataset_size_hint == 'large':  # Streaming datasets masivos
+        base_buffer = 256
+    elif dataset_size_hint == 'medium':  # Datasets normales
+        base_buffer = 128
+    else:  # small datasets
+        base_buffer = 64
+    
+    # Escalar por número de GPUs
+    gpu_multiplier = max(1, num_gpus)
+    buffer_size = base_buffer * gpu_multiplier
+    
+    # Límites razonables
+    return min(max(buffer_size, 64), 512)
+
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
     global train_loader, val_loader
@@ -1968,7 +2020,13 @@ tokenized_splits = {}
 # Configuración para multi-GPU (necesario antes del loop de tokenización)
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
 is_multi_gpu = num_gpus > 1
+# Separar conceptos de workers para diferentes propósitos
 safe_num_workers = get_dataloader_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
+tokenization_workers = get_tokenization_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
+
+print(f"🔧 Configuración de workers optimizada:")
+print(f"   📥 DataLoader workers: {safe_num_workers} (optimizado para hf_transfer)")
+print(f"   🔄 Tokenization workers: {tokenization_workers} (basado en CPU cores)")
 
 # Función para verificar si es IterableDataset (necesaria en el loop)
 def is_iterable_dataset(dataset):
@@ -2201,7 +2259,9 @@ class StreamingBufferWrapper:
 if is_multi_gpu and ACTIVE_DATASET == "c4":
     print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
     # Buffer más grande para mejor utilización de CPU en paralelo
-    buffer_size = max(128, num_gpus * safe_num_workers * 4)  # Optimizado para servidor con 480GB RAM
+    # Calcular buffer size optimizado independiente de workers
+    dataset_hint = 'large' if is_streaming else 'medium'
+    buffer_size = get_optimized_buffer_size(num_gpus, dataset_hint)
     train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
     print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
 
