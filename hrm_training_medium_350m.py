@@ -795,7 +795,7 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Medium-350M"
+HF_REPO_ID = f"dreamwar/HRM-Models-Medium-350M"
 SEED = 42
 NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
 CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
@@ -2580,14 +2580,14 @@ def save_final_model():
             model_to_save.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload HRM-Text1 350M medium model trained on C4 dataset"
+                commit_message=f"Upload HRM-Models 350M medium model"
             )
 
             # Subir el tokenizador
             tokenizer.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Text1 350M medium model"
+                commit_message=f"Upload tokenizer for HRM-Models 350M medium model"
             )
 
             print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")

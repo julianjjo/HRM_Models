@@ -650,7 +650,7 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 100   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 10.0   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -795,7 +795,7 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Text1-{DATASET_INFO['repo_suffix']}-Small-50M"
+HF_REPO_ID = f"dreamwar/HRM-Models-Small-50M"
 SEED = 42
 NUM_EPOCHS = 4             # Épocas para entrenamiento 50M
 CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
@@ -2580,14 +2580,14 @@ def save_final_model():
             model_to_save.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload HRM-Text1 10M micro model trained on C4 dataset"
+                commit_message=f"Upload HRM-Models 50M small model"
             )
 
             # Subir el tokenizador
             tokenizer.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Text1 10M micro model"
+                commit_message=f"Upload tokenizer for HRM-Models 50M small model"
             )
 
             print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
