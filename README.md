@@ -1,4 +1,4 @@
-# HRM-Text1: Hierarchical Reasoning Model for Text Generation
+# HRM-Models: Hierarchical Reasoning Model for Text Generation
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1c4exU-zMt4SuT1kRlwQQXlLPaiazEDCf?usp=sharing)
 
@@ -6,7 +6,7 @@ A family of transformer models with Hierarchical Reasoning Module (HRM) architec
 
 ## 📊 Model Family
 
-**HRM-Text1** comes in 6 different sizes optimized for various use cases:
+**HRM-Models** comes in 6 different sizes optimized for various use cases:
 
 | Model Size | Parameters | Architecture | Memory Usage | Best Use Case |
 |------------|------------|--------------|--------------|---------------|
@@ -29,7 +29,7 @@ All models include:
 
 ## 🏗️ Model Architecture
 
-**HRM-Text1** implements a novel hierarchical reasoning architecture with the following key components:
+**HRM-Models** implements a novel hierarchical reasoning architecture with the following key components:
 
 ### Core Architecture
 - **Hierarchical Reasoning Module** with dual-stream processing
@@ -357,12 +357,12 @@ HRM_Models/
 ## 🏷️ Model Releases
 
 ### Hugging Face Models
-- **dreamwar/HRM-Text1-C4-Micro-10M** - Research and prototyping
-- **dreamwar/HRM-Text1-C4-Nano-25M** - Mobile and edge deployment
-- **dreamwar/HRM-Text1-C4-Small-50M** - General purpose applications  
-- **dreamwar/HRM-Text1-C4-Medium-100M** - Production inference
-- **dreamwar/HRM-Text1-C4-Medium-350M** - High-quality generation
-- **dreamwar/HRM-Text1-C4-Large-1B** - State-of-the-art results
+- **dreamwar/HRM-Models-C4-Micro-10M** - Research and prototyping
+- **dreamwar/HRM-Models-C4-Nano-25M** - Mobile and edge deployment
+- **dreamwar/HRM-Models-C4-Small-50M** - General purpose applications  
+- **dreamwar/HRM-Models-C4-Medium-100M** - Production inference
+- **dreamwar/HRM-Models-C4-Medium-350M** - High-quality generation
+- **dreamwar/HRM-Models-C4-Large-1B** - State-of-the-art results
 
 ## 📄 License
 
@@ -371,11 +371,11 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 ## 🔬 Citation
 
 ```bibtex
-@misc{hrm-text1-2024,
-  title={HRM-Text1: Hierarchical Reasoning Model Family for Text Generation},
+@misc{hrm-models-2024,
+  title={HRM-Models: Hierarchical Reasoning Model Family for Text Generation},
   author={DreamWar},
   year={2024},
-  url={https://huggingface.co/dreamwar/HRM-Text1},
+  url={https://github.com/julianjjo/HRM_Models},
   note={Multi-scale transformer models with adaptive computation}
 }
 ```
@@ -394,4 +394,4 @@ export HRM_IMPORT_ONLY=1  # For development
 
 ---
 
-*The HRM-Text1 model family represents a significant advancement in hierarchical reasoning for text generation, offering scalable solutions from mobile edge devices to high-performance research applications.*
+*The HRM-Models model family represents a significant advancement in hierarchical reasoning for text generation, offering scalable solutions from mobile edge devices to high-performance research applications.*
