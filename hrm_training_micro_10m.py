@@ -986,23 +986,39 @@ def get_dataloader_workers():
     except:
         pass
 
-    # Sistema normal: usar máximo 25-50% de CPUs físicos
+    # Cálculo optimizado para multi-GPU basado en hf_transfer
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    max_workers = max(1, physical_cpus // 2)  # Máximo 50% de CPUs físicos
     
     if hf_transfer_enabled:
-        # Con hf_transfer, I/O es rápido, pocos workers
-        optimal_workers = min(2, max_workers)
+        # Con hf_transfer, más workers para multi-GPU pero controlado
+        if num_gpus > 1:
+            # Para multi-GPU: 2-3 workers por GPU para mantener throughput
+            workers_per_gpu = 2 if num_gpus >= 6 else 3
+            optimal_workers = min(num_gpus * workers_per_gpu, max(8, physical_cpus // 2))
+        else:
+            optimal_workers = min(4, max(2, physical_cpus // 2))
     else:
-        # Sin hf_transfer, I/O lento, más workers pero limitado
-        optimal_workers = min(4, max_workers)
-    
-    # Limitar adicional para evitar saturación
-    optimal_workers = min(optimal_workers, 6)
+        # Sin hf_transfer, más aggressive con workers para multi-GPU
+        if num_gpus > 1:
+            # Para multi-GPU sin hf_transfer: 3-4 workers por GPU
+            workers_per_gpu = 3 if num_gpus >= 6 else 4
+            optimal_workers = min(num_gpus * workers_per_gpu, max(16, physical_cpus))
+        else:
+            optimal_workers = min(6, max(3, physical_cpus // 2))
     
     gpu_info = f"{num_gpus} GPU{'s' if num_gpus > 1 else ''}"
-    transfer_status = "hf_transfer" if hf_transfer_enabled else "standard"
-    print(f"Sistema ({gpu_info}, {transfer_status}): {optimal_workers} workers")
+    if hf_transfer_enabled:
+        if num_gpus > 1:
+            workers_per_gpu = 2 if num_gpus >= 6 else 3
+            print(f"🚀 Multi-GPU + hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
+        else:
+            print(f"🔧 Single-GPU + hf_transfer: {optimal_workers} workers conservativos")
+    else:
+        if num_gpus > 1:
+            workers_per_gpu = 3 if num_gpus >= 6 else 4
+            print(f"🚀 Multi-GPU sin hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
+        else:
+            print(f"🔧 Single-GPU sin hf_transfer: {optimal_workers} workers moderados")
     
     return optimal_workers
 
@@ -2136,21 +2152,21 @@ def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
     hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
     
     if hf_transfer_enabled:
-        # Con hf_transfer, usar prefetch mínimo para evitar rate limits
+        # Con hf_transfer, balance entre throughput y rate limits
         if is_multi_gpu:
-            # Multi-GPU: máximo 2-3 items por worker
-            return min(2, max(1, num_workers // 2))
+            # Multi-GPU: 2-4 items por worker para mantener pipeline lleno
+            return min(4, max(2, num_workers // 4))
         else:
-            # Single-GPU: 1-2 items por worker
-            return min(2, max(1, num_workers))
+            # Single-GPU: 2-3 items por worker
+            return min(3, max(2, num_workers // 2))
     else:
-        # Sin hf_transfer, mantener conservativo pero algo más alto
+        # Sin hf_transfer, más agresivo para throughput máximo
         if is_multi_gpu:
-            # Multi-GPU: 2-4 items por worker máximo
-            return min(4, max(2, num_workers))
+            # Multi-GPU: 4-8 items por worker para maximizar throughput
+            return min(8, max(4, num_workers // 2))
         else:
-            # Single-GPU: 2-3 items por worker máximo
-            return min(3, max(2, num_workers))
+            # Single-GPU: 3-6 items por worker
+            return min(6, max(3, num_workers // 2))
 
 print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 

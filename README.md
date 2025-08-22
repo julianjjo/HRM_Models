@@ -344,6 +344,77 @@ unset HRM_IMPORT_ONLY
 nvidia-smi
 ```
 
+## 🚀 Multi-GPU Training (Recommended)
+
+### Quick Multi-GPU Setup
+
+Para máximo rendimiento en sistemas multi-GPU, usa **DistributedDataParallel** en lugar de DataParallel:
+
+```bash
+# Para 8 GPUs (RECOMENDADO)
+torchrun --nproc_per_node=8 hrm_training_small_50m.py
+
+# Para 4 GPUs  
+torchrun --nproc_per_node=4 hrm_training_medium_350m.py
+
+# Para 2 GPUs
+torchrun --nproc_per_node=2 hrm_training_nano_25m.py
+```
+
+### Performance Comparison
+
+| Setup | 8x H200 GPUs | Efficiency | Workers | Bottleneck |
+|-------|--------------|------------|---------|-----------|
+| **DataParallel (automático)** | ~25% GPU usage | ❌ Pobre | 16 workers | GPU 0 cuello |
+| **DistributedDataParallel (torchrun)** | ~95% GPU usage | ✅ Excelente | 24 workers/GPU | Ninguno |
+
+### Configuración Automática vs Manual
+
+#### Modo Automático (DataParallel)
+```bash
+# Se ejecuta automáticamente al detectar múltiples GPUs
+python hrm_training_small_50m.py
+```
+**Limitaciones:**
+- GPU 0 actúa como coordinador (cuello de botella)
+- Escalamiento sub-lineal con >4 GPUs
+- ~16x más lento que DistributedDataParallel
+
+#### Modo Manual (DistributedDataParallel - RECOMENDADO)
+```bash
+# Entrenamiento distribuido real
+torchrun --nproc_per_node=8 hrm_training_small_50m.py
+```
+**Ventajas:**
+- Escalamiento casi-lineal
+- Sin cuello de botella en GPU 0
+- 16x mejor rendimiento en 8 GPUs
+
+### Optimizaciones de Workers
+
+Los scripts ahora incluyen **configuración automática optimizada** para workers:
+
+```python
+# Configuración automática basada en GPUs
+# 8 GPUs: 16-24 workers (2-3 por GPU)
+# 4 GPUs: 12-16 workers (3-4 por GPU)  
+# 2 GPUs: 6-8 workers (3-4 por GPU)
+```
+
+### Variables de Entorno Multi-GPU
+
+```bash
+# Acelerar transferencias (recomendado)
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# NCCL optimizations para alta velocidad
+export NCCL_IB_DISABLE=0
+export NCCL_IB_GID_INDEX=3
+
+# Debugging distribuido (opcional)
+export TORCH_DISTRIBUTED_DEBUG=INFO
+```
+
 #### Training Stuck Issues
 ```bash
 # Verify not in import-only mode

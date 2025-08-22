@@ -980,22 +980,26 @@ def get_dataloader_workers():
     except:
         pass
 
-    # Cálculo conservativo basado en hf_transfer
+    # Cálculo optimizado para multi-GPU basado en hf_transfer
     if hf_transfer_enabled:
-        # Con hf_transfer, usar menos workers para evitar rate limits
+        # Con hf_transfer, más workers para multi-GPU pero controlado
         if num_gpus > 1:
-            optimal_workers = min(2, max(1, physical_cpus // 4))
-            print(f"🚀 Multi-GPU + hf_transfer: {optimal_workers} workers conservativos")
+            # Para multi-GPU: 2-3 workers por GPU para mantener throughput
+            workers_per_gpu = 2 if num_gpus >= 6 else 3
+            optimal_workers = min(num_gpus * workers_per_gpu, max(8, physical_cpus // 2))
+            print(f"🚀 Multi-GPU + hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
         else:
-            optimal_workers = min(2, max(1, physical_cpus // 2))
+            optimal_workers = min(4, max(2, physical_cpus // 2))
             print(f"🔧 Single-GPU + hf_transfer: {optimal_workers} workers conservativos")
     else:
-        # Sin hf_transfer, algo más de workers pero conservativo
+        # Sin hf_transfer, más aggressive con workers para multi-GPU
         if num_gpus > 1:
-            optimal_workers = min(4, max(2, physical_cpus // 2))
-            print(f"🚀 Multi-GPU sin hf_transfer: {optimal_workers} workers moderados")
+            # Para multi-GPU sin hf_transfer: 3-4 workers por GPU
+            workers_per_gpu = 3 if num_gpus >= 6 else 4
+            optimal_workers = min(num_gpus * workers_per_gpu, max(16, physical_cpus))
+            print(f"🚀 Multi-GPU sin hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
         else:
-            optimal_workers = min(3, max(2, physical_cpus // 2))
+            optimal_workers = min(6, max(3, physical_cpus // 2))
             print(f"🔧 Single-GPU sin hf_transfer: {optimal_workers} workers moderados")
     
     return optimal_workers
@@ -1050,32 +1054,28 @@ def get_optimized_buffer_size(num_gpus, dataset_size_hint='medium'):
     return min(max(buffer_size, 8), 128)  # Máximo 128, mínimo 8
 
 def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
-    """Calcula prefetch_factor ultra-conservativo para evitar rate limits y saturación"""
+    """Calcula prefetch_factor optimizado para throughput multi-GPU"""
     if num_workers == 0:
         return None
     
     hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
     
     if hf_transfer_enabled:
-        # Con hf_transfer, usar prefetch mínimo para evitar rate limits
+        # Con hf_transfer, balance entre throughput y rate limits
         if is_multi_gpu:
-            # Multi-GPU: máximo 2-3 items por worker
-            return min(2, max(1, num_workers // 2))
+            # Multi-GPU: 2-4 items por worker para mantener pipeline lleno
+            return min(4, max(2, num_workers // 4))
         else:
-            # Single-GPU: 1-2 items por worker
-            return min(2, max(1, num_workers))
+            # Single-GPU: 2-3 items por worker
+            return min(3, max(2, num_workers // 2))
     else:
-        # Sin hf_transfer, mantener conservativo pero algo más alto
+        # Sin hf_transfer, más agresivo para throughput máximo
         if is_multi_gpu:
-            # Multi-GPU: 2-4 items por worker máximo
-            return min(4, max(2, num_workers))
+            # Multi-GPU: 4-8 items por worker para maximizar throughput
+            return min(8, max(4, num_workers // 2))
         else:
-            # Single-GPU: 2-3 items por worker máximo
-            return min(3, max(2, num_workers))
-
-# ==============================================================================
-# --- FUNCIONES AUXILIARES PARA VALIDACIÓN DE CONFIGURACIÓN ---
-# ==============================================================================
+            # Single-GPU: 3-6 items por worker
+            return min(6, max(3, num_workers // 2))
 
 def validate_mix_ratios(mix_ratios, dataset_name=""):
     """
