@@ -357,12 +357,12 @@ HRM_Models/
 ## 🏷️ Model Releases
 
 ### Hugging Face Models
-- **dreamwar/HRM-Models-C4-Micro-10M** - Research and prototyping
-- **dreamwar/HRM-Models-C4-Nano-25M** - Mobile and edge deployment
-- **dreamwar/HRM-Models-C4-Small-50M** - General purpose applications  
-- **dreamwar/HRM-Models-C4-Medium-100M** - Production inference
-- **dreamwar/HRM-Models-C4-Medium-350M** - High-quality generation
-- **dreamwar/HRM-Models-C4-Large-1B** - State-of-the-art results
+- **dreamwar/HRM-Models-Micro-10M** - Research and prototyping
+- **dreamwar/HRM-Models-Nano-25M** - Mobile and edge deployment
+- **dreamwar/HRM-Models-Small-50M** - General purpose applications  
+- **dreamwar/HRM-Models-Medium-100M** - Production inference
+- **dreamwar/HRM-Models-Medium-350M** - High-quality generation
+- **dreamwar/HRM-Models-Large-1B** - State-of-the-art results
 
 ## 📄 License
 
