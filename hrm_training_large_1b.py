@@ -1952,7 +1952,7 @@ tokenized_splits = {}
 # Configuración para multi-GPU (necesario antes del loop de tokenización)
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
 is_multi_gpu = num_gpus > 1
-safe_num_workers = get_dataloader_workers()
+safe_num_workers = get_dataloader_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
 
 # Función para verificar si es IterableDataset (necesaria en el loop)
 def is_iterable_dataset(dataset):
@@ -2331,6 +2331,7 @@ def main_training():
         # Configurar variables de entorno para HuggingFace
         import os
         os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')  # Evitar warnings en Jupyter/Colab
+        os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER', '1')  # Habilitar transferencias rápidas de HF
         if 'google.colab' in str(type(get_ipython() if 'get_ipython' in globals() else '')):
             print("🔧 Configuración optimizada para Google Colab detectada")
     except:
