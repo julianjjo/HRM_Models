@@ -2043,25 +2043,36 @@ print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 # Configuración optimizada para multi-GPU (variables ya definidas arriba)
 
 # Configuración optimizada para C4 streaming con multi-GPU
-if is_multi_gpu and safe_num_workers > 0:
-    # Prefetch más agresivo para C4 streaming (dataset masivo)
-    prefetch_factor = max(256, safe_num_workers * 2)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
-    persistent_workers = True  # Critical para streaming - evita reinicializar workers
-    # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
-    local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
-    
-    # Buffer adicional para streaming datasets masivos
-    multiprocessing_context = "fork"  # Compatible sin __main__ guard
-    
-    print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
-    print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
-    print(f"   🔍 DEBUG: is_multi_gpu={is_multi_gpu}, safe_num_workers={safe_num_workers}")
+# Configuración de DataLoader basada en workers disponibles
+if safe_num_workers > 0:
+    if is_multi_gpu:
+        # Prefetch más agresivo para C4 streaming multi-GPU (dataset masivo)
+        prefetch_factor = max(256, safe_num_workers * 2)  # Optimizado para AMD EPYC 7443 24-Core con 480GB RAM
+        persistent_workers = True  # Critical para streaming - evita reinicializar workers
+        # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
+        
+        # Buffer adicional para streaming datasets masivos
+        multiprocessing_context = "fork"  # Compatible sin __main__ guard
+        
+        print(f"🚀 Configuración C4 Multi-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
+        print(f"   📊 Buffer streaming optimizado para dataset de 600B tokens")
+    else:
+        # Single-GPU con workers
+        prefetch_factor = 8  # Incrementado para single-GPU
+        persistent_workers = True
+        pin_memory_device = None
+        multiprocessing_context = None
+        print(f"🔧 Configuración Single-GPU: prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
 else:
-    prefetch_factor = 8 if safe_num_workers > 0 else None  # Incrementado para single-GPU
-    persistent_workers = safe_num_workers > 0
+    # Sin workers - modo import o configuración incorrecta
+    prefetch_factor = None
+    persistent_workers = False
     pin_memory_device = None
     multiprocessing_context = None
+    print(f"⚠️  Sin workers disponibles: prefetch_factor=None, workers={safe_num_workers}")
+    print(f"   💡 Verifica que HRM_IMPORT_ONLY no esté activado para entrenamiento")
 
 # Configurar argumentos del DataLoader condicionalmente
 train_kwargs = {
