@@ -2264,6 +2264,8 @@ if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
         print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
     elif world_size > 1:
         # Auto-inicialización multi-GPU con DataParallel optimizado
+        # Asegurar que todos los parámetros estén en cuda:0 antes de DataParallel
+        model = model.to('cuda:0')
         device_ids = list(range(torch.cuda.device_count()))
         model = nn.DataParallel(model, device_ids=device_ids, output_device=0)
         
