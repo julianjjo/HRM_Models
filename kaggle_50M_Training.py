@@ -306,8 +306,8 @@ KAGGLE_CONFIG = {
     'memory_cleanup_steps': 30,   # Limpieza frecuente para single-GPU
     'dataset_cache_dir': '/kaggle/tmp/datasets' if IN_KAGGLE else './cache',
     'output_dir': '/kaggle/working' if IN_KAGGLE else './output',
-    'multi_gpu_enabled': True,   # Multi-GPU habilitado con arreglos de device sync
-    'force_single_gpu': True,    # Forzar single-GPU hasta resolver problemas de device sync
+    'multi_gpu_enabled': False,  # Multi-GPU DESHABILITADO - problemas de device sync
+    'force_single_gpu': True,    # FORZAR single-GPU para estabilidad completa
     'multi_gpu_experimental': False,  # Solo para debugging avanzado
     'single_gpu_high_performance': True,  # Usar configuración optimizada para single-GPU
 }
@@ -1236,19 +1236,17 @@ def main_kaggle_training():
         num_gpus = torch.cuda.device_count()
         device = torch.device("cuda:0")  # Siempre usar cuda:0 como device principal para DataParallel
         
-        if num_gpus > 1 and not KAGGLE_CONFIG['force_single_gpu']:
-            print(f"🔥 Multi-GPU DETECTADO: {num_gpus} GPUs disponibles")
-            print(f"   ⚠️ MODO EXPERIMENTAL: Modelo HRM complejo puede tener problemas de device sync")
-            print(f"   💡 Batch efectivo se escalará de {BATCH_SIZE * GRAD_ACCUM_STEPS} a {BATCH_SIZE * GRAD_ACCUM_STEPS * num_gpus}")
-            print(f"   🛠️ Fallback automático a single-GPU si hay errores")
-            KAGGLE_CONFIG['multi_gpu_enabled'] = True
-            KAGGLE_CONFIG['multi_gpu_fallback_attempted'] = False
-        else:
-            if KAGGLE_CONFIG['force_single_gpu']:
-                print(f"🔧 Single-GPU FORZADO (mejor estabilidad para HRM)")
-            else:
-                print(f"📱 Single-GPU mode: 1 GPU disponible")
-            KAGGLE_CONFIG['multi_gpu_enabled'] = False
+        # FORZAR SINGLE-GPU SIEMPRE hasta resolver problemas de device sync
+        if num_gpus > 1:
+            print(f"🔥 {num_gpus} GPUs detectadas, pero FORZANDO single-GPU mode")
+            print(f"   ⚠️ Multi-GPU deshabilitado: Problemas de device sync con modelo HRM complejo")
+            print(f"   🚀 Usando single-GPU optimizada con batch size aumentado (12 vs 6)")
+            print(f"   💡 Batch efectivo: 72 (12×6) - rendimiento comparable")
+        
+        # SIEMPRE usar single-GPU independientemente del hardware disponible
+        print(f"🔧 Single-GPU FORZADO (máxima estabilidad para HRM)")
+        KAGGLE_CONFIG['multi_gpu_enabled'] = False
+        KAGGLE_CONFIG['force_single_gpu'] = True
     else:
         device = torch.device("cpu")
         num_gpus = 0
@@ -1342,7 +1340,7 @@ def main_kaggle_training():
     config = HRMKaggleConfig(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **model_params)
     model = HRMKaggleModel(config).to(device)
     
-    # Envolver modelo para multi-GPU si es necesario
+    # NO USAR DataParallel - Single-GPU mode forzado
     if KAGGLE_CONFIG['multi_gpu_enabled']:
         print(f"🔗 Envolviendo modelo con DataParallel para {num_gpus} GPUs")
         print(f"   📈 Distribuyendo cargas de trabajo entre GPUs...")
@@ -1354,6 +1352,14 @@ def main_kaggle_training():
         print(f"   🚀 CuDNN benchmark habilitado")
         print(f"   💾 Memoria distribuida entre {num_gpus} GPUs")
         print(f"   🔄 Gradientes sincronizados automáticamente")
+    else:
+        print(f"📱 Modelo en single-GPU mode - Sin DataParallel")
+        # Optimizaciones para single-GPU
+        torch.backends.cudnn.benchmark = True
+        print(f"⚡ Optimizaciones single-GPU activadas:")
+        print(f"   🚀 CuDNN benchmark habilitado")
+        print(f"   💾 Memoria optimizada para GPU única")
+        print(f"   🔧 Gradient checkpointing habilitado")
     
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parámetros del modelo: {total_params:,}")
