@@ -307,7 +307,7 @@ KAGGLE_CONFIG = {
     'dataset_cache_dir': '/kaggle/tmp/datasets' if IN_KAGGLE else './cache',
     'output_dir': '/kaggle/working' if IN_KAGGLE else './output',
     'multi_gpu_enabled': False,  # Se configurará automáticamente
-    'force_single_gpu': False,   # Forzar single-GPU para debugging
+    'force_single_gpu': True,    # Forzar single-GPU (multi-GPU tiene problemas de device)
 }
 
 # ==============================================================================
@@ -316,8 +316,8 @@ KAGGLE_CONFIG = {
 
 SEED = 42
 BLOCK_SIZE = 768  # Optimizado para T4/P100
-BATCH_SIZE = 4    # Optimizado para T4/P100
-GRAD_ACCUM_STEPS = 8  # Batch efectivo de 32
+BATCH_SIZE = 6    # Optimizado para single-GPU T4/P100 (aumentado de 4)
+GRAD_ACCUM_STEPS = 6  # Batch efectivo de 36 (balanceado)
 LEARNING_RATE_MAX = 8e-4
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.1
@@ -1057,8 +1057,11 @@ def custom_collate_fn(batch):
 def main_kaggle_training():
     """Función principal de entrenamiento SIN dependencias de HuggingFace
     
-    Para debugging de problemas multi-GPU, configura:
-    KAGGLE_CONFIG['force_single_gpu'] = True
+    NOTA: Multi-GPU deshabilitado por defecto debido a problemas de sincronización
+    de device en RMSNorm y otros componentes con DataParallel.
+    
+    Para habilitar multi-GPU (experimental):
+    KAGGLE_CONFIG['force_single_gpu'] = False
     """
     print("🚀 Iniciando entrenamiento HRM en Kaggle SIN HuggingFace")
     
