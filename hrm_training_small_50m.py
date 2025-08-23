@@ -199,7 +199,7 @@ class HRMText1Config(PretrainedConfig):
                  dropout=0.1,
                  halt_max_steps=12,         # Más pasos para secuencias largas
                  ponder_loss_weight=1e-2,
-                 halt_bias_init=-2.2,
+                 halt_bias_init=-0.5,         # Bias conservador para estabilidad
                  use_rotary_embeddings=True, # NUEVO: RoPE
                  rotary_embedding_base=10000,
                  use_flash_attention=True,   # NUEVO: Flash Attention
@@ -591,34 +591,66 @@ class HRMText1(PreTrainedModel, GenerationMixin):
         
         loss = None
         if labels is not None:
-            # Calcular pérdida de lenguaje
+            # Validar que no hay NaN en logits antes del cálculo de loss
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                print("⚠️ NaN/Inf detectado en logits finales")
+                logits = torch.where(torch.isnan(logits) | torch.isinf(logits), 
+                                   torch.zeros_like(logits), logits)
+            
+            # Calcular pérdida de lenguaje con validación robusta
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
             lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
             
-            # Pérdida de ponderación (ponder loss)
-            ponder_loss = torch.mean(n_updates)
+            # Validar loss de lenguaje
+            if torch.isnan(lm_loss) or torch.isinf(lm_loss):
+                print("⚠️ NaN/Inf detectado en cross entropy loss")
+                lm_loss = torch.tensor(1e-6, device=lm_loss.device, requires_grad=True)
             
-            # Q-learning loss para adaptive computation
+            # Pérdida de ponderación con estabilidad mejorada
+            n_updates_safe = torch.clamp(n_updates, min=1e-6, max=10.0)  # Evitar valores extremos
+            ponder_loss = torch.mean(n_updates_safe)
+            
+            if torch.isnan(ponder_loss) or torch.isinf(ponder_loss):
+                print("⚠️ NaN/Inf detectado en ponder loss")
+                ponder_loss = torch.tensor(0.0, device=lm_loss.device)
+            
+            # Q-learning loss para adaptive computation con validación
             q_learning_loss = torch.tensor(0.0, device=device, requires_grad=True)
             if q_loss_accumulator:
                 # Calcular recompensa basada en la pérdida de lenguaje (menor pérdida = mayor recompensa)
                 reward = -lm_loss.detach()  # Recompensa inversa a la pérdida
                 
-                # Q-learning loss: minimize TD error
+                # Q-learning loss: minimize TD error con validación
                 for q_values in q_loss_accumulator:
                     # Target Q-value basado en la recompensa
                     target_q = reward.expand_as(q_values[..., 0])
                     current_q = q_values[..., 1]  # Q-value for halt action
+                    
+                    # Validar q_values antes del MSE
+                    if torch.isnan(current_q).any() or torch.isnan(target_q).any():
+                        print("⚠️ NaN detectado en Q-values")
+                        continue
+                    
                     q_learning_loss = q_learning_loss + F.mse_loss(current_q, target_q)
                 
-                q_learning_loss = q_learning_loss / len(q_loss_accumulator)
+                q_learning_loss = q_learning_loss / max(len(q_loss_accumulator), 1)
+                
+                # Validar Q-learning loss
+                if torch.isnan(q_learning_loss) or torch.isinf(q_learning_loss):
+                    print("⚠️ NaN/Inf detectado en Q-learning loss")
+                    q_learning_loss = torch.tensor(0.0, device=device)
             
-            # Pérdida total con Q-learning
+            # Pérdida total con Q-learning y validación final
             loss = (lm_loss + 
                    self.config.ponder_loss_weight * ponder_loss +
                    0.01 * q_learning_loss)  # Small weight for Q-learning
+            
+            # Validación final del loss total
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("⚠️ NaN/Inf detectado en loss total - usando loss seguro")
+                loss = torch.tensor(1e-6, device=lm_loss.device, requires_grad=True)
         
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
@@ -849,7 +881,7 @@ GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper efic
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 8e-4  # Reducido significativamente para datasets grandes
+LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad numérica (migrado desde Kaggle)
 LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
@@ -870,7 +902,7 @@ MODEL_PARAMS = {
     "dropout": 0.1,
     "halt_max_steps": 6,               # Pasos optimizados para modelo 50M
     "ponder_loss_weight": 1e-2,
-    "halt_bias_init": -2.2,
+    "halt_bias_init": -0.5,            # Bias inicial más conservador para estabilidad
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
@@ -2409,7 +2441,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 8e-4   # LR reducido para fine-tuning con nuevo dataset
+    NEW_LEARNING_RATE = 2e-4   # LR reducido para estabilidad (sincronizado con MAX)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
@@ -2526,16 +2558,25 @@ def main_training():
                 if hasattr(model, 'module') and loss.dim() > 0:
                     loss = loss.mean()
             
-            # Backward pass
-            if loss is not None and torch.isfinite(loss):
-                scaler.scale(loss).backward()
-                epoch_loss += loss.item() * GRAD_ACCUM_STEPS
-                epoch_steps += 1
+            # Validar loss y backward pass con detección NaN robusta
+            if loss is not None:
+                # Verificar si el loss es nan/inf (mejora desde Kaggle)
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"⚠️ Loss inválido detectado: {loss.item()}")
+                    # Saltar este batch
+                    continue
+                
+                if torch.isfinite(loss):
+                    scaler.scale(loss).backward()
+                    epoch_loss += loss.item() * GRAD_ACCUM_STEPS
+                    epoch_steps += 1
                 
                 if (i + 1) % GRAD_ACCUM_STEPS == 0:
-                    # Gradient clipping y update
+                    # Gradient clipping más agresivo para prevenir explosión de gradientes
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                    if grad_norm > 10.0:
+                        print(f"⚠️ Gradientes grandes detectados: {grad_norm:.2f}")
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
