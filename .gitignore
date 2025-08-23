@@ -218,4 +218,4 @@ hrm_models_*_output/
 *.bin
 *.safetensors
 tensorboard_logs/
-*.DS_Store
+*.DS_Storedolma_data/
