@@ -1055,6 +1055,76 @@ def custom_collate_fn(batch):
         'attention_mask': torch.stack(attention_mask).long()
     }
 
+def test_model_kaggle():
+    """Prueba el modelo final y muestra generación de ejemplo"""
+    print("\n🧪 Probando generación del modelo final...")
+    
+    # Variables globales necesarias
+    global tokenizer, device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    try:
+        # Cargar modelo guardado
+        model_path = KAGGLE_CONFIG['output_dir']
+        if os.path.exists(model_path):
+            # Cargar configuración
+            config_path = os.path.join(model_path, "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config_dict = json.load(f)
+                config = HRMKaggleConfig(**config_dict)
+            else:
+                config = HRMKaggleConfig(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
+            
+            # Cargar modelo
+            test_model = HRMKaggleModel(config)
+            model_file = os.path.join(model_path, "pytorch_model.bin")
+            if os.path.exists(model_file):
+                test_model.load_state_dict(torch.load(model_file, map_location='cpu'))
+                test_model = test_model.to(device)
+                test_model.eval()
+                
+                # Probar generación simple
+                prompts = [
+                    "The future of AI is",
+                    "In machine learning, we",
+                    "Deep neural networks"
+                ]
+                
+                print("📝 Ejemplos de generación:")
+                for prompt in prompts[:2]:  # Solo 2 para Kaggle
+                    try:
+                        # Tokenizar entrada
+                        inputs = tokenizer.encode(prompt, return_tensors="pt")
+                        if hasattr(inputs, 'to'):
+                            inputs = inputs.to(device)
+                        elif isinstance(inputs, dict) and 'input_ids' in inputs:
+                            inputs = inputs['input_ids']
+                            if hasattr(inputs, 'to'):
+                                inputs = inputs.to(device)
+                        else:
+                            # Fallback para tokenizer simple
+                            inputs = torch.tensor([inputs], device=device)
+                        
+                        # Generar
+                        with torch.no_grad():
+                            outputs = test_model.generate(inputs, max_new_tokens=20, temperature=0.8)
+                            response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                            print(f"   Prompt: {prompt}")
+                            print(f"   Output: {response[:100]}...")
+                    except Exception as gen_e:
+                        print(f"   ⚠️ Error en prompt '{prompt}': {gen_e}")
+                        continue
+                        
+                print("✅ Test de generación completado")
+            else:
+                print("⚠️ Archivo de modelo no encontrado para test")
+        else:
+            print("⚠️ Directorio del modelo no encontrado para test")
+            
+    except Exception as e:
+        print(f"❌ Error en test del modelo: {e}")
+
 def main_kaggle_training():
     """Función principal de entrenamiento SIN dependencias de HuggingFace
     
@@ -1236,6 +1306,12 @@ def main_kaggle_training():
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs.loss
                 
+                # Verificar si el loss es nan/inf
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"⚠️ Loss inválido detectado: {loss.item()}")
+                    # Saltar este batch
+                    continue
+                
                 # Para DataParallel, la loss puede venir como tensor con múltiples valores
                 if KAGGLE_CONFIG['multi_gpu_enabled'] and hasattr(loss, 'dim') and loss.dim() > 0:
                     loss = loss.mean()
@@ -1249,7 +1325,10 @@ def main_kaggle_training():
                 
                 if (i + 1) % GRAD_ACCUM_STEPS == 0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    # Clip más agresivo para prevenir explosión de gradientes
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                    if grad_norm > 10.0:
+                        print(f"⚠️ Gradientes grandes detectados: {grad_norm:.2f}")
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
