@@ -450,7 +450,7 @@ class HRMText1Config(SimpleConfig):
                  dropout=0.1,
                  halt_max_steps=12,         # Más pasos para secuencias largas
                  ponder_loss_weight=1e-2,
-                 halt_bias_init=-2.2,
+                 halt_bias_init=-0.5,         # Bias conservador para estabilidad
                  use_rotary_embeddings=True, # NUEVO: RoPE
                  rotary_embedding_base=10000,
                  use_flash_attention=True,   # NUEVO: Flash Attention
@@ -481,7 +481,18 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(n_embd))
     
     def forward(self, x):
-        return self.weight * (x * torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps))
+        # Fix para estabilidad numérica y compatibilidad multi-GPU
+        device = x.device
+        
+        # Calcular RMS norm con tensors en el device correcto
+        mean_square = torch.mean(x**2, dim=-1, keepdim=True)
+        eps_tensor = torch.tensor(self.eps, device=device, dtype=x.dtype)
+        rms = torch.rsqrt(mean_square + eps_tensor)
+        
+        # Asegurar que weight esté en el device correcto
+        weight = self.weight.to(device)
+        
+        return weight * (x * rms)
 
 class SwiGLUMuchPelu(nn.Module):
     def __init__(self, n_embd, d_ff, dropout=0.1):
@@ -1100,7 +1111,7 @@ GRAD_ACCUM_STEPS = 4     # Batch efectivo de 128 para entrenamiento eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 8e-4  # Reducido significativamente para datasets grandes
+LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad numérica (migrado desde Kaggle)
 LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
@@ -2664,7 +2675,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 8e-4   # LR reducido para fine-tuning con nuevo dataset
+    NEW_LEARNING_RATE = 2e-4   # LR reducido para estabilidad (sincronizado con MAX)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 

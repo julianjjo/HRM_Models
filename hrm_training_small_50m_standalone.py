@@ -450,7 +450,7 @@ class HRMText1Config(SimpleConfig):
                  dropout=0.1,
                  halt_max_steps=12,         # Más pasos para secuencias largas
                  ponder_loss_weight=1e-2,
-                 halt_bias_init=-2.2,
+                 halt_bias_init=-0.5,         # Bias conservador para estabilidad
                  use_rotary_embeddings=True, # NUEVO: RoPE
                  rotary_embedding_base=10000,
                  use_flash_attention=True,   # NUEVO: Flash Attention
@@ -481,7 +481,18 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(n_embd))
     
     def forward(self, x):
-        return self.weight * (x * torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps))
+        # Fix para estabilidad numérica y compatibilidad multi-GPU
+        device = x.device
+        
+        # Calcular RMS norm con tensors en el device correcto
+        mean_square = torch.mean(x**2, dim=-1, keepdim=True)
+        eps_tensor = torch.tensor(self.eps, device=device, dtype=x.dtype)
+        rms = torch.rsqrt(mean_square + eps_tensor)
+        
+        # Asegurar que weight esté en el device correcto
+        weight = self.weight.to(device)
+        
+        return weight * (x * rms)
 
 class SwiGLUMuchPelu(nn.Module):
     def __init__(self, n_embd, d_ff, dropout=0.1):
@@ -732,6 +743,9 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
             ) for _ in range(config.n_layers)
         ])
         
+        # Inicialización robusta de pesos para evitar NaN
+        self._init_weights()
+        
         # Inicializar bias de halt
         with torch.no_grad():
             for halt_head in self.halt_heads:
@@ -756,6 +770,25 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
         """Para compatibilidad con transformers"""
         if isinstance(module, HRMText1):
             module.gradient_checkpointing = value
+    
+    def _init_weights(self):
+        """Inicialización robusta de pesos para evitar NaN (migrado desde Kaggle)"""
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                if param.dim() >= 2:
+                    # Inicialización Xavier/Glorot para pesos 2D+
+                    nn.init.xavier_normal_(param, gain=0.02)
+                else:
+                    # Inicialización normal para pesos 1D
+                    nn.init.normal_(param, mean=0.0, std=0.02)
+            elif 'bias' in name and 'halt' not in name:
+                # Inicializar bias a 0 (excepto halt bias)
+                nn.init.constant_(param, 0.0)
+        
+        # Inicialización específica para embeddings
+        nn.init.normal_(self.token_embeddings.weight, mean=0.0, std=0.02)
+        if self.pos_embeddings is not None:
+            nn.init.normal_(self.pos_embeddings.weight, mean=0.0, std=0.02)
     
     def forward(self, input_ids, labels=None, attention_mask=None, past_key_values=None, **kwargs):
         batch_size, seq_len = input_ids.shape
@@ -1101,7 +1134,7 @@ GRAD_ACCUM_STEPS = 6     # Batch efectivo de 36 para mejor estabilidad y uso de 
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 8e-4  # Reducido significativamente para datasets grandes
+LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad numérica (migrado desde Kaggle)
 LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
@@ -1123,7 +1156,7 @@ MODEL_PARAMS = {
     "dropout": 0.1,
     "halt_max_steps": 6,               # Pasos optimizados para modelo 50M
     "ponder_loss_weight": 1e-2,
-    "halt_bias_init": -2.2,
+    "halt_bias_init": -0.5,            # Bias inicial más conservador para estabilidad
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": False,      # Deshabilitado para mejor compatibilidad y menor memoria
     "gradient_checkpointing": True,    # Habilitado para optimización de memoria
@@ -2680,7 +2713,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 8e-4   # LR reducido para fine-tuning con nuevo dataset
+    NEW_LEARNING_RATE = 2e-4   # LR reducido para estabilidad (sincronizado con MAX)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
