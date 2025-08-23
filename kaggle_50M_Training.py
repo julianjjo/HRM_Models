@@ -307,6 +307,7 @@ KAGGLE_CONFIG = {
     'dataset_cache_dir': '/kaggle/tmp/datasets' if IN_KAGGLE else './cache',
     'output_dir': '/kaggle/working' if IN_KAGGLE else './output',
     'multi_gpu_enabled': False,  # Se configurará automáticamente
+    'force_single_gpu': False,   # Forzar single-GPU para debugging
 }
 
 # ==============================================================================
@@ -332,13 +333,13 @@ MODEL_PARAMS = {
     "n_layers": 8,
     "d_ff": 1536,
     "dropout": 0.1,
-    "halt_max_steps": 4,
+    "halt_max_steps": 6,               # Pasos optimizados para modelo 50M (desde original)
     "ponder_loss_weight": 1e-2,
-    "halt_bias_init": -2.0,
-    "use_rotary_embeddings": True,
-    "use_flash_attention": False,
+    "halt_bias_init": -2.2,            # Bias inicial desde original
+    "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
+    "use_flash_attention": False,      # Deshabilitado para compatibilidad Kaggle
     "gradient_checkpointing": True,
-    "h_update_period": 2,
+    "h_update_period": 3,              # H-module se actualiza cada 3 pasos para 50M (desde original)
 }
 
 # Dataset configuration - SIN KAGGLEHUB para evitar problemas de conexión
@@ -395,7 +396,7 @@ set_seed(SEED)
 # ==============================================================================
 
 class RotaryEmbedding(nn.Module):
-    """Rotary Position Embedding optimizado para Kaggle"""
+    """Rotary Position Embedding optimizado para Kaggle y multi-GPU"""
     def __init__(self, dim, max_position_embeddings=2048, base=10000):
         super().__init__()
         self.dim = dim
@@ -405,22 +406,28 @@ class RotaryEmbedding(nn.Module):
         inv_freq = 1. / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
         self.register_buffer("inv_freq", inv_freq)
         
-        self._seq_len_cached = 0
-        self._cos_cached = None
-        self._sin_cached = None
+        # Pre-compute para evitar problemas multi-GPU
+        self._precompute_cos_sin_cache(max_position_embeddings)
+    
+    def _precompute_cos_sin_cache(self, max_seq_len):
+        """Pre-computar cos/sin para evitar problemas de device en multi-GPU"""
+        t = torch.arange(max_seq_len).type_as(self.inv_freq)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos_cached = emb.cos()[None, :, None, :] 
+        sin_cached = emb.sin()[None, :, None, :]
         
-    def _update_cos_sin_cache(self, seq_len, device):
-        if seq_len > self._seq_len_cached:
-            self._seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=device).type_as(self.inv_freq)
-            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            self._cos_cached = emb.cos()[None, :, None, :]
-            self._sin_cached = emb.sin()[None, :, None, :]
+        # Registrar como buffers para multi-GPU
+        self.register_buffer("cos_cached", cos_cached)
+        self.register_buffer("sin_cached", sin_cached)
     
     def forward(self, x, seq_len):
-        self._update_cos_sin_cache(seq_len, x.device)
-        return self._cos_cached[:, :seq_len, :, :], self._sin_cached[:, :seq_len, :, :]
+        # Usar cache pre-computado
+        seq_len = min(seq_len, self.cos_cached.size(1))
+        return (
+            self.cos_cached[:, :seq_len, :, :].to(x.device),
+            self.sin_cached[:, :seq_len, :, :].to(x.device)
+        )
 
 def rotate_half(x):
     x1, x2 = x[..., :x.shape[-1]//2], x[..., x.shape[-1]//2:]
@@ -1048,7 +1055,11 @@ def custom_collate_fn(batch):
     }
 
 def main_kaggle_training():
-    """Función principal de entrenamiento SIN dependencias de HuggingFace"""
+    """Función principal de entrenamiento SIN dependencias de HuggingFace
+    
+    Para debugging de problemas multi-GPU, configura:
+    KAGGLE_CONFIG['force_single_gpu'] = True
+    """
     print("🚀 Iniciando entrenamiento HRM en Kaggle SIN HuggingFace")
     
     # Configurar dispositivo y detectar multi-GPU
@@ -1056,11 +1067,15 @@ def main_kaggle_training():
         num_gpus = torch.cuda.device_count()
         device = torch.device("cuda:0")
         
-        if num_gpus > 1:
+        if num_gpus > 1 and not KAGGLE_CONFIG['force_single_gpu']:
             print(f"🔥 Multi-GPU detectado: {num_gpus} GPUs disponibles")
             KAGGLE_CONFIG['multi_gpu_enabled'] = True
         else:
-            print(f"📱 Single-GPU mode: 1 GPU disponible")
+            if KAGGLE_CONFIG['force_single_gpu']:
+                print(f"🔧 Forzando Single-GPU mode (debugging)")
+            else:
+                print(f"📱 Single-GPU mode: 1 GPU disponible")
+            KAGGLE_CONFIG['multi_gpu_enabled'] = False
     else:
         device = torch.device("cpu")
         num_gpus = 0
