@@ -325,6 +325,7 @@ WARMUP_RATIO = 0.1
 NUM_EPOCHS = 2  # Reducido para tiempo de Kaggle
 MIXED_PRECISION = True
 EVAL_STEPS = 100
+CHECKPOINT_STEPS = 1000  # Guardar checkpoint cada 1000 pasos
 
 # Configuración del modelo (50M parámetros)
 MODEL_PARAMS = {
@@ -1254,6 +1255,13 @@ def main_kaggle_training():
                     optimizer.zero_grad()
                     scheduler.step()
                     global_step += 1
+                    
+                    # Guardar checkpoint cada CHECKPOINT_STEPS
+                    if global_step % CHECKPOINT_STEPS == 0:
+                        print(f"\n💾 Guardando checkpoint en paso {global_step}")
+                        save_checkpoint_kaggle(model, optimizer, scheduler, scaler, 
+                                             epoch, global_step, best_val_loss, CHECKPOINT_PATH, tokenizer)
+                        print(f"✅ Checkpoint guardado exitosamente")
                     
                     current_lr = scheduler.get_last_lr()[0]
                     
