@@ -9,10 +9,13 @@ VERSIÓN SMALL: ~50M parámetros optimizado para GPUs Kaggle (T4/P100)
 - Dataset: carlmcbrideellis/llm-mistral-7b-instruct-texts
 """
 
-import os, random, math, time, gc
+import os, random, math, time, gc, json
 from typing import List, Dict, Optional, Tuple
 import warnings
 warnings.filterwarnings('ignore')
+
+# Imports adicionales necesarios
+from tqdm import tqdm
 
 # Configurar para Kaggle automáticamente
 IN_KAGGLE = os.path.exists('/kaggle')
@@ -60,18 +63,59 @@ if IN_KAGGLE and torch.cuda.is_available():
         with torch.cuda.device(i):
             torch.cuda.empty_cache()
 
+# Clases base necesarias para compatibilidad (DEFINIR ANTES DE SU USO)
+class SimpleConfig:
+    """Configuración base simple para reemplazar PretrainedConfig"""
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+    
+    def to_dict(self):
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+
+class SimplePreTrainedModel(nn.Module):
+    """Modelo base simple para reemplazar PreTrainedModel"""
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+    
+    def generate(self, input_ids, max_new_tokens=50, temperature=0.8, do_sample=True, pad_token_id=0, **kwargs):
+        """Generación simple de texto"""
+        self.eval()
+        batch_size, seq_len = input_ids.shape
+        
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                outputs = self.forward(input_ids)
+                logits = outputs.logits[:, -1, :] / temperature
+                
+                if do_sample:
+                    probs = F.softmax(logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                else:
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                
+                input_ids = torch.cat([input_ids, next_token], dim=1)
+                
+                if next_token.item() == pad_token_id:
+                    break
+        
+        return input_ids
+
+class SimpleModelOutput:
+    """Output simple para reemplazar transformers ModelOutput"""
+    def __init__(self, loss=None, logits=None, **kwargs):
+        self.loss = loss
+        self.logits = logits
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
 # Tokenizer alternativo SIN Hugging Face para Kaggle
-try:
-    from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_cosine_schedule_with_warmup
-    TRANSFORMERS_AVAILABLE = True
-    print("⚠️  Transformers disponible pero puede fallar en Kaggle")
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-    print("❌ Transformers no disponible")
+TRANSFORMERS_AVAILABLE = False
+print("🔧 Usando implementación standalone para Kaggle")
 
 # Tokenizer básico personalizado para Kaggle
 import re
-import json
 from collections import Counter
 
 class SimpleTokenizer:
