@@ -2330,17 +2330,34 @@ print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.\n")
 # Configurar los splits según el dataset
 if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
     # Para datasets únicos, aplicar la lógica original
-    if "validation" in raw_datasets:
-        raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
-        raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
-    else:
-        # Para datasets sin split de validación, dividir el entrenamiento
-        print("Dividiendo dataset de entrenamiento para crear validación...")
-        total_for_split = num_train_samples + num_val_samples
-        train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+    try:
+        # Verificar si tiene split de validación
+        has_validation = False
+        try:
+            # Para streaming datasets, verificar si validation existe
+            val_iter = iter(raw_datasets["validation"])
+            has_validation = True
+        except (KeyError, TypeError):
+            has_validation = False
         
-        # Crear splits manualmente
-        raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
+        if has_validation:
+            raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
+            raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
+        else:
+            # Para datasets sin split de validación, dividir el entrenamiento
+            print("Dividiendo dataset de entrenamiento para crear validación...")
+            total_for_split = num_train_samples + num_val_samples
+            train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+            
+            # Crear splits manualmente
+            raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
+            raw_datasets["validation"] = train_dataset.take(num_val_samples)
+    except Exception as e:
+        print(f"⚠️ Error configurando splits del dataset: {e}")
+        print("🔄 Usando configuración básica...")
+        # Fallback: usar el dataset train directamente y crear validation simple
+        train_dataset = raw_datasets["train"].shuffle(seed=SEED, buffer_size=10_000)
+        raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)  
         raw_datasets["validation"] = train_dataset.take(num_val_samples)
 # Para dataset mezclado, los splits ya están configurados
 
