@@ -308,6 +308,22 @@ class SimpleCosineScheduler:
     
     def get_last_lr(self):
         return [param_group['lr'] for param_group in self.optimizer.param_groups]
+    
+    def state_dict(self):
+        """Retorna el estado del scheduler para checkpoint"""
+        return {
+            'num_warmup_steps': self.num_warmup_steps,
+            'num_training_steps': self.num_training_steps,
+            'current_step': self.current_step,
+            'base_lr': self.base_lr
+        }
+
+    def load_state_dict(self, state_dict):
+        """Carga el estado del scheduler desde checkpoint"""
+        self.num_warmup_steps = state_dict['num_warmup_steps']
+        self.num_training_steps = state_dict['num_training_steps']
+        self.current_step = state_dict['current_step']
+        self.base_lr = state_dict['base_lr']
 
 # Función optimizada de limpieza de memoria
 def optimized_memory_cleanup():
