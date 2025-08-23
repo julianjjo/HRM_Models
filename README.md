@@ -1,6 +1,6 @@
 # HRM-Models: Hierarchical Reasoning Model for Text Generation
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1c4exU-zMt4SuT1kRlwQQXlLPaiazEDCf?usp=sharing)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1hsI1OiXPMpkFg4agA8MTAtV60kHJstG6?usp=sharing)
 
 A family of transformer models with Hierarchical Reasoning Module (HRM) architecture trained on multiple high-quality text datasets. These models feature adaptive computation with pondering mechanisms for improved text generation quality, available in multiple sizes from 10M to 1B parameters.
 
