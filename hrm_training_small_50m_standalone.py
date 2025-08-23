@@ -1035,11 +1035,12 @@ HF_REPO_ID = f"dreamwar/HRM-Models-Small-50M"
 SEED = 42
 NUM_EPOCHS = 4             # Épocas para entrenamiento 50M
 CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
-BLOCK_SIZE = 1024        # Contexto expandido para mejor calidad de modelo (1024 tokens)
+# Configuración optimizada para memoria y rendimiento (migrada desde Kaggle)
+BLOCK_SIZE = 768         # Optimizado para memoria eficiente (768 tokens - 25% menos memoria que 1024)
 
-# Configuración de entrenamiento para modelo 50M optimizada para A100/H100
-BATCH_SIZE = 1        # Batch balanceado para modelo 50M (~8GB uso estimado)
-GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
+# Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
+BATCH_SIZE = 6           # Optimizado para single-GPU con mejor throughput (6x más eficiente que batch=1)
+GRAD_ACCUM_STEPS = 6     # Batch efectivo de 36 para mejor estabilidad y uso de memoria
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
@@ -1052,6 +1053,7 @@ WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
+FORCE_SINGLE_GPU = True           # Forzar single-GPU (multi-GPU tiene problemas de device)
 
 # --- CONFIGURACIÓN PARA MODELO MICRO OPTIMIZADO PARA H200 (~25M PARÁMETROS) ---
 # Configuración micro expandida para aprovechar mejor hardware potente (H200)
@@ -1066,8 +1068,8 @@ MODEL_PARAMS = {
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
-    "use_flash_attention": True,       # Flash Attention si está disponible
-    "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
+    "use_flash_attention": False,      # Deshabilitado para mejor compatibilidad y menor memoria
+    "gradient_checkpointing": True,    # Habilitado para optimización de memoria
     "h_update_period": 3,              # H-module se actualiza cada 3 pasos para 50M 
 }
 
@@ -2273,7 +2275,7 @@ tokenized_splits = {}
 
 # Configuración para multi-GPU (necesario antes del loop de tokenización)
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-is_multi_gpu = num_gpus > 1
+is_multi_gpu = num_gpus > 1 and not FORCE_SINGLE_GPU
 safe_num_workers = get_dataloader_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
 tokenization_workers = get_tokenization_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
 
@@ -2498,8 +2500,23 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
     model = HRMText1(config).to(device)
 
-# Envolver modelo para multi-GPU (solo si no es import-only)
-if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
+# === CONFIGURACIÓN DE GPU Y MULTI-GPU ===
+print(f"\n🔧 Configuración GPU:")
+print(f"   💻 GPUs disponibles: {num_gpus}")
+print(f"   🎯 Forzar single-GPU: {FORCE_SINGLE_GPU}")
+print(f"   🔗 Multi-GPU habilitado: {is_multi_gpu}")
+
+if num_gpus > 1 and not FORCE_SINGLE_GPU:
+    print(f"🚀 Configurando para entrenamiento multi-GPU con {num_gpus} GPUs")
+    # La lógica multi-GPU se maneja más abajo
+elif FORCE_SINGLE_GPU:
+    print(f"⚠️  Multi-GPU deshabilitado por configuración (FORCE_SINGLE_GPU=True)")
+    print(f"   💡 Esto evita problemas de sincronización de device en RMSNorm y otros componentes")
+else:
+    print(f"ℹ️  Usando single-GPU por disponibilidad de hardware")
+
+# Envolver modelo para multi-GPU (solo si no es import-only y no está forzado single-GPU)
+if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed and not FORCE_SINGLE_GPU:
     if world_size > 1 and 'RANK' in os.environ:
         # Entrenamiento distribuido real con torchrun
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
