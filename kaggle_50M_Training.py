@@ -1258,7 +1258,17 @@ def main_kaggle_training():
                     
                     # Guardar checkpoint cada CHECKPOINT_STEPS
                     if global_step % CHECKPOINT_STEPS == 0:
+                        current_loss = loss.item() * GRAD_ACCUM_STEPS
+                        current_lr = scheduler.get_last_lr()[0]
+                        elapsed_time = time.time() - training_start_time
+                        samples_per_sec = (global_step * effective_batch_size) / (elapsed_time + 1e-8)
+                        
                         print(f"\n💾 Guardando checkpoint en paso {global_step}")
+                        print(f"   📊 Loss actual: {current_loss:.4f}")
+                        print(f"   🏆 Mejor loss: {best_val_loss:.4f}")
+                        print(f"   📈 Learning rate: {current_lr:.2e}")
+                        print(f"   🚀 Throughput: {samples_per_sec:.0f} samples/sec")
+                        
                         save_checkpoint_kaggle(model, optimizer, scheduler, scaler, 
                                              epoch, global_step, best_val_loss, CHECKPOINT_PATH, tokenizer)
                         print(f"✅ Checkpoint guardado exitosamente")
