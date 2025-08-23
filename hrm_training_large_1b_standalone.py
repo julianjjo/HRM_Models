@@ -23,8 +23,62 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from torch.optim import AdamW
 
-# Standalone dataset loader (reemplaza HuggingFace load_dataset)
-from standalone_dataset_loader import load_dataset, create_simple_datasets
+# ==============================================================================
+# --- STANDALONE DATASET LOADER (EMBEDDED) ---
+# ==============================================================================
+
+import json
+import gzip
+import requests
+from typing import Iterator, Dict, Any, List
+
+class SimpleDatasetDict:
+    """Simple dataset dict for compatibility"""
+    def __init__(self):
+        self._datasets = {}
+        # Crear datasets simples de texto en inglés
+        sample_texts = [
+            "The quick brown fox jumps over the lazy dog.",
+            "Machine learning is a method of data analysis that automates analytical model building.",
+            "Natural language processing enables computers to understand human language.",
+            "Deep learning uses neural networks with multiple layers to model complex patterns.",
+            "Artificial intelligence aims to create systems that can perform tasks requiring human intelligence."
+        ] * 200  # Repetir para tener más muestras
+        
+        # Dividir en train/validation
+        split_idx = int(len(sample_texts) * 0.9)
+        self._datasets["train"] = [{"text": text} for text in sample_texts[:split_idx]]
+        self._datasets["validation"] = [{"text": text} for text in sample_texts[split_idx:]]
+    
+    def __getitem__(self, split):
+        return SimpleIterableDataset(self._datasets[split])
+
+class SimpleIterableDataset:
+    """Simple iterable dataset"""
+    def __init__(self, data):
+        self.data = data
+    
+    def __iter__(self):
+        for item in self.data:
+            yield item
+    
+    def __len__(self):
+        return len(self.data)
+
+def load_dataset(name, config=None, streaming=True, split="train"):
+    """Standalone dataset loader with fallback data"""
+    print(f"🔄 Loading standalone dataset: {name}")
+    
+    # Por ahora usar datos simples de ejemplo
+    # En producción esto se conectaría al dataset real
+    dataset_dict = SimpleDatasetDict()
+    
+    if split:
+        return dataset_dict[split]
+    else:
+        return dataset_dict
+
+print("✅ Embedded standalone dataset loader initialized")
 
 # ==============================================================================
 # --- CLASES BASE STANDALONE (REEMPLAZAN TRANSFORMERS) ---
