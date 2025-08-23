@@ -302,12 +302,13 @@ except ImportError:
 # Configuración específica para Kaggle multi-GPU
 KAGGLE_CONFIG = {
     'max_train_hours': 11.5,
-    'checkpoint_frequency': 200,  # Menos frecuente para multi-GPU (mejor rendimiento)
-    'memory_cleanup_steps': 50,   # Menos frecuente para multi-GPU
+    'checkpoint_frequency': 150,  # Frecuencia optimizada para single-GPU
+    'memory_cleanup_steps': 30,   # Limpieza frecuente para single-GPU
     'dataset_cache_dir': '/kaggle/tmp/datasets' if IN_KAGGLE else './cache',
     'output_dir': '/kaggle/working' if IN_KAGGLE else './output',
-    'multi_gpu_enabled': True,   # Habilitar multi-GPU para mejor rendimiento
-    'force_single_gpu': False,   # Permitir multi-GPU en Kaggle
+    'multi_gpu_enabled': True,   # Multi-GPU habilitado con arreglos de device sync
+    'force_single_gpu': False,   # Permitir multi-GPU
+    'multi_gpu_experimental': False,  # Solo para debugging avanzado
 }
 
 # ==============================================================================
@@ -316,7 +317,7 @@ KAGGLE_CONFIG = {
 
 SEED = 42
 BLOCK_SIZE = 768  # Optimizado para T4/P100
-BATCH_SIZE = 8    # Optimizado para dual-GPU T4/P100 (aumentado para 2 GPUs)
+BATCH_SIZE = 8    # Optimizado para dual-GPU T4/P100
 GRAD_ACCUM_STEPS = 4  # Batch efectivo de 64 (8*4*2_GPUs = 64)
 LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad
 LEARNING_RATE_MIN = 1e-6
@@ -484,7 +485,18 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(n_embd))
     
     def forward(self, x):
-        return self.weight * (x * torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps))
+        # Fix para DataParallel: asegurar que todos los tensors estén en el mismo device
+        device = x.device
+        
+        # Calcular RMS norm con tensors en el device correcto
+        mean_square = torch.mean(x**2, dim=-1, keepdim=True)
+        eps_tensor = torch.tensor(self.eps, device=device, dtype=x.dtype)
+        rms = torch.rsqrt(mean_square + eps_tensor)
+        
+        # Asegurar que weight esté en el device correcto
+        weight = self.weight.to(device)
+        
+        return weight * (x * rms)
 
 class SwiGLU(nn.Module):
     def __init__(self, n_embd, d_ff, dropout=0.1):
@@ -722,8 +734,8 @@ class HRMKaggleModel(SimplePreTrainedModel):
         
         z_H = torch.zeros_like(z_L)
         
-        # Máscara causal
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
+        # Máscara causal - asegurar que esté en el device correcto para DataParallel
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(device)
         
         # Variables ACT con mejor estabilidad numérica
         eps = 1e-6
@@ -1118,11 +1130,14 @@ def custom_collate_fn(batch):
     for ids in input_ids:
         if len(ids) < max_length:
             padding_length = max_length - len(ids)
-            padded_ids = torch.cat([ids, torch.full((padding_length,), 0, dtype=ids.dtype)])  # Pad con 0
-            mask = torch.cat([torch.ones(len(ids)), torch.zeros(padding_length)])
+            # Asegurar que el padding esté en el mismo device y dtype
+            padded_ids = torch.cat([ids, torch.full((padding_length,), 0, dtype=ids.dtype, device=ids.device)])
+            # Crear máscara en el mismo device
+            mask = torch.cat([torch.ones(len(ids), dtype=torch.float, device=ids.device), 
+                             torch.zeros(padding_length, dtype=torch.float, device=ids.device)])
         else:
             padded_ids = ids
-            mask = torch.ones(len(ids))
+            mask = torch.ones(len(ids), dtype=torch.float, device=ids.device)
         
         padded_input_ids.append(padded_ids)
         attention_mask.append(mask)
@@ -1205,18 +1220,20 @@ def test_model_kaggle():
 def main_kaggle_training():
     """Función principal de entrenamiento SIN dependencias de HuggingFace
     
-    ✅ Multi-GPU HABILITADO: Utiliza DataParallel para aprovechar múltiples GPUs.
+    🔥 MULTI-GPU ARREGLADO: Problemas de device sync resueltos en RMSNorm y HRM.
     Configuración automática para detectar y usar todas las GPUs disponibles.
     
+    - RMSNorm corregido para manejo correcto de tensors multi-device
     - Batch efectivo se escala automáticamente por número de GPUs
     - Optimizaciones específicas para T4/P100 en configuración dual-GPU
     """
     print("🚀 Iniciando entrenamiento HRM en Kaggle SIN HuggingFace")
     
     # Configurar dispositivo y detectar multi-GPU
+    # IMPORTANTE: DataParallel requiere que el device principal sea siempre cuda:0
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
-        device = torch.device("cuda:0")
+        device = torch.device("cuda:0")  # Siempre usar cuda:0 como device principal para DataParallel
         
         if num_gpus > 1 and not KAGGLE_CONFIG['force_single_gpu']:
             print(f"🔥 Multi-GPU ACTIVADO: {num_gpus} GPUs disponibles")
@@ -1382,7 +1399,11 @@ def main_kaggle_training():
                 return
             
             input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(device, non_blocking=True)
+            # Crear attention mask en el device correcto para DataParallel
+            if "attention_mask" in batch:
+                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            else:
+                attention_mask = torch.ones_like(input_ids, device=device)
             labels = input_ids.clone()
             
             with torch.amp.autocast(device_type=device.type, enabled=MIXED_PRECISION):
@@ -1484,7 +1505,11 @@ def main_kaggle_training():
             val_progress = tqdm(val_loader, desc="Validación", leave=False)
             for i, batch in enumerate(val_progress):
                 input_ids = batch['input_ids'].to(device)
-                attention_mask = batch.get('attention_mask', torch.ones_like(input_ids)).to(device)
+                # Crear attention mask en el device correcto para DataParallel
+                if 'attention_mask' in batch:
+                    attention_mask = batch['attention_mask'].to(device)
+                else:
+                    attention_mask = torch.ones_like(input_ids, device=device)
                 
                 with torch.amp.autocast(device_type=device.type, enabled=MIXED_PRECISION):
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
