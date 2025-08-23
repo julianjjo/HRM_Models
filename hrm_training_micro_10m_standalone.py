@@ -23,6 +23,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from torch.optim import AdamW
 
+# Standalone dataset loader (reemplaza HuggingFace load_dataset)
+from standalone_dataset_loader import load_dataset, create_simple_datasets
+
 # ==============================================================================
 # --- CLASES BASE STANDALONE (REEMPLAZAN TRANSFORMERS) ---
 # ==============================================================================
@@ -1916,11 +1919,26 @@ else:
 # Tokenizer se carga solo cuando se ejecuta el script directamente
 # Verificar si solo se está importando para usar las clases
 if not os.environ.get('HRM_IMPORT_ONLY'):
-    print("Initializing SimpleTokenizer (standalone)...")
-    tokenizer = SimpleTokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
-    # if tokenizer.pad_token is None:  # No necesario en SimpleTokenizer
-        # tokenizer.add_special_tokens  # No necesario en SimpleTokenizer({"pad_token": "<pad>"})
-    print(f"SimpleTokenizer initialized. Vocab size: {len(tokenizer)}")
+    print("Initializing SimpleTokenizer with dataset vocabulary...")
+    
+    # Crear dataset temporal para construir vocabulario
+    print("🔧 Cargando muestras de texto para construir vocabulario...")
+    temp_dataset = load_dataset("allenai/dolma", streaming=True, split="train")
+    
+    # Recolectar textos para vocabulario (máximo 1000 muestras)
+    vocab_texts = []
+    for i, sample in enumerate(temp_dataset):
+        if i >= 1000:  # Limitar para no sobrecargar memoria
+            break
+        vocab_texts.append(sample["text"])
+    
+    print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
+    
+    # Inicializar tokenizer y construir vocabulario
+    tokenizer = SimpleTokenizer(vocab_size=32000)
+    tokenizer.build_vocab(vocab_texts)
+    
+    print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
 else:
     # Solo definir variable para imports, el tokenizer se carga después
     tokenizer = None
@@ -2693,11 +2711,26 @@ def main_training():
     global best_val_loss, patience_counter, start_epoch, start_step, model, optimizer
     
     # Cargar tokenizer solo cuando se ejecuta entrenamiento
-    print("Initializing SimpleTokenizer (standalone)...")
-    tokenizer = SimpleTokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
-    # if tokenizer.pad_token is None:  # No necesario en SimpleTokenizer
-        # tokenizer.add_special_tokens  # No necesario en SimpleTokenizer({"pad_token": "<pad>"})
-    print(f"SimpleTokenizer initialized. Vocab size: {len(tokenizer)}")
+    print("Initializing SimpleTokenizer with dataset vocabulary...")
+    
+    # Crear dataset temporal para construir vocabulario
+    print("🔧 Cargando muestras de texto para construir vocabulario...")
+    temp_dataset = load_dataset("allenai/dolma", streaming=True, split="train")
+    
+    # Recolectar textos para vocabulario (máximo 1000 muestras)
+    vocab_texts = []
+    for i, sample in enumerate(temp_dataset):
+        if i >= 1000:  # Limitar para no sobrecargar memoria
+            break
+        vocab_texts.append(sample["text"])
+    
+    print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
+    
+    # Inicializar tokenizer y construir vocabulario
+    tokenizer = SimpleTokenizer(vocab_size=32000)
+    tokenizer.build_vocab(vocab_texts)
+    
+    print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
     
     # Configurar HuggingFace settings para mejor compatibilidad con Colab
     try:
