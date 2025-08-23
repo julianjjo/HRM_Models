@@ -36,8 +36,8 @@ class SimpleConfig:
     def to_dict(self):
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
-class SimpleSimplePreTrainedModel(nn.Module):
-    """Modelo base simple para reemplazar SimplePreTrainedModel"""
+class SimplePreTrainedModel(nn.Module):
+    """Modelo base simple para reemplazar PreTrainedModel"""
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -73,8 +73,8 @@ class SimpleModelOutput:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-class SimpleSimpleGenerationMixin:
-    """Mixin simple para reemplazar SimpleGenerationMixin"""
+class SimpleGenerationMixin:
+    """Mixin simple para reemplazar GenerationMixin"""
     pass
 
 # ==============================================================================
