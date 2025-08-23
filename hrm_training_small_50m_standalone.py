@@ -1897,11 +1897,10 @@ else:
 # Tokenizer se carga solo cuando se ejecuta el script directamente
 # Verificar si solo se está importando para usar las clases
 if not os.environ.get('HRM_IMPORT_ONLY'):
-    print("Loading tokenizer (T5 slow)...")
-    tokenizer = SimpleTokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "<pad>"})
-    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+    print("Initializing SimpleTokenizer (standalone)...")
+    tokenizer = SimpleTokenizer(vocab_size=32000)
+    # SimpleTokenizer ya tiene tokens especiales incluidos
+    print(f"SimpleTokenizer initialized. Vocab size: {len(tokenizer)}")
 else:
     # Solo definir variable para imports, el tokenizer se carga después
     tokenizer = None
@@ -2659,11 +2658,10 @@ def main_training():
     global best_val_loss, patience_counter, start_epoch, start_step, model, optimizer
     
     # Cargar tokenizer solo cuando se ejecuta entrenamiento
-    print("Loading tokenizer (T5 slow)...")
-    tokenizer = SimpleTokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "<pad>"})
-    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+    print("Initializing SimpleTokenizer (standalone)...")
+    tokenizer = SimpleTokenizer(vocab_size=32000)
+    # SimpleTokenizer ya tiene tokens especiales incluidos
+    print(f"SimpleTokenizer initialized. Vocab size: {len(tokenizer)}")
     
     # Configurar HuggingFace settings para mejor compatibilidad con Colab
     try:
