@@ -302,12 +302,12 @@ except ImportError:
 # Configuración específica para Kaggle multi-GPU
 KAGGLE_CONFIG = {
     'max_train_hours': 11.5,
-    'checkpoint_frequency': 150,  # Más frecuente para multi-GPU
-    'memory_cleanup_steps': 30,   # Más frecuente para multi-GPU
+    'checkpoint_frequency': 200,  # Menos frecuente para multi-GPU (mejor rendimiento)
+    'memory_cleanup_steps': 50,   # Menos frecuente para multi-GPU
     'dataset_cache_dir': '/kaggle/tmp/datasets' if IN_KAGGLE else './cache',
     'output_dir': '/kaggle/working' if IN_KAGGLE else './output',
-    'multi_gpu_enabled': False,  # Se configurará automáticamente
-    'force_single_gpu': True,    # Forzar single-GPU (multi-GPU tiene problemas de device)
+    'multi_gpu_enabled': True,   # Habilitar multi-GPU para mejor rendimiento
+    'force_single_gpu': False,   # Permitir multi-GPU en Kaggle
 }
 
 # ==============================================================================
@@ -316,8 +316,8 @@ KAGGLE_CONFIG = {
 
 SEED = 42
 BLOCK_SIZE = 768  # Optimizado para T4/P100
-BATCH_SIZE = 6    # Optimizado para single-GPU T4/P100 (aumentado de 4)
-GRAD_ACCUM_STEPS = 6  # Batch efectivo de 36 (balanceado)
+BATCH_SIZE = 8    # Optimizado para dual-GPU T4/P100 (aumentado para 2 GPUs)
+GRAD_ACCUM_STEPS = 4  # Batch efectivo de 64 (8*4*2_GPUs = 64)
 LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.1
@@ -1205,11 +1205,11 @@ def test_model_kaggle():
 def main_kaggle_training():
     """Función principal de entrenamiento SIN dependencias de HuggingFace
     
-    NOTA: Multi-GPU deshabilitado por defecto debido a problemas de sincronización
-    de device en RMSNorm y otros componentes con DataParallel.
+    ✅ Multi-GPU HABILITADO: Utiliza DataParallel para aprovechar múltiples GPUs.
+    Configuración automática para detectar y usar todas las GPUs disponibles.
     
-    Para habilitar multi-GPU (experimental):
-    KAGGLE_CONFIG['force_single_gpu'] = False
+    - Batch efectivo se escala automáticamente por número de GPUs
+    - Optimizaciones específicas para T4/P100 en configuración dual-GPU
     """
     print("🚀 Iniciando entrenamiento HRM en Kaggle SIN HuggingFace")
     
@@ -1219,7 +1219,9 @@ def main_kaggle_training():
         device = torch.device("cuda:0")
         
         if num_gpus > 1 and not KAGGLE_CONFIG['force_single_gpu']:
-            print(f"🔥 Multi-GPU detectado: {num_gpus} GPUs disponibles")
+            print(f"🔥 Multi-GPU ACTIVADO: {num_gpus} GPUs disponibles")
+            print(f"   💡 Batch efectivo se escalará de {BATCH_SIZE * GRAD_ACCUM_STEPS} a {BATCH_SIZE * GRAD_ACCUM_STEPS * num_gpus}")
+            print(f"   ⚡ Esperando ~{num_gpus}x mejora en throughput")
             KAGGLE_CONFIG['multi_gpu_enabled'] = True
         else:
             if KAGGLE_CONFIG['force_single_gpu']:
@@ -1310,11 +1312,15 @@ def main_kaggle_training():
     # Envolver modelo para multi-GPU si es necesario
     if KAGGLE_CONFIG['multi_gpu_enabled']:
         print(f"🔗 Envolviendo modelo con DataParallel para {num_gpus} GPUs")
+        print(f"   📈 Distribuyendo cargas de trabajo entre GPUs...")
         model = nn.DataParallel(model)
         
         # Optimizaciones para DataParallel
         torch.backends.cudnn.benchmark = True
-        print("⚡ Optimizaciones multi-GPU activadas")
+        print(f"⚡ Optimizaciones multi-GPU activadas:")
+        print(f"   🚀 CuDNN benchmark habilitado")
+        print(f"   💾 Memoria distribuida entre {num_gpus} GPUs")
+        print(f"   🔄 Gradientes sincronizados automáticamente")
     
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parámetros del modelo: {total_params:,}")
@@ -1423,7 +1429,11 @@ def main_kaggle_training():
                         print(f"   📊 Loss actual: {current_loss:.4f}")
                         print(f"   🏆 Mejor loss: {best_val_loss:.4f}")
                         print(f"   📈 Learning rate: {current_lr:.2e}")
-                        print(f"   🚀 Throughput: {samples_per_sec:.0f} samples/sec")
+                        if KAGGLE_CONFIG['multi_gpu_enabled']:
+                            print(f"   🚀 Throughput: {samples_per_sec:.0f} samples/sec ({num_gpus} GPUs)")
+                            print(f"   ⚡ Batch efectivo: {effective_batch_size} (escalado por {num_gpus} GPUs)")
+                        else:
+                            print(f"   🚀 Throughput: {samples_per_sec:.0f} samples/sec")
                         
                         save_checkpoint_kaggle(model, optimizer, scheduler, scaler, 
                                              epoch, global_step, best_val_loss, CHECKPOINT_PATH, tokenizer)
@@ -1437,12 +1447,20 @@ def main_kaggle_training():
                     
                     # Actualizar barra de progreso con métricas en tiempo real
                     current_loss = loss.item() * GRAD_ACCUM_STEPS
-                    progress.set_postfix({
+                    
+                    # Información de GPU para multi-GPU
+                    postfix_dict = {
                         "loss": f"{current_loss:.4f}",
                         "lr": f"{current_lr:.2e}",
                         "step": global_step,
                         "samp/s": f"{samples_per_sec:.0f}"
-                    })
+                    }
+                    
+                    if KAGGLE_CONFIG['multi_gpu_enabled']:
+                        postfix_dict["GPUs"] = f"{num_gpus}x"
+                        postfix_dict["batch_eff"] = f"{effective_batch_size}"
+                    
+                    progress.set_postfix(postfix_dict)
                     
                     # También actualizar el promedio de época
                     epoch_loss += current_loss
