@@ -30,6 +30,43 @@ from datasets import load_dataset
 
 from huggingface_hub import HfFolder, HfApi
 
+# Scheduler simple alternativo para casos sin Transformers
+class SimpleCosineScheduler:
+    """Scheduler coseno simple como alternativa a get_cosine_schedule_with_warmup"""
+    
+    def __init__(self, optimizer, num_warmup_steps, num_training_steps):
+        self.optimizer = optimizer
+        self.num_warmup_steps = num_warmup_steps
+        self.num_training_steps = num_training_steps
+        self.current_step = 0
+        self.base_lr = optimizer.param_groups[0]['lr']
+    
+    def step(self):
+        self.current_step += 1
+        
+        if self.current_step < self.num_warmup_steps:
+            # Warmup lineal
+            lr = self.base_lr * (self.current_step / self.num_warmup_steps)
+        else:
+            # Coseno decay
+            progress = (self.current_step - self.num_warmup_steps) / (self.num_training_steps - self.num_warmup_steps)
+            lr = self.base_lr * 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+    
+    def get_last_lr(self):
+        return [param_group['lr'] for param_group in self.optimizer.param_groups]
+
+# Función optimizada de limpieza de memoria
+def optimized_memory_cleanup():
+    """Limpiar memoria de forma optimizada"""
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 # TensorBoard para monitoreo de entrenamiento
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -99,7 +136,7 @@ except ImportError:
 # ==============================================================================
 
 class RotaryEmbedding(nn.Module):
-    """Rotary Position Embedding para mejor extrapolación de secuencias largas"""
+    """Rotary Position Embedding optimizado para multi-GPU y mejor extrapolación"""
     def __init__(self, dim, max_position_embeddings=4096, base=10000):
         super().__init__()
         self.dim = dim
@@ -109,23 +146,28 @@ class RotaryEmbedding(nn.Module):
         inv_freq = 1. / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
         self.register_buffer("inv_freq", inv_freq)
         
-        # Precompute cos and sin for common sequence lengths
-        self._seq_len_cached = 0
-        self._cos_cached = None
-        self._sin_cached = None
+        # Pre-compute para evitar problemas multi-GPU
+        self._precompute_cos_sin_cache(max_position_embeddings)
+    
+    def _precompute_cos_sin_cache(self, max_seq_len):
+        """Pre-computar cos/sin para evitar problemas de device en multi-GPU"""
+        t = torch.arange(max_seq_len).type_as(self.inv_freq)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos_cached = emb.cos()[None, :, None, :] 
+        sin_cached = emb.sin()[None, :, None, :]
         
-    def _update_cos_sin_cache(self, seq_len, device):
-        if seq_len > self._seq_len_cached:
-            self._seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=device).type_as(self.inv_freq)
-            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            self._cos_cached = emb.cos()[None, :, None, :]
-            self._sin_cached = emb.sin()[None, :, None, :]
+        # Registrar como buffers para multi-GPU
+        self.register_buffer("cos_cached", cos_cached)
+        self.register_buffer("sin_cached", sin_cached)
     
     def forward(self, x, seq_len):
-        self._update_cos_sin_cache(seq_len, x.device)
-        return self._cos_cached[:, :seq_len, :, :], self._sin_cached[:, :seq_len, :, :]
+        # Usar cache pre-computado
+        seq_len = min(seq_len, self.cos_cached.size(1))
+        return (
+            self.cos_cached[:, :seq_len, :, :].to(x.device),
+            self.sin_cached[:, :seq_len, :, :].to(x.device)
+        )
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
