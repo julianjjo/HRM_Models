@@ -1873,29 +1873,22 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     try:
         # huggingface_hub imports removed - using standalone implementations
         
-        # Intentar obtener token de variable de entorno
+        # Nota: Versión standalone sin dependencias de HuggingFace
+        # Para uso con HF Hub, instalar: pip install huggingface_hub
         HF_TOKEN = os.environ.get('HF_TOKEN')
         
         if HF_TOKEN:
-            login(token=HF_TOKEN)
-            print("✅ Hugging Face token loaded from environment variable.")
+            print("✅ HF_TOKEN encontrado en variable de entorno (standalone mode)")
         else:
-            # Intentar login interactivo (útil para desarrollo local)
-            try:
-                login()
-                print("✅ Hugging Face authentication successful.")
-            except Exception as e:
-                print(f"⚠️  HF authentication failed: {e}")
-                print("💡 Para usar HF Pro, configura HF_TOKEN o ejecuta: huggingface-cli login")
-                HF_TOKEN = None
+            print("ℹ️  Sin HF_TOKEN - modelo standalone funciona sin HuggingFace Hub")
+            HF_TOKEN = None
     except ImportError:
-        print("⚠️  huggingface_hub login not available")
+        print("⚠️  huggingface_hub not available (standalone mode)")
         HF_TOKEN = os.environ.get('HF_TOKEN')
         if HF_TOKEN:
-            HfFolder.save_token(HF_TOKEN)
-            print("Hugging Face token loaded (legacy method).")
+            print("✅ HF_TOKEN encontrado (sin autenticación automática)")
         else:
-            print("HF_TOKEN secret not found.")
+            print("ℹ️  Sin HF_TOKEN - modo completamente standalone")
             HF_TOKEN = None
 else:
     # Solo para imports, no hacer login

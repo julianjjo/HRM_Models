@@ -1869,12 +1869,12 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         HF_TOKEN = os.environ.get('HF_TOKEN')
         
         if HF_TOKEN:
-            login(token=HF_TOKEN)
+            # login(token=HF_TOKEN)  # Removed for standalone
             print("✅ Hugging Face token loaded from environment variable.")
         else:
             # Intentar login interactivo (útil para desarrollo local)
             try:
-                login()
+                # login()  # Removed for standalone
                 print("✅ Hugging Face authentication successful.")
             except Exception as e:
                 print(f"⚠️  HF authentication failed: {e}")
@@ -1884,7 +1884,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         print("⚠️  huggingface_hub login not available")
         HF_TOKEN = os.environ.get('HF_TOKEN')
         if HF_TOKEN:
-            HfFolder.save_token(HF_TOKEN)
+            # HfFolder.save_token(HF_TOKEN)  # Removed for standalone
             print("Hugging Face token loaded (legacy method).")
         else:
             print("HF_TOKEN secret not found.")
