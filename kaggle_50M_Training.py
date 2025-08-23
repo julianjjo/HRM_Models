@@ -307,8 +307,9 @@ KAGGLE_CONFIG = {
     'dataset_cache_dir': '/kaggle/tmp/datasets' if IN_KAGGLE else './cache',
     'output_dir': '/kaggle/working' if IN_KAGGLE else './output',
     'multi_gpu_enabled': True,   # Multi-GPU habilitado con arreglos de device sync
-    'force_single_gpu': False,   # Permitir multi-GPU
+    'force_single_gpu': True,    # Forzar single-GPU hasta resolver problemas de device sync
     'multi_gpu_experimental': False,  # Solo para debugging avanzado
+    'single_gpu_high_performance': True,  # Usar configuración optimizada para single-GPU
 }
 
 # ==============================================================================
@@ -317,8 +318,8 @@ KAGGLE_CONFIG = {
 
 SEED = 42
 BLOCK_SIZE = 768  # Optimizado para T4/P100
-BATCH_SIZE = 8    # Optimizado para dual-GPU T4/P100
-GRAD_ACCUM_STEPS = 4  # Batch efectivo de 64 (8*4*2_GPUs = 64)
+BATCH_SIZE = 6    # Optimizado para dual-GPU T4/P100 (sin gradient checkpointing)
+GRAD_ACCUM_STEPS = 6  # Batch efectivo de 72 (6*6*2_GPUs = 72)
 LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.1
@@ -340,7 +341,7 @@ MODEL_PARAMS = {
     "halt_bias_init": -0.5,            # Bias inicial más conservador para estabilidad
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": False,      # Deshabilitado para compatibilidad Kaggle
-    "gradient_checkpointing": True,
+    "gradient_checkpointing": True,   # Se deshabilita automáticamente con multi-GPU
     "h_update_period": 3,              # H-module se actualiza cada 3 pasos para 50M (desde original)
 }
 
@@ -1236,13 +1237,15 @@ def main_kaggle_training():
         device = torch.device("cuda:0")  # Siempre usar cuda:0 como device principal para DataParallel
         
         if num_gpus > 1 and not KAGGLE_CONFIG['force_single_gpu']:
-            print(f"🔥 Multi-GPU ACTIVADO: {num_gpus} GPUs disponibles")
+            print(f"🔥 Multi-GPU DETECTADO: {num_gpus} GPUs disponibles")
+            print(f"   ⚠️ MODO EXPERIMENTAL: Modelo HRM complejo puede tener problemas de device sync")
             print(f"   💡 Batch efectivo se escalará de {BATCH_SIZE * GRAD_ACCUM_STEPS} a {BATCH_SIZE * GRAD_ACCUM_STEPS * num_gpus}")
-            print(f"   ⚡ Esperando ~{num_gpus}x mejora en throughput")
+            print(f"   🛠️ Fallback automático a single-GPU si hay errores")
             KAGGLE_CONFIG['multi_gpu_enabled'] = True
+            KAGGLE_CONFIG['multi_gpu_fallback_attempted'] = False
         else:
             if KAGGLE_CONFIG['force_single_gpu']:
-                print(f"🔧 Forzando Single-GPU mode (debugging)")
+                print(f"🔧 Single-GPU FORZADO (mejor estabilidad para HRM)")
             else:
                 print(f"📱 Single-GPU mode: 1 GPU disponible")
             KAGGLE_CONFIG['multi_gpu_enabled'] = False
@@ -1292,10 +1295,16 @@ def main_kaggle_training():
     print(f"   Validación: {len(val_dataset)} ejemplos")
     print(f"   Vocabulario: {len(tokenizer)} tokens")
     
-    # Crear dataloaders
-    dataloader_batch_size = BATCH_SIZE
+    # Crear dataloaders con batch size dinámico
     if KAGGLE_CONFIG['multi_gpu_enabled']:
+        dataloader_batch_size = BATCH_SIZE  # 6 para multi-GPU
         print(f"🔧 Configuración multi-GPU: {BATCH_SIZE} batch size por GPU")
+    elif KAGGLE_CONFIG['single_gpu_high_performance']:
+        dataloader_batch_size = 12  # Batch size más grande para single-GPU
+        print(f"🚀 Configuración single-GPU de alta performance: {dataloader_batch_size} batch size")
+    else:
+        dataloader_batch_size = BATCH_SIZE
+        print(f"📱 Configuración single-GPU estándar: {dataloader_batch_size} batch size")
     
     train_loader = DataLoader(
         train_dataset,
@@ -1323,7 +1332,14 @@ def main_kaggle_training():
     
     # Crear modelo
     print("Creando modelo...")
-    config = HRMKaggleConfig(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
+    
+    # Deshabilitar gradient checkpointing para multi-GPU (causa problemas de device sync)
+    model_params = MODEL_PARAMS.copy()
+    if KAGGLE_CONFIG['multi_gpu_enabled']:
+        model_params["gradient_checkpointing"] = False
+        print("⚠️ Gradient checkpointing deshabilitado para multi-GPU")
+    
+    config = HRMKaggleConfig(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **model_params)
     model = HRMKaggleModel(config).to(device)
     
     # Envolver modelo para multi-GPU si es necesario
@@ -1350,10 +1366,13 @@ def main_kaggle_training():
         betas=(0.9, 0.95)
     )
     
-    # Calcular pasos de entrenamiento
-    effective_batch_size = BATCH_SIZE * GRAD_ACCUM_STEPS
+    # Calcular pasos de entrenamiento con batch size dinámico
     if KAGGLE_CONFIG['multi_gpu_enabled']:
-        effective_batch_size *= num_gpus
+        effective_batch_size = BATCH_SIZE * GRAD_ACCUM_STEPS * num_gpus  # 6*6*2 = 72
+    elif KAGGLE_CONFIG['single_gpu_high_performance']:
+        effective_batch_size = 12 * GRAD_ACCUM_STEPS  # 12*6 = 72 (mismo throughput)
+    else:
+        effective_batch_size = BATCH_SIZE * GRAD_ACCUM_STEPS
     
     num_training_steps = len(train_loader) * NUM_EPOCHS // GRAD_ACCUM_STEPS
     num_warmup_steps = int(WARMUP_RATIO * num_training_steps)
@@ -1616,8 +1635,8 @@ class DirectDataset(Dataset):
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    if len(content) > 100:  # Filtrar contenido muy corto
-                        sample_texts.append(content[:1000])  # Truncar textos largos
+                    if len(content) > 1000:  # Filtrar contenido muy corto
+                        sample_texts.append(content[:10000])  # Truncar textos largos
             except Exception as e:
                 print(f"⚠️ Error leyendo {file_path}: {e}")
                 continue
@@ -1645,8 +1664,8 @@ class DirectDataset(Dataset):
                 processed_data.append(text.strip())
         
         # Duplicar datos si tenemos muy pocos para entrenamiento
-        while len(processed_data) < 100:
-            processed_data.extend(processed_data[:10])
+        while len(processed_data) < 50000:
+            processed_data.extend(processed_data[:100])
         
         # Dividir en train/validation
         split_idx = int(len(processed_data) * train_split)
