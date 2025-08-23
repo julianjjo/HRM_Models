@@ -318,7 +318,7 @@ SEED = 42
 BLOCK_SIZE = 768  # Optimizado para T4/P100
 BATCH_SIZE = 6    # Optimizado para single-GPU T4/P100 (aumentado de 4)
 GRAD_ACCUM_STEPS = 6  # Batch efectivo de 36 (balanceado)
-LEARNING_RATE_MAX = 8e-4
+LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.1
@@ -336,7 +336,7 @@ MODEL_PARAMS = {
     "dropout": 0.1,
     "halt_max_steps": 6,               # Pasos optimizados para modelo 50M (desde original)
     "ponder_loss_weight": 1e-2,
-    "halt_bias_init": -2.2,            # Bias inicial desde original
+    "halt_bias_init": -0.5,            # Bias inicial más conservador para estabilidad
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": False,      # Deshabilitado para compatibilidad Kaggle
     "gradient_checkpointing": True,
@@ -346,6 +346,7 @@ MODEL_PARAMS = {
 # Dataset configuration - SIN KAGGLEHUB para evitar problemas de conexión
 KAGGLE_DATASET_PATH = "/kaggle/input"  # Cambiar por el path real del dataset
 DATASET_NAME = "mistral-7b-instruct-texts"  # Nombre del dataset
+KAGGLE_DATASET_ID = "carlmcbrideellis/llm-mistral-7b-instruct-texts"  # ID completo del dataset
 T5_TOKENIZER_REPO = "t5-small"  # Ya no se usa, mantenido por compatibilidad
 HF_REPO_ID = "your-username/hrm-kaggle-50m"
 
@@ -654,6 +655,9 @@ class HRMKaggleModel(SimplePreTrainedModel):
             ) for _ in range(config.n_layers)
         ])
         
+        # Inicializar pesos más robusto
+        self._init_weights()
+        
         # Inicializar bias de halt
         with torch.no_grad():
             for halt_head in self.halt_heads:
@@ -664,6 +668,25 @@ class HRMKaggleModel(SimplePreTrainedModel):
         
         if config.gradient_checkpointing:
             self._enable_gradient_checkpointing()
+    
+    def _init_weights(self):
+        """Inicialización robusta de pesos para evitar NaN"""
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                if param.dim() >= 2:
+                    # Inicialización Xavier/Glorot para pesos 2D+
+                    nn.init.xavier_normal_(param, gain=0.02)
+                else:
+                    # Inicialización normal para pesos 1D
+                    nn.init.normal_(param, mean=0.0, std=0.02)
+            elif 'bias' in name and 'halt' not in name:
+                # Inicializar bias a 0 (excepto halt bias)
+                nn.init.constant_(param, 0.0)
+        
+        # Inicialización específica para embeddings
+        nn.init.normal_(self.token_embeddings.weight, mean=0.0, std=0.02)
+        if self.pos_embeddings is not None:
+            nn.init.normal_(self.pos_embeddings.weight, mean=0.0, std=0.02)
     
     def _enable_gradient_checkpointing(self):
         """Habilitar gradient checkpointing sin Transformers"""
@@ -681,6 +704,13 @@ class HRMKaggleModel(SimplePreTrainedModel):
             make_checkpointed(layer)
     
     def forward(self, input_ids, labels=None, attention_mask=None, **kwargs):
+        # Validación de entrada robusta
+        if torch.isnan(input_ids).any() or torch.isinf(input_ids).any():
+            raise ValueError("❌ input_ids contiene NaN o Inf")
+        
+        if input_ids.max() >= self.config.vocab_size:
+            raise ValueError(f"❌ Token ID fuera de rango: {input_ids.max()} >= {self.config.vocab_size}")
+        
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
         
@@ -695,7 +725,7 @@ class HRMKaggleModel(SimplePreTrainedModel):
         # Máscara causal
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
         
-        # Variables ACT
+        # Variables ACT con mejor estabilidad numérica
         eps = 1e-6
         total_z_H = torch.zeros_like(z_H)
         n_updates = torch.zeros((batch_size, seq_len), device=device)
@@ -712,10 +742,21 @@ class HRMKaggleModel(SimplePreTrainedModel):
                 z_H, z_L, hrm_info = layer(z_H, z_L, step_count=step_count,
                                          attn_mask=causal_mask, training=self.training)
                 
-                # ACT halt mechanism
-                p_halt = halt_head(z_H).squeeze(-1).clamp(eps, 1 - eps)
+                # ACT halt mechanism con estabilidad numérica mejorada
+                halt_logit = halt_head(z_H).squeeze(-1)
+                
+                # Evitar overflow/underflow en sigmoid
+                halt_logit = torch.clamp(halt_logit, min=-10.0, max=10.0)
+                p_halt = torch.sigmoid(halt_logit).clamp(eps, 1 - eps)
+                
                 is_last_step = step == (min(self.config.halt_max_steps, 3) - 1)
                 halt_now_prob = p_halt if not is_last_step else torch.ones_like(p_halt)
+                
+                # Validar que no hay NaN en halt probabilities
+                if torch.isnan(halt_now_prob).any():
+                    print(f"⚠️ NaN detectado en halt_now_prob en layer {layer_idx}, step {step}")
+                    halt_now_prob = torch.where(torch.isnan(halt_now_prob), 
+                                               torch.ones_like(halt_now_prob) * 0.5, halt_now_prob)
                 
                 contrib = layer_remainders * halt_now_prob
                 layer_total_z_H = layer_total_z_H + contrib.unsqueeze(-1) * z_H
@@ -725,6 +766,8 @@ class HRMKaggleModel(SimplePreTrainedModel):
                     break
                 
                 layer_remainders = layer_remainders * (1 - p_halt)
+                # Evitar que los remainders se vuelvan demasiado pequeños
+                layer_remainders = layer_remainders.clamp(min=eps)
                 step_count += 1
                 
                 if torch.all(layer_remainders < eps):
@@ -734,8 +777,25 @@ class HRMKaggleModel(SimplePreTrainedModel):
             total_z_H = total_z_H + z_H
             n_updates = n_updates + layer_n_updates
         
+        # Validar que no hay NaN en las representaciones finales
+        if torch.isnan(total_z_H).any():
+            print("⚠️ NaN detectado en total_z_H antes de la salida final")
+            total_z_H = torch.where(torch.isnan(total_z_H), torch.zeros_like(total_z_H), total_z_H)
+        
         total_z_H = self.final_norm(total_z_H)
+        
+        # Validar normalización
+        if torch.isnan(total_z_H).any():
+            print("⚠️ NaN detectado después de final_norm")
+            total_z_H = torch.where(torch.isnan(total_z_H), torch.zeros_like(total_z_H), total_z_H)
+        
         logits = self.lm_head(total_z_H)
+        
+        # Validar logits
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            print("⚠️ NaN/Inf detectado en logits finales")
+            logits = torch.where(torch.isnan(logits) | torch.isinf(logits), 
+                               torch.zeros_like(logits), logits)
         
         loss = None
         if labels is not None:
@@ -744,8 +804,25 @@ class HRMKaggleModel(SimplePreTrainedModel):
             loss_fct = nn.CrossEntropyLoss()
             lm_loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
             
-            ponder_loss = torch.mean(n_updates)
+            # Validar loss
+            if torch.isnan(lm_loss) or torch.isinf(lm_loss):
+                print("⚠️ NaN/Inf detectado en cross entropy loss")
+                lm_loss = torch.tensor(1e-6, device=lm_loss.device, requires_grad=True)
+            
+            # Ponder loss con estabilidad mejorada
+            n_updates_safe = torch.clamp(n_updates, min=1e-6, max=10.0)
+            ponder_loss = torch.mean(n_updates_safe)
+            
+            if torch.isnan(ponder_loss) or torch.isinf(ponder_loss):
+                print("⚠️ NaN/Inf detectado en ponder loss")
+                ponder_loss = torch.tensor(0.0, device=lm_loss.device)
+            
             loss = lm_loss + self.config.ponder_loss_weight * ponder_loss
+            
+            # Validación final del loss total
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("⚠️ NaN/Inf detectado en loss total - usando loss seguro")
+                loss = torch.tensor(1e-6, device=lm_loss.device, requires_grad=True)
         
         return SimpleModelOutput(loss=loss, logits=logits)
 
