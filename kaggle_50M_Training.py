@@ -1279,12 +1279,17 @@ def main_kaggle_training():
                     elapsed_time = time.time() - training_start_time
                     samples_per_sec = (global_step * effective_batch_size) / (elapsed_time + 1e-8)
                     
+                    # Actualizar barra de progreso con métricas en tiempo real
+                    current_loss = loss.item() * GRAD_ACCUM_STEPS
                     progress.set_postfix({
-                        "loss": f"{loss.item()*GRAD_ACCUM_STEPS:.4f}",
+                        "loss": f"{current_loss:.4f}",
                         "lr": f"{current_lr:.2e}",
                         "step": global_step,
                         "samp/s": f"{samples_per_sec:.0f}"
                     })
+                    
+                    # También actualizar el promedio de época
+                    epoch_loss += current_loss
                     
                     # Checkpoint frecuente
                     if global_step % KAGGLE_CONFIG['checkpoint_frequency'] == 0:
@@ -1317,7 +1322,7 @@ def main_kaggle_training():
                 val_loss += loss.item()
                 val_steps += 1
                 
-                val_progress.set_postfix({"val_loss": f"{loss.item():.4f}"})
+                val_progress.set_postfix({"loss": f"{loss.item():.4f}"})
         
         avg_val_loss = val_loss / max(val_steps, 1)
         print(f"Pérdida de validación: {avg_val_loss:.4f}")
