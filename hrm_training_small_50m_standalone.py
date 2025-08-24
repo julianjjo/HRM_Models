@@ -64,6 +64,25 @@ class SimpleIterableDataset:
     
     def __len__(self):
         return len(self.data)
+    
+    def shuffle(self, seed=None, buffer_size=None):
+        """Shuffle the dataset"""
+        import random
+        if seed is not None:
+            random.seed(seed)
+        shuffled_data = list(self.data)
+        random.shuffle(shuffled_data)
+        return SimpleIterableDataset(shuffled_data)
+    
+    def take(self, count):
+        """Take first count items"""
+        taken_data = list(self.data)[:count]
+        return SimpleIterableDataset(taken_data)
+    
+    def skip(self, count):
+        """Skip first count items"""
+        skipped_data = list(self.data)[count:]
+        return SimpleIterableDataset(skipped_data)
 
 def load_dataset(name, config=None, streaming=True, split="train"):
     """Standalone dataset loader with fallback data"""
