@@ -4,18 +4,22 @@
 
 A family of transformer models with Hierarchical Reasoning Module (HRM) architecture trained on multiple high-quality text datasets. These models feature adaptive computation with pondering mechanisms for improved text generation quality, available in multiple sizes from 10M to 1B parameters.
 
+**🚀 NEW: Standalone Versions Available** - Each model now comes in two variants:
+- **Standard**: Full HuggingFace ecosystem integration
+- **Standalone**: Zero external dependencies (PyTorch only) for maximum portability
+
 ## 📊 Model Family
 
 **HRM-Models** comes in 6 different sizes optimized for various use cases:
 
-| Model Size | Parameters | Architecture | Memory Usage | Best Use Case |
-|------------|------------|--------------|--------------|---------------|
-| **Micro-10M** | 10.3M | HRM + Pondering | ~500MB | Research, prototyping |
-| **Nano-25M** | 25.6M | HRM + Pondering | ~1GB | Mobile, edge devices |
-| **Small-50M** | 53.2M | HRM + Pondering | ~2GB | General purpose |
-| **Medium-100M** | 106.4M | HRM + Pondering | ~4GB | Production inference |
-| **Medium-350M** | 353.8M | HRM + Pondering | ~12GB | High-quality generation |
-| **Large-1B** | 1.06B | HRM + Pondering | ~32GB | State-of-the-art results |
+| Model Size | Parameters | Architecture | Memory Usage | Variants | Best Use Case |
+|------------|------------|--------------|--------------|----------|--------------|
+| **Micro-10M** | 10.3M | HRM + Pondering | ~500MB | Standard + Standalone | Research, prototyping |
+| **Nano-25M** | 25.6M | HRM + Pondering | ~1GB | Standard + Standalone | Mobile, edge devices |
+| **Small-50M** | 53.2M | HRM + Pondering | ~2GB | Standard + Standalone | General purpose |
+| **Medium-100M** | 106.4M | HRM + Pondering | ~4GB | Standard + Standalone | Production inference |
+| **Medium-350M** | 353.8M | HRM + Pondering | ~12GB | Standard + Standalone | High-quality generation |
+| **Large-1B** | 1.06B | HRM + Pondering | ~32GB | Standard + Standalone | State-of-the-art results |
 
 ### ⚡ Performance Optimizations
 
@@ -36,8 +40,10 @@ All models include:
 - **⚡ Advanced Training**: Basic setup → Multi-GPU distributed training with mixed precision
 - **🌐 Dataset Diversity**: TinyStories only → Multiple high-quality datasets (C4, SlimPajama, etc.)
 - **🔧 Production Features**: Simple scripts → Full HuggingFace ecosystem integration
+- **🚀 Standalone Variants**: Added zero-dependency versions for maximum portability
 - **📚 Comprehensive Documentation**: Minimal → Extensive with troubleshooting guides
 - **🏗️ Infrastructure**: Standard training → Advanced optimization with TensorBoard monitoring
+- **🛡️ Stability Improvements**: Critical fixes for distributed training and dataset handling
 
 ### **✅ Preserved Core Innovation**
 - **Hierarchical Reasoning**: Original dual H/L module architecture maintained
@@ -124,33 +130,51 @@ For **50M+ models**, custom dataset mixes are available:
 
 ### Installation
 
+#### Option 1: Full Installation (Recommended)
 ```bash
 pip install -r requirements.txt
 ```
 
-**Core Dependencies:**
-```txt
-torch>=2.6.0
-transformers>=4.55.2
-datasets>=4.0.0
-huggingface_hub>=0.34.4
-sentencepiece>=0.1.99
-protobuf>=3.20.0
-tqdm>=4.67.1
+#### Option 2: Minimal Installation (Standalone Models Only)
+```bash
+pip install -r requirements-minimal.txt
 ```
 
-**Optional (Recommended):**
+#### Option 3: Development Installation
+```bash
+pip install -r requirements-dev.txt
+```
+
+**Requirements Breakdown:**
+
+| File | Purpose | Dependencies |
+|------|---------|-------------|
+| `requirements.txt` | Full features | All optimizations + monitoring |
+| `requirements-minimal.txt` | Standalone models | PyTorch + basic dependencies only |
+| `requirements-dev.txt` | Development | Full + additional dev tools |
+
+**Core Dependencies (Minimal):**
+```txt
+torch==2.6.0
+transformers==4.55.2
+datasets==4.0.0
+huggingface_hub==0.34.4
+tqdm==4.67.1
+```
+
+**Full Installation Includes:**
 ```txt
 hf_transfer>=0.1.0          # Faster HF Hub downloads
 tensorboard>=2.14.0         # Training visualization
 langdetect>=1.0.9          # Language filtering
 kagglehub>=0.2.0           # Kaggle dataset support
-flash-attn>=2.0.0          # GPU attention optimization
+sentencepiece>=0.1.99      # T5 tokenizer support
+protobuf>=3.20.0           # Protocol buffers
 ```
 
 ### Usage Examples
 
-#### Basic Text Generation
+#### Standard Models (HuggingFace Integration)
 ```python
 import os
 os.environ['HRM_IMPORT_ONLY'] = '1'  # Fast import mode
@@ -171,6 +195,24 @@ text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 print(text)
 ```
 
+#### Standalone Models (Zero Dependencies)
+```python
+# No external dependencies required - PyTorch only!
+from hrm_training_small_50m_standalone import HRMText1, HRMText1Config, SimpleTokenizer
+
+# Load standalone model and tokenizer
+config = HRMText1Config()
+model = HRMText1(config)
+tokenizer = SimpleTokenizer()  # Built-in tokenizer
+
+# Generate text
+prompt = "The future of artificial intelligence"
+inputs = tokenizer.encode(prompt, return_tensors="pt")
+outputs = model.generate(inputs, max_new_tokens=50, temperature=0.7)
+text = tokenizer.decode(outputs[0])
+print(text)
+```
+
 #### Training from Scratch
 
 **Environment Setup:**
@@ -184,20 +226,31 @@ export HRM_OUTPUT_BASE="/path/to/output"  # Custom output path
 unset HRM_IMPORT_ONLY
 ```
 
-**Single GPU Training:**
+**Standard Models Training:**
 ```bash
+# Single GPU
 python hrm_training_small_50m.py
+
+# Multi-GPU (recommended)
+torchrun --nproc_per_node=2 hrm_training_medium_350m.py
 ```
 
-**Multi-GPU Training:**
+**Standalone Models Training (Zero Dependencies):**
 ```bash
-torchrun --nproc_per_node=2 hrm_training_medium_350m.py
+# Perfect for environments without HuggingFace ecosystem
+python hrm_training_small_50m_standalone.py
+
+# Multi-GPU standalone
+torchrun --nproc_per_node=2 hrm_training_medium_350m_standalone.py
 ```
 
 **Google Colab Training:**
 ```python
-# Colab automatically detects and optimizes for the environment
+# Standard models
 !python hrm_training_nano_25m.py
+
+# Standalone models (faster startup)
+!python hrm_training_nano_25m_standalone.py
 ```
 
 ## ⚙️ Advanced Configuration
@@ -296,12 +349,33 @@ torchrun --nproc_per_node=2 hrm_training_large_1b.py
 | **Monitoring** | Basic logging | TensorBoard + progress bars |
 | **Checkpointing** | Simple saves | Best model tracking + auto-upload |
 | **Memory Optimization** | None | Gradient checkpointing + smart workers |
+| **Dependencies** | Full ecosystem | Standard + Standalone variants |
+| **Stability** | Basic | Advanced error handling + robust training |
 
 ### **Production Readiness**
 - **Environment Management**: `HRM_IMPORT_ONLY`, `HF_HUB_ENABLE_HF_TRANSFER` variables
 - **Interactive Interfaces**: Multiple chat implementations for development and deployment
 - **Comprehensive Testing**: Validated across hardware from T4 to H200
 - **Documentation**: Full troubleshooting guides and performance benchmarks
+
+## 🔥 Recent Improvements & Fixes
+
+### **Latest Stability Improvements**
+- **✅ Critical Dataset Fixes**: Resolved SimpleIterableDataset fallback errors across all models
+- **✅ Streaming Dataset Optimization**: Fixed access errors for large-scale dataset streaming
+- **✅ Robust Loss Handling**: Enhanced loss computation stability in all Transformer models
+- **✅ GPU Synchronization**: Fixed critical DataParallel device synchronization issues
+- **✅ Professional Naming**: Updated to professional HuggingFace model naming convention
+- **✅ Scheduler Compatibility**: Fixed SimpleCosineScheduler checkpoint compatibility
+- **✅ Single-GPU Fallback**: Intelligent single-GPU configuration for optimal performance
+
+### **Model Variants Available**
+
+| Version Type | Description | Use Case | Dependencies |
+|--------------|-------------|----------|-------------|
+| **Standard** | Full HuggingFace integration | Production, research | Full ecosystem |
+| **Standalone** | Zero external dependencies | Edge deployment, minimal environments | PyTorch only |
+| **Kaggle** | Optimized for Kaggle environment | Competitions, notebooks | Kaggle-specific optimizations |
 
 ## 🛠️ Troubleshooting
 
@@ -348,7 +422,7 @@ nvidia-smi
 
 ### Quick Multi-GPU Setup
 
-Para máximo rendimiento en sistemas multi-GPU, usa **DistributedDataParallel** en lugar de DataParallel:
+For maximum performance on multi-GPU systems, use **DistributedDataParallel** instead of DataParallel:
 
 ```bash
 # Para 8 GPUs (RECOMENDADO)
@@ -365,53 +439,53 @@ torchrun --nproc_per_node=2 hrm_training_nano_25m.py
 
 | Setup | 8x H200 GPUs | Efficiency | Workers | Bottleneck |
 |-------|--------------|------------|---------|-----------|
-| **DataParallel (automático)** | ~25% GPU usage | ❌ Pobre | 16 workers | GPU 0 cuello |
-| **DistributedDataParallel (torchrun)** | ~95% GPU usage | ✅ Excelente | 24 workers/GPU | Ninguno |
+| **DataParallel (automatic)** | ~25% GPU usage | ❌ Poor | 16 workers | GPU 0 bottleneck |
+| **DistributedDataParallel (torchrun)** | ~95% GPU usage | ✅ Excellent | 24 workers/GPU | None |
 
-### Configuración Automática vs Manual
+### Automatic vs Manual Configuration
 
-#### Modo Automático (DataParallel)
+#### Automatic Mode (DataParallel)
 ```bash
 # Se ejecuta automáticamente al detectar múltiples GPUs
 python hrm_training_small_50m.py
 ```
-**Limitaciones:**
-- GPU 0 actúa como coordinador (cuello de botella)
-- Escalamiento sub-lineal con >4 GPUs
-- ~16x más lento que DistributedDataParallel
+**Limitations:**
+- GPU 0 acts as coordinator (bottleneck)
+- Sub-linear scaling with >4 GPUs
+- ~16x slower than DistributedDataParallel
 
-#### Modo Manual (DistributedDataParallel - RECOMENDADO)
+#### Manual Mode (DistributedDataParallel - RECOMMENDED)
 ```bash
 # Entrenamiento distribuido real
 torchrun --nproc_per_node=8 hrm_training_small_50m.py
 ```
-**Ventajas:**
-- Escalamiento casi-lineal
-- Sin cuello de botella en GPU 0
-- 16x mejor rendimiento en 8 GPUs
+**Advantages:**
+- Nearly linear scaling
+- No bottleneck on GPU 0
+- 16x better performance on 8 GPUs
 
-### Optimizaciones de Workers
+### Worker Optimizations
 
-Los scripts ahora incluyen **configuración automática optimizada** para workers:
+Scripts now include **optimized automatic configuration** for workers:
 
 ```python
-# Configuración automática basada en GPUs
-# 8 GPUs: 16-24 workers (2-3 por GPU)
-# 4 GPUs: 12-16 workers (3-4 por GPU)  
-# 2 GPUs: 6-8 workers (3-4 por GPU)
+# Automatic configuration based on GPUs
+# 8 GPUs: 16-24 workers (2-3 per GPU)
+# 4 GPUs: 12-16 workers (3-4 per GPU)  
+# 2 GPUs: 6-8 workers (3-4 per GPU)
 ```
 
-### Variables de Entorno Multi-GPU
+### Multi-GPU Environment Variables
 
 ```bash
-# Acelerar transferencias (recomendado)
+# Accelerate transfers (recommended)
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
-# NCCL optimizations para alta velocidad
+# NCCL optimizations for high speed
 export NCCL_IB_DISABLE=0
 export NCCL_IB_GID_INDEX=3
 
-# Debugging distribuido (opcional)
+# Distributed debugging (optional)
 export TORCH_DISTRIBUTED_DEBUG=INFO
 ```
 
@@ -426,6 +500,22 @@ echo $HRM_IMPORT_ONLY  # Should be empty
 # Restart with clean environment
 unset HRM_IMPORT_ONLY
 python hrm_training_small_50m.py
+
+# Try standalone version if issues persist
+python hrm_training_small_50m_standalone.py
+```
+
+#### Standalone vs Standard Model Selection
+```bash
+# Use standalone models when:
+# - Minimal environment requirements
+# - Deployment without HuggingFace ecosystem
+# - Edge devices with limited dependencies
+
+# Use standard models when:
+# - Full research/development environment
+# - Integration with HuggingFace Hub
+# - Advanced monitoring and logging needed
 ```
 
 ## 📊 Model Performance
@@ -469,12 +559,22 @@ HRM_Models/
 ## 🏷️ Model Releases
 
 ### Hugging Face Models
-- **dreamwar/HRM-Models-Micro-10M** - Research and prototyping
-- **dreamwar/HRM-Models-Nano-25M** - Mobile and edge deployment
-- **dreamwar/HRM-Models-Small-50M** - General purpose applications  
-- **dreamwar/HRM-Models-Medium-100M** - Production inference
-- **dreamwar/HRM-Models-Medium-350M** - High-quality generation
-- **dreamwar/HRM-Models-Large-1B** - State-of-the-art results
+
+#### Standard Models (HuggingFace Ecosystem)
+- **julianmican/hrm-text-micro-10m** - Research and prototyping
+- **julianmican/hrm-text-nano-25m** - Mobile and edge deployment
+- **julianmican/hrm-text-small-50m** - General purpose applications  
+- **julianmican/hrm-text-medium-100m** - Production inference
+- **julianmican/hrm-text-medium-350m** - High-quality generation
+- **julianmican/hrm-text-large-1b** - State-of-the-art results
+
+#### Standalone Models (Zero Dependencies)
+- **julianmican/hrm-text-micro-10m-standalone** - Portable research model
+- **julianmican/hrm-text-nano-25m-standalone** - Edge deployment ready
+- **julianmican/hrm-text-small-50m-standalone** - Self-contained general model
+- **julianmican/hrm-text-medium-100m-standalone** - Production without dependencies
+- **julianmican/hrm-text-medium-350m-standalone** - High-quality portable model
+- **julianmican/hrm-text-large-1b-standalone** - Research-grade standalone
 
 ## 📄 License
 
