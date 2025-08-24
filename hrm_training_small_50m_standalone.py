@@ -290,7 +290,7 @@ class SimpleTokenizer:
         print(f"✅ Vocabulario construido: {len(self.word_to_id)} tokens")
         return self
     
-    def encode(self, text, max_length=None, truncation=True, padding=False, return_tensors=None):
+    def encode(self, text, max_length=None, truncation=True, padding=False, return_tensors=None, add_special_tokens=True, return_attention_mask=True):
         """Codificar texto a tokens"""
         if not self._built:
             # Construir vocabulario básico si no está construido
@@ -316,7 +316,23 @@ class SimpleTokenizer:
     
     def __call__(self, text, **kwargs):
         """Hacer el tokenizer callable como Transformers"""
-        return self.encode(text, **kwargs)
+        if isinstance(text, list):
+            # Handle batch of texts
+            result = {"input_ids": []}
+            for t in text:
+                token_ids = self.encode(t, **kwargs)
+                if isinstance(token_ids, dict):
+                    result["input_ids"].append(token_ids["input_ids"][0].tolist() if hasattr(token_ids["input_ids"], 'tolist') else token_ids["input_ids"])
+                else:
+                    result["input_ids"].append(token_ids)
+            return result
+        else:
+            # Handle single text
+            token_ids = self.encode(text, **kwargs)
+            if isinstance(token_ids, dict):
+                return token_ids
+            else:
+                return {"input_ids": token_ids}
     
     def decode(self, token_ids, skip_special_tokens=True):
         """Decodificar tokens a texto"""
@@ -857,7 +873,8 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
         
         # Habilitar gradient checkpointing si está configurado
         if config.gradient_checkpointing:
-            self.gradient_checkpointing_enable()
+            # Enable gradient checkpointing for the model
+            self.supports_gradient_checkpointing = True
     
     def _tie_weights(self):
         """Tie the weights between the input and output embeddings"""
@@ -1232,8 +1249,8 @@ GRAD_ACCUM_STEPS = 6     # Batch efectivo de 36 para mejor estabilidad y uso de 
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad numérica (migrado desde Kaggle)
-LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
+LEARNING_RATE_MAX = 5e-5  # Reducido significativamente para evitar gradientes explosivos
+LEARNING_RATE_MIN = 1e-6  # Mínimo más bajo para estabilidad
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
@@ -2895,7 +2912,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 2e-4   # LR reducido para estabilidad (sincronizado con MAX)
+    NEW_LEARNING_RATE = 5e-5   # LR reducido para estabilidad (sincronizado con MAX)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
@@ -3011,14 +3028,24 @@ def main_training():
                 epoch_steps += 1
                 
                 if (i + 1) % GRAD_ACCUM_STEPS == 0:
-                    # Gradient clipping y update
+                    # Gradient clipping mejorado y update
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-                    scheduler.step()
-                    global_step += 1
+                    
+                    # Verificar gradientes antes del clipping
+                    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)  # Clipping más agresivo
+                    
+                    # Solo actualizar si los gradientes son finitos
+                    if torch.isfinite(total_norm):
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad()
+                        scheduler.step()
+                        global_step += 1
+                    else:
+                        # Skip update si gradientes son inf/nan
+                        print(f"⚠️ Gradientes infinitos detectados en step {global_step}, saltando update")
+                        scaler.update()
+                        optimizer.zero_grad()
                     
                     # Métricas de tiempo y velocidad
                     step_end_time = time.time()

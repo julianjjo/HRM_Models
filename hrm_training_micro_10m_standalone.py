@@ -290,7 +290,7 @@ class SimpleTokenizer:
         print(f"✅ Vocabulario construido: {len(self.word_to_id)} tokens")
         return self
     
-    def encode(self, text, max_length=None, truncation=True, padding=False, return_tensors=None):
+    def encode(self, text, max_length=None, truncation=True, padding=False, return_tensors=None, add_special_tokens=True, return_attention_mask=True):
         """Codificar texto a tokens"""
         if not self._built:
             # Construir vocabulario básico si no está construido
@@ -316,7 +316,23 @@ class SimpleTokenizer:
     
     def __call__(self, text, **kwargs):
         """Hacer el tokenizer callable como Transformers"""
-        return self.encode(text, **kwargs)
+        if isinstance(text, list):
+            # Handle batch of texts
+            result = {"input_ids": []}
+            for t in text:
+                token_ids = self.encode(t, **kwargs)
+                if isinstance(token_ids, dict):
+                    result["input_ids"].append(token_ids["input_ids"][0].tolist() if hasattr(token_ids["input_ids"], 'tolist') else token_ids["input_ids"])
+                else:
+                    result["input_ids"].append(token_ids)
+            return result
+        else:
+            # Handle single text
+            token_ids = self.encode(text, **kwargs)
+            if isinstance(token_ids, dict):
+                return token_ids
+            else:
+                return {"input_ids": token_ids}
     
     def decode(self, token_ids, skip_special_tokens=True):
         """Decodificar tokens a texto"""
@@ -854,7 +870,8 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
         
         # Habilitar gradient checkpointing si está configurado
         if config.gradient_checkpointing:
-            self.gradient_checkpointing_enable()
+            # Enable gradient checkpointing for the model
+            self.supports_gradient_checkpointing = True
     
     def _tie_weights(self):
         """Tie the weights between the input and output embeddings"""
