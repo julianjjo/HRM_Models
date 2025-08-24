@@ -64,6 +64,88 @@ class SimpleIterableDataset:
     
     def __len__(self):
         return len(self.data)
+    
+    def shuffle(self, seed=None, buffer_size=None):
+        """Shuffle the dataset"""
+        import random
+        if seed is not None:
+            random.seed(seed)
+        shuffled_data = list(self.data)
+        random.shuffle(shuffled_data)
+        return SimpleIterableDataset(shuffled_data)
+    
+    def take(self, count):
+        """Take first count items"""
+        taken_data = list(self.data)[:count]
+        return SimpleIterableDataset(taken_data)
+    
+    def skip(self, count):
+        """Skip first count items"""
+        skipped_data = list(self.data)[count:]
+        return SimpleIterableDataset(skipped_data)
+    
+    def map(self, function, batched=False, batch_size=1000, remove_columns=None, num_proc=None, desc=None):
+        """Apply a function to all examples in the dataset"""
+        mapped_data = []
+        data_list = list(self.data)
+        
+        if batched:
+            # Process in batches
+            for i in range(0, len(data_list), batch_size):
+                batch = data_list[i:i + batch_size]
+                
+                # Convert batch to dictionary format for batched processing
+                batch_dict = {}
+                if batch:
+                    # Get all keys from first item
+                    keys = batch[0].keys() if isinstance(batch[0], dict) else ['text']
+                    
+                    for key in keys:
+                        if isinstance(batch[0], dict):
+                            batch_dict[key] = [item[key] for item in batch]
+                        else:
+                            batch_dict[key] = batch
+                
+                # Apply function to batch
+                result = function(batch_dict)
+                
+                # Convert result back to individual items
+                if isinstance(result, dict) and len(result) > 0:
+                    # Get length of first value to determine batch size
+                    first_key = list(result.keys())[0]
+                    result_batch_size = len(result[first_key]) if isinstance(result[first_key], list) else 1
+                    
+                    for j in range(result_batch_size):
+                        item = {}
+                        for key, values in result.items():
+                            if isinstance(values, list) and len(values) > j:
+                                item[key] = values[j]
+                            else:
+                                item[key] = values
+                        mapped_data.append(item)
+        else:
+            # Process individually
+            for item in data_list:
+                result = function(item)
+                mapped_data.append(result)
+        
+        # Remove specified columns
+        if remove_columns:
+            filtered_data = []
+            for item in mapped_data:
+                if isinstance(item, dict):
+                    filtered_item = {k: v for k, v in item.items() if k not in remove_columns}
+                    filtered_data.append(filtered_item)
+                else:
+                    filtered_data.append(item)
+            mapped_data = filtered_data
+        
+        return SimpleIterableDataset(mapped_data)
+    
+    def with_format(self, format_type):
+        """Set format for the dataset (compatibility method)"""
+        # For now, just return self as we're keeping it simple
+        return self
 
 def load_dataset(name, config=None, streaming=True, split="train"):
     """Standalone dataset loader with fallback data"""
