@@ -2332,10 +2332,30 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
     except Exception as e:
         print(f"⚠️ Error configurando splits del dataset: {e}")
         print("🔄 Usando configuración básica...")
-        # Fallback: usar el dataset train directamente y crear validation simple
-        train_dataset = raw_datasets["train"].shuffle(seed=SEED, buffer_size=10_000)
-        raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)  
-        raw_datasets["validation"] = train_dataset.take(num_val_samples)
+        # Fallback: manejar el caso donde raw_datasets es directamente el dataset
+        try:
+            # Si raw_datasets es un dict, acceder al train
+            if isinstance(raw_datasets, dict) and "train" in raw_datasets:
+                train_dataset = raw_datasets["train"].shuffle(seed=SEED, buffer_size=10_000)
+                raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)  
+                raw_datasets["validation"] = train_dataset.take(num_val_samples)
+            else:
+                # Si raw_datasets es directamente el SimpleIterableDataset
+                print("📊 Detectado SimpleIterableDataset directo, creando estructura dict...")
+                train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000)
+                raw_datasets = {
+                    "train": train_dataset.skip(num_val_samples).take(num_train_samples),
+                    "validation": train_dataset.take(num_val_samples)
+                }
+        except Exception as fallback_error:
+            print(f"❌ Error crítico en fallback del dataset: {fallback_error}")
+            print("🔄 Intentando configuración mínima...")
+            # Última configuración de emergencia
+            train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000) if hasattr(raw_datasets, 'shuffle') else raw_datasets
+            raw_datasets = {
+                "train": train_dataset.take(num_train_samples),
+                "validation": train_dataset.take(num_val_samples) 
+            }
 # Para dataset mezclado, los splits ya están configurados
 
 def tokenize_function(examples):
