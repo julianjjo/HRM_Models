@@ -2346,6 +2346,26 @@ print(f"!!! USANDO UN SUBCONJUNTO DEL {DATASET_SUBSET_PERCENT}% DEL DATASET !!!"
 print(f"Tomando aprox. {num_train_samples:,} ejemplos de entrenamiento.")
 print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.\n")
 
+# STANDALONE FIX: Limitar a los datos disponibles en SimpleDatasetDict
+# En modo standalone, raw_datasets será un SimpleDatasetDict con datos limitados
+if not ACTIVE_DATASET.startswith("kaggle") and DATASET_NAME in ["allenai/c4", "allenai/dolma"]:
+    # En modo standalone, usar solo los datos disponibles en SimpleDatasetDict  
+    available_train = 900  # SimpleDatasetDict tiene ~900 samples en train
+    available_val = 100    # SimpleDatasetDict tiene ~100 samples en validation
+    
+    original_train = num_train_samples
+    original_val = num_val_samples
+    
+    if num_train_samples > available_train:
+        num_train_samples = available_train
+        print(f"⚠️  STANDALONE MODE: Limitando train samples de {original_train:,} a {num_train_samples}")
+    
+    if num_val_samples > available_val:
+        num_val_samples = available_val  
+        print(f"⚠️  STANDALONE MODE: Limitando val samples de {original_val:,} a {num_val_samples}")
+    
+    print(f"📊 STANDALONE: Usando {num_train_samples} train + {num_val_samples} val samples\n")
+
 # Configurar los splits según el dataset
 if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
     # Para datasets únicos, aplicar la lógica original
@@ -2476,10 +2496,15 @@ def is_iterable_dataset(dataset):
     return isinstance(dataset, IterableDataset)
 
 # Detectar columnas a eliminar dinámicamente
-sample = next(iter(raw_datasets["train"]))
-columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
-print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
-print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+try:
+    sample = next(iter(raw_datasets["train"]))
+    columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
+    print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
+    print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+except StopIteration:
+    print("⚠️ WARNING: El dataset de entrenamiento está vacío!")
+    print("📊 Usando configuración de columnas por defecto para datasets de texto")
+    columns_to_remove = ["text"]  # Columna por defecto para datasets de texto
 
 for split_name in ["train", "validation"]:
     # Optimización para C4 streaming: batch size más grande y configuración eficiente
