@@ -2341,17 +2341,39 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
             has_validation = False
         
         if has_validation:
-            raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
-            raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
+            # Verificar si raw_datasets es un dict o SimpleIterableDataset
+            if isinstance(raw_datasets, dict):
+                raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
+                raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
+            else:
+                # raw_datasets es SimpleIterableDataset, crear splits manualmente
+                print("📊 Detectado SimpleIterableDataset, creando splits...")
+                train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000)
+                raw_datasets = {
+                    "train": train_dataset.take(num_train_samples),
+                    "validation": train_dataset.skip(num_train_samples).take(num_val_samples)
+                }
         else:
             # Para datasets sin split de validación, dividir el entrenamiento
             print("Dividiendo dataset de entrenamiento para crear validación...")
             total_for_split = num_train_samples + num_val_samples
-            train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+            
+            # Verificar si raw_datasets es un dict o SimpleIterableDataset
+            if isinstance(raw_datasets, dict):
+                train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+            else:
+                train_dataset = raw_datasets.take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
             
             # Crear splits manualmente
-            raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
-            raw_datasets["validation"] = train_dataset.take(num_val_samples)
+            if isinstance(raw_datasets, dict):
+                raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
+                raw_datasets["validation"] = train_dataset.take(num_val_samples)
+            else:
+                # Crear nueva estructura dict
+                raw_datasets = {
+                    "train": train_dataset.skip(num_val_samples).take(num_train_samples),
+                    "validation": train_dataset.take(num_val_samples)
+                }
     except Exception as e:
         print(f"⚠️ Error configurando splits del dataset: {e}")
         print("🔄 Usando configuración básica...")
