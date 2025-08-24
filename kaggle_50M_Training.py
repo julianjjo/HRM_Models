@@ -334,7 +334,7 @@ KAGGLE_CONFIG = {
 
 SEED = 42
 BLOCK_SIZE = 768  # Optimizado para T4/P100
-BATCH_SIZE = 6    # Optimizado para dual-GPU T4/P100 (sin gradient checkpointing)
+BATCH_SIZE = 1260    # Optimizado para dual-GPU T4/P100 (sin gradient checkpointing)
 GRAD_ACCUM_STEPS = 6  # Batch efectivo de 72 (6*6*2_GPUs = 72)
 LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad
 LEARNING_RATE_MIN = 1e-6
@@ -372,7 +372,7 @@ HF_REPO_ID = "your-username/hrm-kaggle-50m"
 os.makedirs(KAGGLE_CONFIG['dataset_cache_dir'], exist_ok=True)
 os.makedirs(KAGGLE_CONFIG['output_dir'], exist_ok=True)
 
-OUTPUT_DIR = os.path.join(KAGGLE_CONFIG['output_dir'], 'hrm_model')
+OUTPUT_DIR = os.path.join(KAGGLE_CONFIG['output_dir'], 'HRM-Small-50M-v1.0')
 CHECKPOINT_PATH = os.path.join(KAGGLE_CONFIG['output_dir'], 'checkpoint.pth')
 BEST_MODEL_PATH = os.path.join(KAGGLE_CONFIG['output_dir'], 'best_model.pth')
 
@@ -1329,20 +1329,9 @@ def main_kaggle_training():
     print(f"   Validación: {len(val_dataset)} ejemplos")
     print(f"   Vocabulario: {len(tokenizer)} tokens")
     
-    # Crear dataloaders con batch size dinámico
-    if KAGGLE_CONFIG['multi_gpu_enabled']:
-        dataloader_batch_size = BATCH_SIZE  # 6 para multi-GPU
-        print(f"🔧 Configuración multi-GPU: {BATCH_SIZE} batch size por GPU")
-    elif KAGGLE_CONFIG['single_gpu_high_performance']:
-        dataloader_batch_size = 12  # Batch size más grande para single-GPU
-        print(f"🚀 Configuración single-GPU de alta performance: {dataloader_batch_size} batch size")
-    else:
-        dataloader_batch_size = BATCH_SIZE
-        print(f"📱 Configuración single-GPU estándar: {dataloader_batch_size} batch size")
-    
     train_loader = DataLoader(
         train_dataset,
-        batch_size=dataloader_batch_size,
+        batch_size=BATCH_SIZE,
         shuffle=True,
         collate_fn=custom_collate_fn,
         num_workers=2 if IN_KAGGLE else 0,
@@ -1352,7 +1341,7 @@ def main_kaggle_training():
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=dataloader_batch_size,
+        batch_size=BATCH_SIZE,
         shuffle=False,
         collate_fn=custom_collate_fn,
         num_workers=2 if IN_KAGGLE else 0,
@@ -1711,7 +1700,7 @@ class DirectDataset(Dataset):
                 processed_data.append(text.strip())
         
         # Duplicar datos si tenemos muy pocos para entrenamiento
-        while len(processed_data) < 50000:
+        while len(processed_data) < 1000000:
             processed_data.extend(processed_data[:100])
         
         # Dividir en train/validation
