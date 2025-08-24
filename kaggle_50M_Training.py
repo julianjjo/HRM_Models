@@ -1168,9 +1168,29 @@ def test_model_kaggle():
     """Prueba el modelo final y muestra generación de ejemplo"""
     print("\n🧪 Probando generación del modelo final...")
     
-    # Variables globales necesarias
-    global tokenizer, device
+    # Variables locales necesarias
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Inicializar tokenizer si no existe
+    try:
+        # Verificar si existe un tokenizer guardado
+        model_path = KAGGLE_CONFIG['output_dir']
+        tokenizer_path = os.path.join(model_path, "tokenizer.json")
+        
+        if os.path.exists(tokenizer_path):
+            # Cargar tokenizer guardado
+            tokenizer = SimpleTokenizer(vocab_size=30000)
+            tokenizer.load(tokenizer_path)
+            print("✅ Tokenizer cargado desde archivo guardado")
+        else:
+            # Crear tokenizer básico para test
+            tokenizer = SimpleTokenizer(vocab_size=53)  # Vocab size básico
+            print("⚠️ Usando tokenizer básico para test (vocabulario no encontrado)")
+            return  # Skip test if no proper tokenizer
+            
+    except Exception as tokenizer_error:
+        print(f"❌ Error inicializando tokenizer: {tokenizer_error}")
+        return
     
     try:
         # Cargar modelo guardado
@@ -1606,7 +1626,12 @@ def main_kaggle_training():
     
     for prompt in test_prompts:
         try:
-            inputs = tokenizer(prompt, return_tensors="pt").to(device)
+            # Fix: Handle tokenizer output correctly
+            tokenized = tokenizer(prompt, return_tensors="pt")
+            if isinstance(tokenized, dict):
+                inputs = {k: v.to(device) for k, v in tokenized.items()}
+            else:
+                inputs = tokenized.to(device)
             
             with torch.no_grad():
                 outputs = model.generate(
