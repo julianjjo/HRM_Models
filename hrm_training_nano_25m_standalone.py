@@ -65,6 +65,15 @@ class SimpleIterableDataset:
     def __len__(self):
         return len(self.data)
     
+    def __getitem__(self, idx):
+        """Enable indexing for DataLoader compatibility"""
+        if isinstance(idx, int):
+            return list(self.data)[idx]
+        elif isinstance(idx, slice):
+            return [list(self.data)[i] for i in range(*idx.indices(len(self.data)))]
+        else:
+            raise TypeError(f"Invalid index type: {type(idx)}")
+    
     def shuffle(self, seed=None, buffer_size=None):
         """Shuffle the dataset"""
         import random
@@ -568,7 +577,7 @@ class HRMText1Config(SimpleConfig):
                  use_rotary_embeddings=True, # NUEVO: RoPE
                  rotary_embedding_base=10000,
                  use_flash_attention=True,   # NUEVO: Flash Attention
-                 gradient_checkpointing=True, # NUEVO: Para ahorrar memoria
+                 gradient_checkpointing=False, # Disabled - incompatible with dynamic HRM computation
                  h_update_period=4,          # NUEVO: H-module se actualiza cada 4 pasos
                  **kwargs):
         super().__init__(**kwargs)
@@ -997,8 +1006,13 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
                    self.config.ponder_loss_weight * ponder_loss +
                    0.01 * q_learning_loss)  # Small weight for Q-learning
         
-        from transformers.modeling_outputs import CausalLMOutputWithPast
-        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
+        class CausalLMOutput:
+            def __init__(self, loss, logits, past_key_values=None):
+                self.loss = loss
+                self.logits = logits
+                self.past_key_values = past_key_values
+        
+        return CausalLMOutput(loss=loss, logits=logits, past_key_values=None)
     
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
@@ -1324,7 +1338,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Nano-25M-v1.0-output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Nano-25M-standalone-v1.0-output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -2483,7 +2497,7 @@ def tokenize_function(examples):
     
     # Optimización para C4: procesar textos con filtro eficiente
     for text in text_field:
-        if isinstance(text, str) and len(text) > 100:  # Filtro optimizado para calidad
+        if isinstance(text, str):  # Filtro optimizado para calidad
             texts.append(str(text) + tokenizer.eos_token)
     
     # Tokenización optimizada para streaming masivo
@@ -2563,12 +2577,19 @@ def custom_collate_fn(batch):
     # Extraer input_ids del batch
     input_ids = [item['input_ids'] for item in batch]
     
+    # Convertir listas a tensores si es necesario
+    input_ids_tensors = []
+    for ids in input_ids:
+        if isinstance(ids, list):
+            ids = torch.tensor(ids, dtype=torch.long)
+        input_ids_tensors.append(ids)
+    
     # Encontrar la longitud máxima en el batch
-    max_length = max(len(ids) for ids in input_ids)
+    max_length = max(len(ids) for ids in input_ids_tensors)
     
     # Hacer padding con tokenizer.pad_token_id
     padded_input_ids = []
-    for ids in input_ids:
+    for ids in input_ids_tensors:
         if len(ids) < max_length:
             # Pad con el pad_token_id
             padding_length = max_length - len(ids)
@@ -2579,7 +2600,7 @@ def custom_collate_fn(batch):
     
     # Crear attention_mask
     attention_mask = []
-    for ids in input_ids:
+    for ids in input_ids_tensors:
         mask = torch.ones(max_length, dtype=torch.long)
         if len(ids) < max_length:
             mask[len(ids):] = 0  # Marcar padding como 0
@@ -3213,7 +3234,8 @@ def test_model_and_summary():
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperature=0.7, top_k=50):
     model.eval()
-    inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
+    inputs = tokenizer(prompt_text, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     
     with torch.inference_mode(), torch.amp.autocast(
         device_type=device.type, 
