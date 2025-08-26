@@ -65,6 +65,15 @@ class SimpleIterableDataset:
     def __len__(self):
         return len(self.data)
     
+    def __getitem__(self, idx):
+        """Enable indexing for DataLoader compatibility"""
+        if isinstance(idx, int):
+            return list(self.data)[idx]
+        elif isinstance(idx, slice):
+            return [list(self.data)[i] for i in range(*idx.indices(len(self.data)))]
+        else:
+            raise TypeError(f"Invalid index type: {type(idx)}")
+    
     def shuffle(self, seed=None, buffer_size=None):
         """Shuffle the dataset"""
         import random
@@ -2548,7 +2557,7 @@ def tokenize_function(examples):
     
     # Optimización para C4: procesar textos con filtro realista para dataset C4
     for text in text_field:
-        if isinstance(text, str) and len(text) > 50:  # Filtro realista basado en tamaños reales del dataset (75-99 chars)
+        if isinstance(text, str) and len(text) > 10:  # Filtro realista basado en tamaños reales del dataset (75-99 chars)
             texts.append(str(text) + tokenizer.eos_token)
     
     # Debug: verificar si tenemos textos después del filtro
