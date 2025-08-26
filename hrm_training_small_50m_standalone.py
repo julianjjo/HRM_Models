@@ -2546,20 +2546,34 @@ def tokenize_function(examples):
         else:
             raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
     
-    # Optimización para C4: procesar textos con filtro eficiente
+    # Optimización para C4: procesar textos con filtro optimizado para contexto completo
     for text in text_field:
-        if isinstance(text, str) and len(text) > 100:  # Filtro optimizado para calidad
+        if isinstance(text, str) and len(text) > 400:  # Filtro optimizado para aprovechar BLOCK_SIZE=768
             texts.append(str(text) + tokenizer.eos_token)
+    
+    # Debug: verificar si tenemos textos después del filtro
+    if not texts:
+        print(f"⚠️  WARNING: No hay textos válidos después del filtro (>400 chars) en el batch")
+        print(f"   Campos disponibles: {list(examples.keys())}")
+        print(f"   Tamaños de texto: {[len(str(t)) if isinstance(t, str) else 'No string' for t in text_field[:5]]}")
+        # Devolver resultado vacío pero con estructura correcta
+        return {"input_ids": []}
     
     # Tokenización optimizada para streaming masivo
     # Sin padding para mayor eficiencia en memoria y procesamiento
-    return tokenizer(
+    result = tokenizer(
         texts, 
         truncation=True, 
         max_length=BLOCK_SIZE, 
         padding=False,  # Eliminado padding para streaming efficiency
         return_attention_mask=False  # Sin attention mask para optimizar memoria
     )
+    
+    # Debug: verificar resultado de tokenización
+    if not result.get("input_ids") or len(result["input_ids"]) == 0:
+        print(f"⚠️  WARNING: Tokenización resultó vacía para {len(texts)} textos")
+    
+    return result
 
 # Función para verificar si es IterableDataset (necesaria en el loop)
 def is_iterable_dataset(dataset):
@@ -2642,6 +2656,17 @@ def custom_collate_fn(batch):
     Collate function personalizada para manejar tensores de diferentes longitudes
     Hace padding a la longitud máxima del batch
     """
+    # Filtrar elementos vacíos del batch
+    batch = [item for item in batch if item.get('input_ids') is not None and len(item['input_ids']) > 0]
+    
+    if not batch:
+        # Si el batch está completamente vacío, devolver un batch mínimo
+        print("⚠️  WARNING: Batch completamente vacío en collate_fn")
+        return {
+            'input_ids': torch.tensor([[tokenizer.pad_token_id]], dtype=torch.long),
+            'attention_mask': torch.tensor([[0]], dtype=torch.long)
+        }
+    
     # Extraer input_ids del batch
     input_ids = [item['input_ids'] for item in batch]
     
@@ -3226,8 +3251,28 @@ def save_final_model():
         print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
         model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
 
-    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
+    # Guardar el modelo usando torch.save para modelos personalizados
+    model_save_path = os.path.join(OUTPUT_DIR, "pytorch_model.bin")
+    torch.save(model_to_save.state_dict(), model_save_path)
+    
+    # Guardar tokenizer usando su método save_pretrained personalizado
     tokenizer.save_pretrained(OUTPUT_DIR)
+    
+    # Crear config.json para compatibilidad
+    config_path = os.path.join(OUTPUT_DIR, "config.json")
+    model_config = {
+        'model_type': 'HRMText1',
+        'vocab_size': len(tokenizer),
+        'block_size': model_to_save.config.block_size if hasattr(model_to_save, 'config') else 768,
+        'n_layer': model_to_save.config.n_layer if hasattr(model_to_save, 'config') else 12,
+        'n_head': model_to_save.config.n_head if hasattr(model_to_save, 'config') else 12,
+        'n_embd': model_to_save.config.n_embd if hasattr(model_to_save, 'config') else 768,
+        'architectures': ['HRMText1']
+    }
+    
+    with open(config_path, 'w') as f:
+        json.dump(model_config, f, indent=2)
+    
     print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
     # Subir modelo a Hugging Face Hub
@@ -3236,18 +3281,19 @@ def save_final_model():
             print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
             api = HfApi()
 
-            # Subir el modelo usando push_to_hub
-            model_to_save.push_to_hub(
-                HF_REPO_ID,
-                token=HF_TOKEN,
-                commit_message=f"Upload HRM-Models 50M small model"
-            )
+            # Crear el repositorio si no existe
+            try:
+                api.create_repo(repo_id=HF_REPO_ID, token=HF_TOKEN, private=False, exist_ok=True)
+                print(f"✅ Repositorio {HF_REPO_ID} verificado/creado")
+            except Exception as e:
+                print(f"⚠️  Error creando repositorio: {e}")
 
-            # Subir el tokenizador
-            tokenizer.push_to_hub(
-                HF_REPO_ID,
+            # Subir todos los archivos del modelo usando upload_folder
+            api.upload_folder(
+                folder_path=OUTPUT_DIR,
+                repo_id=HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Models 50M small model"
+                commit_message="Upload HRM-Models 50M small model and tokenizer"
             )
 
             print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
