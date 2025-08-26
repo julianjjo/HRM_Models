@@ -577,7 +577,7 @@ class HRMText1Config(SimpleConfig):
                  use_rotary_embeddings=True, # NUEVO: RoPE
                  rotary_embedding_base=10000,
                  use_flash_attention=True,   # NUEVO: Flash Attention
-                 gradient_checkpointing=True, # NUEVO: Para ahorrar memoria
+                 gradient_checkpointing=False, # Disabled - incompatible with dynamic HRM computation
                  h_update_period=4,          # NUEVO: H-module se actualiza cada 4 pasos
                  **kwargs):
         super().__init__(**kwargs)
@@ -1028,8 +1028,13 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
                    self.config.ponder_loss_weight * ponder_loss +
                    0.01 * q_learning_loss)  # Small weight for Q-learning
         
-        from transformers.modeling_outputs import CausalLMOutputWithPast
-        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=None)
+        class CausalLMOutput:
+            def __init__(self, loss, logits, past_key_values=None):
+                self.loss = loss
+                self.logits = logits
+                self.past_key_values = past_key_values
+        
+        return CausalLMOutput(loss=loss, logits=logits, past_key_values=None)
     
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
@@ -1283,7 +1288,7 @@ MODEL_PARAMS = {
     "halt_bias_init": -0.5,            # Bias inicial más conservador para estabilidad
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": False,      # Deshabilitado para mejor compatibilidad y menor memoria
-    "gradient_checkpointing": True,    # Habilitado para optimización de memoria
+    "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,  # Use global setting
     "h_update_period": 3,              # H-module se actualiza cada 3 pasos para 50M 
 }
 
