@@ -1362,7 +1362,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Small-50M-v1.0-output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Small-50M-standalone-v1.0-output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -3387,7 +3387,8 @@ def test_model_and_summary():
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperature=0.7, top_k=50):
     model.eval()
-    inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
+    inputs = tokenizer(prompt_text, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     
     with torch.inference_mode(), torch.amp.autocast(
         device_type=device.type, 
