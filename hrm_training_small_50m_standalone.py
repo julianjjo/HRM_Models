@@ -2546,14 +2546,14 @@ def tokenize_function(examples):
         else:
             raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
     
-    # Optimización para C4: procesar textos con filtro optimizado para contexto completo
+    # Optimización para C4: procesar textos con filtro realista para dataset C4
     for text in text_field:
-        if isinstance(text, str) and len(text) > 400:  # Filtro optimizado para aprovechar BLOCK_SIZE=768
+        if isinstance(text, str) and len(text) > 50:  # Filtro realista basado en tamaños reales del dataset (75-99 chars)
             texts.append(str(text) + tokenizer.eos_token)
     
     # Debug: verificar si tenemos textos después del filtro
     if not texts:
-        print(f"⚠️  WARNING: No hay textos válidos después del filtro (>400 chars) en el batch")
+        print(f"⚠️  WARNING: No hay textos válidos después del filtro (>50 chars) en el batch")
         print(f"   Campos disponibles: {list(examples.keys())}")
         print(f"   Tamaños de texto: {[len(str(t)) if isinstance(t, str) else 'No string' for t in text_field[:5]]}")
         # Devolver resultado vacío pero con estructura correcta
