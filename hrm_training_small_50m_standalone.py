@@ -157,17 +157,43 @@ class SimpleIterableDataset:
         return self
 
 def load_dataset(name, config=None, streaming=True, split="train"):
-    """Standalone dataset loader with fallback data"""
-    print(f"🔄 Loading standalone dataset: {name}")
+    """Enhanced dataset loader - tries real datasets first, falls back to embedded data"""
+    print(f"🔄 Loading dataset: {name}")
     
-    # Por ahora usar datos simples de ejemplo
-    # En producción esto se conectaría al dataset real
-    dataset_dict = SimpleDatasetDict()
-    
-    if split:
-        return dataset_dict[split]
-    else:
-        return dataset_dict
+    try:
+        # Try to import and use real datasets library
+        from datasets import load_dataset as hf_load_dataset
+        print(f"✅ Loading real dataset: {name} (config: {config})")
+        
+        if config:
+            raw_datasets = hf_load_dataset(name, config, streaming=streaming)
+        else:
+            raw_datasets = hf_load_dataset(name, streaming=streaming)
+            
+        if split:
+            return raw_datasets[split] if split in raw_datasets else raw_datasets['train']
+        else:
+            return raw_datasets
+            
+    except ImportError:
+        print(f"⚠️  datasets library not available, using embedded fallback data")
+        # Fallback to embedded data
+        dataset_dict = SimpleDatasetDict()
+        
+        if split:
+            return dataset_dict[split]
+        else:
+            return dataset_dict
+    except Exception as e:
+        print(f"⚠️  Error loading real dataset {name}: {e}")
+        print(f"🔄 Falling back to embedded data")
+        # Fallback to embedded data
+        dataset_dict = SimpleDatasetDict()
+        
+        if split:
+            return dataset_dict[split]
+        else:
+            return dataset_dict
 
 print("✅ Embedded standalone dataset loader initialized")
 
@@ -2440,25 +2466,8 @@ print(f"!!! USANDO UN SUBCONJUNTO DEL {DATASET_SUBSET_PERCENT}% DEL DATASET !!!"
 print(f"Tomando aprox. {num_train_samples:,} ejemplos de entrenamiento.")
 print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.\n")
 
-# STANDALONE FIX: Limitar a los datos disponibles en SimpleDatasetDict
-# En modo standalone, raw_datasets será un SimpleDatasetDict con datos limitados
-if not ACTIVE_DATASET.startswith("kaggle") and DATASET_NAME in ["allenai/c4", "allenai/dolma"]:
-    # En modo standalone, usar solo los datos disponibles en SimpleDatasetDict  
-    available_train = 900  # SimpleDatasetDict tiene ~900 samples en train
-    available_val = 100    # SimpleDatasetDict tiene ~100 samples en validation
-    
-    original_train = num_train_samples
-    original_val = num_val_samples
-    
-    if num_train_samples > available_train:
-        num_train_samples = available_train
-        print(f"⚠️  STANDALONE MODE: Limitando train samples de {original_train:,} a {num_train_samples}")
-    
-    if num_val_samples > available_val:
-        num_val_samples = available_val  
-        print(f"⚠️  STANDALONE MODE: Limitando val samples de {original_val:,} a {num_val_samples}")
-    
-    print(f"📊 STANDALONE: Usando {num_train_samples} train + {num_val_samples} val samples\n")
+# STANDALONE MODE DISABLED: Using full dataset for training
+print(f"🚀 FULL DATASET MODE: Usando {num_train_samples:,} train + {num_val_samples:,} val samples\n")
 
 # Configurar los splits según el dataset
 if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
