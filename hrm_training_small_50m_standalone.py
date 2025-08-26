@@ -2558,72 +2558,84 @@ def tokenize_function(examples):
         truncation=True, 
         max_length=BLOCK_SIZE, 
         padding=False,  # Eliminado padding para streaming efficiency
-        add_special_tokens=False,  # Ya agregamos EOS token manualmente
         return_attention_mask=False  # Sin attention mask para optimizar memoria
     )
-
-print("Applying tokenization function (on-the-fly)...")
-tokenized_splits = {}
-
-# Configuración para multi-GPU (necesario antes del loop de tokenización)
-num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-is_multi_gpu = num_gpus > 1 and not FORCE_SINGLE_GPU
-safe_num_workers = get_dataloader_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
-tokenization_workers = get_tokenization_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
 
 # Función para verificar si es IterableDataset (necesaria en el loop)
 def is_iterable_dataset(dataset):
     return isinstance(dataset, IterableDataset)
 
-# Detectar columnas a eliminar dinámicamente
-try:
-    sample = next(iter(raw_datasets["train"]))
-    columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
-    print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
-    print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
-except StopIteration:
-    print("⚠️ WARNING: El dataset de entrenamiento está vacío!")
-    print("📊 Usando configuración de columnas por defecto para datasets de texto")
-    columns_to_remove = ["text"]  # Columna por defecto para datasets de texto
+# Only run tokenization if not in import-only mode
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    print("Applying tokenization function (on-the-fly)...")
+    tokenized_splits = {}
 
-for split_name in ["train", "validation"]:
-    # Optimización para C4 streaming: batch size más grande y configuración eficiente
-    if ACTIVE_DATASET == "c4" and is_multi_gpu:
-        # Configuración optimizada para C4 streaming masivo
-        batch_size_tokenization = 2000  # Batch más grande para C4
-        num_proc = min(tokenization_workers, 8)  # Paralelización limitada
-        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc}")
-    else:
-        batch_size_tokenization = 1000
-        num_proc = min(tokenization_workers, 4)
-    
-    # Para IterableDataset no usar num_proc ni desc (no soportados)
-    if is_iterable_dataset(raw_datasets[split_name]):
-        print(f"🚀 Tokenizando {split_name} para C4 streaming (IterableDataset)")
-        tokenized_splits[split_name] = raw_datasets[split_name].map(
-            tokenize_function, 
-            batched=True,
-            batch_size=batch_size_tokenization,
-            remove_columns=columns_to_remove
-        ).with_format("torch")
-    else:
-        tokenized_splits[split_name] = raw_datasets[split_name].map(
-            tokenize_function, 
-            batched=True,
-            batch_size=batch_size_tokenization,
-            num_proc=num_proc,
-            remove_columns=columns_to_remove,
-            desc=f"Tokenizando {split_name} para C4 streaming"
-        ).with_format("torch")
+    # Configuración para multi-GPU (necesario antes del loop de tokenización)
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    is_multi_gpu = num_gpus > 1 and not FORCE_SINGLE_GPU
+    safe_num_workers = get_dataloader_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
+    tokenization_workers = get_tokenization_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
+
+    # Detectar columnas a eliminar dinámicamente
+    try:
+        sample = next(iter(raw_datasets["train"]))
+        columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
+        print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
+        print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+    except StopIteration:
+        print("⚠️ WARNING: El dataset de entrenamiento está vacío!")
+        print("📊 Usando configuración de columnas por defecto para datasets de texto")
+        columns_to_remove = ["text"]  # Columna por defecto para datasets de texto
+
+    for split_name in ["train", "validation"]:
+        # Optimización para C4 streaming: batch size más grande y configuración eficiente
+        if ACTIVE_DATASET == "c4" and is_multi_gpu:
+            # Configuración optimizada para C4 streaming masivo
+            batch_size_tokenization = 2000  # Batch más grande para C4
+            num_proc = min(tokenization_workers, 8)  # Paralelización limitada
+            print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc}")
+        else:
+            batch_size_tokenization = 1000
+            num_proc = min(tokenization_workers, 4)
+        
+        # Para IterableDataset no usar num_proc ni desc (no soportados)
+        if is_iterable_dataset(raw_datasets[split_name]):
+            print(f"🚀 Tokenizando {split_name} para C4 streaming (IterableDataset)")
+            tokenized_splits[split_name] = raw_datasets[split_name].map(
+                tokenize_function, 
+                batched=True,
+                batch_size=batch_size_tokenization,
+                remove_columns=columns_to_remove
+            ).with_format("torch")
+        else:
+            tokenized_splits[split_name] = raw_datasets[split_name].map(
+                tokenize_function, 
+                batched=True,
+                batch_size=batch_size_tokenization,
+                num_proc=num_proc,
+                remove_columns=columns_to_remove,
+                desc=f"Tokenizando {split_name} para C4 streaming"
+            ).with_format("torch")
+else:
+    # In import-only mode, skip tokenization
+    tokenized_splits = {}
+    is_multi_gpu = False
+    safe_num_workers = 0
+    tokenization_workers = 0
 
 # ### FIX DATALOADER ###: Variables ya definidas arriba
 
 
 # Función is_iterable_dataset ya definida arriba
 
-# Detectar si los datasets son iterables
-train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
-val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
+# Only check dataset types if not in import-only mode
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    # Detectar si los datasets son iterables
+    train_is_iterable = is_iterable_dataset(tokenized_splits["train"])
+    val_is_iterable = is_iterable_dataset(tokenized_splits["validation"])
+else:
+    train_is_iterable = False
+    val_is_iterable = False
 
 def custom_collate_fn(batch):
     """
@@ -2660,84 +2672,86 @@ def custom_collate_fn(batch):
         'attention_mask': torch.stack(attention_mask)
     }
 
-print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
+# Only create DataLoaders if not in import-only mode
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 
-# Configuración optimizada para multi-GPU (variables ya definidas arriba)
+    # Configuración optimizada para multi-GPU (variables ya definidas arriba)
 
-# Configuración optimizada para C4 streaming con multi-GPU
-# Configuración de DataLoader basada en workers disponibles
-if safe_num_workers > 0:
-    prefetch_factor = get_optimized_prefetch_factor(safe_num_workers, is_multi_gpu)
-    persistent_workers = True
-    
-    if is_multi_gpu:
-        # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
-        local_rank = int(os.environ.get('LOCAL_RANK', 0))
-        pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
-        multiprocessing_context = "fork"  # Compatible sin __main__ guard
+    # Configuración optimizada para C4 streaming con multi-GPU
+    # Configuración de DataLoader basada en workers disponibles
+    if safe_num_workers > 0:
+        prefetch_factor = get_optimized_prefetch_factor(safe_num_workers, is_multi_gpu)
+        persistent_workers = True
         
-        hf_status = "🚀 hf_transfer optimizado" if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1' else "🐌 standard I/O"
-        print(f"🚀 Configuración Multi-GPU ({hf_status}): prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
-        print(f"   📊 Buffer optimizado para streaming dataset")
+        if is_multi_gpu:
+            # Para DataParallel usar GPU 0, para distribuido usar LOCAL_RANK
+            local_rank = int(os.environ.get('LOCAL_RANK', 0))
+            pin_memory_device = f"cuda:{local_rank}"  # Pin a GPU específica
+            multiprocessing_context = "fork"  # Compatible sin __main__ guard
+            
+            hf_status = "🚀 hf_transfer optimizado" if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1' else "🐌 standard I/O"
+            print(f"🚀 Configuración Multi-GPU ({hf_status}): prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
+            print(f"   📊 Buffer optimizado para streaming dataset")
+        else:
+            pin_memory_device = None
+            multiprocessing_context = None
+            
+            hf_status = "hf_transfer" if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1' else "standard"
+            print(f"🔧 Configuración Single-GPU ({hf_status}): prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
     else:
+        # Sin workers - modo import o configuración incorrecta
+        prefetch_factor = None
+        persistent_workers = False
         pin_memory_device = None
         multiprocessing_context = None
-        
-        hf_status = "hf_transfer" if os.environ.get('HF_HUB_ENABLE_HF_TRANSFER') == '1' else "standard"
-        print(f"🔧 Configuración Single-GPU ({hf_status}): prefetch_factor={prefetch_factor}, workers={safe_num_workers}")
-else:
-    # Sin workers - modo import o configuración incorrecta
-    prefetch_factor = None
-    persistent_workers = False
-    pin_memory_device = None
-    multiprocessing_context = None
-    print(f"⚠️  Sin workers disponibles: prefetch_factor=None, workers={safe_num_workers}")
-    print(f"   💡 Verifica que HRM_IMPORT_ONLY no esté activado para entrenamiento")
+        print(f"⚠️  Sin workers disponibles: prefetch_factor=None, workers={safe_num_workers}")
+        print(f"   💡 Verifica que HRM_IMPORT_ONLY no esté activado para entrenamiento")
 
-# Configurar argumentos del DataLoader condicionalmente
-train_kwargs = {
-    "batch_size": BATCH_SIZE,
-    "num_workers": safe_num_workers,
-    "pin_memory": True,
-    "persistent_workers": persistent_workers,
-    "shuffle": False,  # False para datasets iterables
-    "collate_fn": custom_collate_fn,
-    "drop_last": is_multi_gpu,  # Drop last para consistency en multi-GPU
-}
+    # Configurar argumentos del DataLoader condicionalmente
+    train_kwargs = {
+        "batch_size": BATCH_SIZE,
+        "num_workers": safe_num_workers,
+        "pin_memory": True,
+        "persistent_workers": persistent_workers,
+        "shuffle": False,  # False para datasets iterables
+        "collate_fn": custom_collate_fn,
+        "drop_last": is_multi_gpu,  # Drop last para consistency en multi-GPU
+    }
 
-# Solo agregar argumentos no-None
-if prefetch_factor is not None:
-    train_kwargs["prefetch_factor"] = prefetch_factor
-    print(f"   ✅ DataLoader configurado con prefetch_factor={prefetch_factor}")
-else:
-    print(f"   ⚠️  DataLoader SIN prefetch_factor (workers={safe_num_workers})")
-if pin_memory_device is not None:
-    train_kwargs["pin_memory_device"] = pin_memory_device
-if multiprocessing_context is not None:
-    train_kwargs["multiprocessing_context"] = multiprocessing_context
+    # Solo agregar argumentos no-None
+    if prefetch_factor is not None:
+        train_kwargs["prefetch_factor"] = prefetch_factor
+        print(f"   ✅ DataLoader configurado con prefetch_factor={prefetch_factor}")
+    else:
+        print(f"   ⚠️  DataLoader SIN prefetch_factor (workers={safe_num_workers})")
+    if pin_memory_device is not None:
+        train_kwargs["pin_memory_device"] = pin_memory_device
+    if multiprocessing_context is not None:
+        train_kwargs["multiprocessing_context"] = multiprocessing_context
 
-train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
+    train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
 
-# Configurar argumentos del validation DataLoader condicionalmente
-val_kwargs = {
-    "batch_size": BATCH_SIZE,
-    "num_workers": safe_num_workers,
-    "pin_memory": True,
-    "persistent_workers": persistent_workers,
-    "shuffle": False,
-    "collate_fn": custom_collate_fn,
-    "drop_last": False,  # No drop last en validación
-}
+    # Configurar argumentos del validation DataLoader condicionalmente
+    val_kwargs = {
+        "batch_size": BATCH_SIZE,
+        "num_workers": safe_num_workers,
+        "pin_memory": True,
+        "persistent_workers": persistent_workers,
+        "shuffle": False,
+        "collate_fn": custom_collate_fn,
+        "drop_last": False,  # No drop last en validación
+    }
 
-# Solo agregar argumentos no-None
-if prefetch_factor is not None:
-    val_kwargs["prefetch_factor"] = prefetch_factor
-if pin_memory_device is not None:
-    val_kwargs["pin_memory_device"] = pin_memory_device
-if multiprocessing_context is not None:
-    val_kwargs["multiprocessing_context"] = multiprocessing_context
+    # Solo agregar argumentos no-None
+    if prefetch_factor is not None:
+        val_kwargs["prefetch_factor"] = prefetch_factor
+    if pin_memory_device is not None:
+        val_kwargs["pin_memory_device"] = pin_memory_device
+    if multiprocessing_context is not None:
+        val_kwargs["multiprocessing_context"] = multiprocessing_context
 
-val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
+    val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
 
 # Sistema de buffer inteligente para C4 streaming
 class StreamingBufferWrapper:
@@ -2798,19 +2812,20 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     model = HRMText1(config).to(device)
 
 # === CONFIGURACIÓN DE GPU Y MULTI-GPU ===
-print(f"\n🔧 Configuración GPU:")
-print(f"   💻 GPUs disponibles: {num_gpus}")
-print(f"   🎯 Forzar single-GPU: {FORCE_SINGLE_GPU}")
-print(f"   🔗 Multi-GPU habilitado: {is_multi_gpu}")
+if not os.environ.get('HRM_IMPORT_ONLY'):
+    print(f"\n🔧 Configuración GPU:")
+    print(f"   💻 GPUs disponibles: {num_gpus}")
+    print(f"   🎯 Forzar single-GPU: {FORCE_SINGLE_GPU}")
+    print(f"   🔗 Multi-GPU habilitado: {is_multi_gpu}")
 
-if num_gpus > 1 and not FORCE_SINGLE_GPU:
-    print(f"🚀 Configurando para entrenamiento multi-GPU con {num_gpus} GPUs")
-    # La lógica multi-GPU se maneja más abajo
-elif FORCE_SINGLE_GPU:
-    print(f"⚠️  Multi-GPU deshabilitado por configuración (FORCE_SINGLE_GPU=True)")
-    print(f"   💡 Esto evita problemas de sincronización de device en RMSNorm y otros componentes")
-else:
-    print(f"ℹ️  Usando single-GPU por disponibilidad de hardware")
+    if num_gpus > 1 and not FORCE_SINGLE_GPU:
+        print(f"🚀 Configurando para entrenamiento multi-GPU con {num_gpus} GPUs")
+        # La lógica multi-GPU se maneja más abajo
+    elif FORCE_SINGLE_GPU:
+        print(f"⚠️  Multi-GPU deshabilitado por configuración (FORCE_SINGLE_GPU=True)")
+        print(f"   💡 Esto evita problemas de sincronización de device en RMSNorm y otros componentes")
+    else:
+        print(f"ℹ️  Usando single-GPU por disponibilidad de hardware")
 
 # Envolver modelo para multi-GPU (solo si no es import-only y no está forzado single-GPU)
 if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed and not FORCE_SINGLE_GPU:
@@ -2956,6 +2971,13 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
                 print(f"🔄 start_step actualizado de checkpoint para nuevo dataset: {start_step}")
     # Actualizar global_step con el valor cargado (ahora potencialmente ajustado)
     global_step = start_step
+else:
+    # In import-only mode, set dummy values for required variables
+    train_loader = None
+    val_loader = None
+    global_step = 0
+    num_gpus = 0
+    is_multi_gpu = False
 
 def main_training():
     """Función principal de entrenamiento con métricas avanzadas de TensorBoard"""
