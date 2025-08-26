@@ -2679,12 +2679,19 @@ def custom_collate_fn(batch):
     # Extraer input_ids del batch
     input_ids = [item['input_ids'] for item in batch]
     
+    # Convertir listas a tensores si es necesario
+    input_ids_tensors = []
+    for ids in input_ids:
+        if isinstance(ids, list):
+            ids = torch.tensor(ids, dtype=torch.long)
+        input_ids_tensors.append(ids)
+    
     # Encontrar la longitud máxima en el batch
-    max_length = max(len(ids) for ids in input_ids)
+    max_length = max(len(ids) for ids in input_ids_tensors)
     
     # Hacer padding con tokenizer.pad_token_id
     padded_input_ids = []
-    for ids in input_ids:
+    for ids in input_ids_tensors:
         if len(ids) < max_length:
             # Pad con el pad_token_id
             padding_length = max_length - len(ids)
@@ -2695,7 +2702,7 @@ def custom_collate_fn(batch):
     
     # Crear attention_mask
     attention_mask = []
-    for ids in input_ids:
+    for ids in input_ids_tensors:
         mask = torch.ones(max_length, dtype=torch.long)
         if len(ids) < max_length:
             mask[len(ids):] = 0  # Marcar padding como 0
