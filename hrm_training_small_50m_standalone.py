@@ -3260,15 +3260,35 @@ def save_final_model():
     
     # Crear config.json para compatibilidad
     config_path = os.path.join(OUTPUT_DIR, "config.json")
-    model_config = {
-        'model_type': 'HRMText1',
-        'vocab_size': len(tokenizer),
-        'block_size': model_to_save.config.block_size if hasattr(model_to_save, 'config') else 768,
-        'n_layer': model_to_save.config.n_layer if hasattr(model_to_save, 'config') else 12,
-        'n_head': model_to_save.config.n_head if hasattr(model_to_save, 'config') else 12,
-        'n_embd': model_to_save.config.n_embd if hasattr(model_to_save, 'config') else 768,
-        'architectures': ['HRMText1']
-    }
+    if hasattr(model_to_save, 'config'):
+        # Usar la configuración real del modelo
+        config = model_to_save.config
+        model_config = {
+            'model_type': getattr(config, 'model_type', 'HRMText1'),
+            'vocab_size': len(tokenizer),
+            'block_size': getattr(config, 'block_size', 768),
+            'n_layers': getattr(config, 'n_layers', 12),  # Corregido: n_layers no n_layer
+            'n_head': getattr(config, 'n_head', 12),
+            'n_embd': getattr(config, 'n_embd', 768),
+            'd_ff': getattr(config, 'd_ff', 3072),
+            'dropout': getattr(config, 'dropout', 0.1),
+            'halt_max_steps': getattr(config, 'halt_max_steps', 12),
+            'ponder_loss_weight': getattr(config, 'ponder_loss_weight', 0.01),
+            'use_rotary_embeddings': getattr(config, 'use_rotary_embeddings', True),
+            'use_flash_attention': getattr(config, 'use_flash_attention', True),
+            'architectures': ['HRMText1']
+        }
+    else:
+        # Configuración por defecto si no hay config
+        model_config = {
+            'model_type': 'HRMText1',
+            'vocab_size': len(tokenizer),
+            'block_size': 768,
+            'n_layers': 12,
+            'n_head': 12,
+            'n_embd': 768,
+            'architectures': ['HRMText1']
+        }
     
     with open(config_path, 'w') as f:
         json.dump(model_config, f, indent=2)
