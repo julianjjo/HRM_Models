@@ -2562,12 +2562,12 @@ def tokenize_function(examples):
     
     # Optimización para C4: procesar textos con filtro realista para dataset C4
     for text in text_field:
-        if isinstance(text, str) and len(text) > 10:  # Filtro realista basado en tamaños reales del dataset (75-99 chars)
+        if isinstance(text, str):  # Filtro realista basado en tamaños reales del dataset (75-99 chars)
             texts.append(str(text) + tokenizer.eos_token)
     
     # Debug: verificar si tenemos textos después del filtro
     if not texts:
-        print(f"⚠️  WARNING: No hay textos válidos después del filtro (>50 chars) en el batch")
+        print(f"⚠️  WARNING: No hay textos válidos después del filtro (>1 char) en el batch")
         print(f"   Campos disponibles: {list(examples.keys())}")
         print(f"   Tamaños de texto: {[len(str(t)) if isinstance(t, str) else 'No string' for t in text_field[:5]]}")
         # Devolver resultado vacío pero con estructura correcta
