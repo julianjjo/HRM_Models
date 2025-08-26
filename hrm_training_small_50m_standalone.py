@@ -2562,7 +2562,7 @@ def tokenize_function(examples):
     
     # Optimización para C4: procesar textos con filtro realista para dataset C4
     for text in text_field:
-        if isinstance(text, str):  # Filtro realista basado en tamaños reales del dataset (75-99 chars)
+        if isinstance(text, str):
             texts.append(str(text) + tokenizer.eos_token)
     
     # Debug: verificar si tenemos textos después del filtro
