@@ -1284,7 +1284,7 @@ CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automát
 BLOCK_SIZE = 768         # Optimizado para memoria eficiente (768 tokens - 25% menos memoria que 1024)
 
 # Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
-BATCH_SIZE = 6           # Optimizado para single-GPU con mejor throughput (6x más eficiente que batch=1)
+BATCH_SIZE = 1           # Optimizado para single-GPU con mejor throughput (6x más eficiente que batch=1)
 GRAD_ACCUM_STEPS = 6     # Batch efectivo de 36 para mejor estabilidad y uso de memoria
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
@@ -1298,7 +1298,7 @@ WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
-FORCE_SINGLE_GPU = True           # Forzar single-GPU (multi-GPU tiene problemas de device)
+FORCE_SINGLE_GPU = False          # Permitir multi-GPU para entrenamiento distribuido
 
 # --- CONFIGURACIÓN PARA MODELO MICRO OPTIMIZADO PARA H200 (~25M PARÁMETROS) ---
 # Configuración micro expandida para aprovechar mejor hardware potente (H200)
