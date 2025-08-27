@@ -1167,7 +1167,7 @@ CUSTOM_MIX_RATIOS = {
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "c4-english"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "checkpoint_dataset", etc.
+ACTIVE_DATASET = "checkpoint_dataset"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "checkpoint_dataset", etc.
 
 DATASETS_CONFIG = {
     "c4": {
