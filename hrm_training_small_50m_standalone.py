@@ -1167,7 +1167,7 @@ CUSTOM_MIX_RATIOS = {
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "c4-english"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "high_quality_1b", etc.
+ACTIVE_DATASET = "c4-english"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "checkpoint_dataset", etc.
 
 DATASETS_CONFIG = {
     "c4": {
@@ -1249,6 +1249,16 @@ DATASETS_CONFIG = {
         "repo_suffix": "HumanConv",
         "description": "Dataset de conversaciones humanas de Kaggle",
         "type": "kaggle"  # Identificador especial para datasets de Kaggle
+    },
+    "checkpoint_dataset": {
+        "name": "local_checkpoint",
+        "config": None,
+        "train_samples": None,  # Se detectará automáticamente
+        "val_samples": None,  # Se creará del 10% del entrenamiento
+        "repo_suffix": "Checkpoint",
+        "description": "Dataset local desde checkpoint_dataset/ (JSONL)",
+        "type": "local",  # Identificador para datasets locales
+        "path": "./checkpoint_dataset"  # Ruta local a los archivos JSONL
     }
 }
 
@@ -2430,6 +2440,71 @@ else:
             print(f"❌ Error descargando dataset de Kaggle: {e}")
             print("🔄 Cambiando a dataset C4 como respaldo...")
             raw_datasets = load_dataset("allenai/c4", "multilingual", streaming=True)
+    
+    elif DATASET_INFO.get("type") == "local":
+        # Lógica especial para datasets locales JSONL
+        local_path = DATASET_INFO.get("path", "./checkpoint_dataset")
+        print(f"📁 Cargando dataset local desde: {local_path}")
+        
+        try:
+            import glob
+            import json
+            
+            # Buscar archivos JSONL en el directorio
+            jsonl_files = glob.glob(os.path.join(local_path, "*.jsonl"))
+            
+            if not jsonl_files:
+                raise FileNotFoundError(f"No se encontraron archivos .jsonl en {local_path}")
+            
+            print(f"📄 Encontrados {len(jsonl_files)} archivos JSONL")
+            jsonl_files.sort()  # Asegurar orden consistente
+            
+            # Cargar usando datasets de Hugging Face
+            raw_datasets = load_dataset('json', data_files={'train': jsonl_files}, streaming=True)
+            
+            # Crear split de validación automático (10%)
+            print("🔄 Creando split train/validation (90%/10%)...")
+            train_dataset = raw_datasets['train']
+            
+            # Para datasets locales, crear splits sin streaming para mejor control
+            train_data = []
+            val_data = []
+            
+            print("📊 Procesando archivos JSONL para crear splits...")
+            sample_count = 0
+            for file_path in jsonl_files[:3]:  # Procesar solo algunos archivos para estimar
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            sample_count += 1
+                            if sample_count > 1000:  # Estimar con muestra
+                                break
+                if sample_count > 1000:
+                    break
+            
+            # Estimar total y crear splits
+            total_files = len(jsonl_files)
+            estimated_total = sample_count * total_files // 3 if sample_count > 0 else 10000
+            val_size = max(100, estimated_total // 10)  # 10% para validación, mínimo 100
+            
+            print(f"📈 Estimación: ~{estimated_total:,} muestras, {val_size:,} para validación")
+            
+            # Usar datasets streaming para eficiencia
+            raw_datasets = load_dataset('json', data_files={'train': jsonl_files}, streaming=True)
+            train_stream = raw_datasets['train']
+            
+            # Crear splits usando take/skip
+            raw_datasets = {
+                'train': train_stream.skip(val_size),
+                'validation': train_stream.take(val_size)
+            }
+            
+            print(f"✅ Dataset local cargado exitosamente desde {local_path}")
+            
+        except Exception as e:
+            print(f"❌ Error cargando dataset local: {e}")
+            print("🔄 Cambiando a dataset C4 como respaldo...")
+            raw_datasets = load_dataset("allenai/c4", "en", streaming=True)
     
     else:
         # Datasets normales de Hugging Face
