@@ -1147,7 +1147,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 5.0   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 1.0   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -1310,7 +1310,7 @@ CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automát
 BLOCK_SIZE = 768         # Optimizado para memoria eficiente (768 tokens - 25% menos memoria que 1024)
 
 # Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
-BATCH_SIZE = 8           # Optimizado para single-GPU con mejor throughput (6x más eficiente que batch=1)
+BATCH_SIZE = 32           # Optimizado para single-GPU con mejor throughput (6x más eficiente que batch=1)
 GRAD_ACCUM_STEPS = 6     # Batch efectivo de 36 para mejor estabilidad y uso de memoria
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
