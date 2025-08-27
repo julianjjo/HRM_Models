@@ -541,7 +541,7 @@ except ImportError:
 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
     print("GPU NVIDIA compatible con TF32 detectada. Activando la precisión de matmul 'high'.")
     torch.set_float32_matmul_precision('high')
-
+torch.cuda.empty_cache()
 # Verificar si Flash Attention está disponible
 try:
     import flash_attn
