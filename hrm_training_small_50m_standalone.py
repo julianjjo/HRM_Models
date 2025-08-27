@@ -126,6 +126,13 @@ class SimpleIterableDataset:
                 # Apply function to batch
                 result = function(batch_dict)
                 
+                # Debug: Print result to see what tokenization returns
+                if i == 0:  # Only print for first batch
+                    print(f"🔍 Debug tokenization result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
+                    if isinstance(result, dict):
+                        for key, val in result.items():
+                            print(f"   {key}: {len(val) if isinstance(val, list) else 'Not a list'}")
+                
                 # Convert result back to individual items
                 if isinstance(result, dict) and len(result) > 0:
                     # Get length of first value to determine batch size
@@ -156,6 +163,11 @@ class SimpleIterableDataset:
                 else:
                     filtered_data.append(item)
             mapped_data = filtered_data
+        
+        # Debug: Print final dataset size
+        print(f"🔍 Debug: Dataset after mapping has {len(mapped_data)} items")
+        if mapped_data:
+            print(f"   First item keys: {mapped_data[0].keys() if isinstance(mapped_data[0], dict) else 'Not a dict'}")
         
         return SimpleIterableDataset(mapped_data)
     
@@ -2772,16 +2784,17 @@ def tokenize_function(examples):
     
     # Optimización para C4: procesar textos con filtro realista para dataset C4
     for text in text_field:
-        if isinstance(text, str):
-            texts.append(str(text) + tokenizer.eos_token)
+        if isinstance(text, str) and len(text.strip()) > 1:
+            texts.append(str(text).strip() + " " + tokenizer.eos_token)
     
     # Debug: verificar si tenemos textos después del filtro
     if not texts:
         print(f"⚠️  WARNING: No hay textos válidos después del filtro (>1 char) en el batch")
         print(f"   Campos disponibles: {list(examples.keys())}")
         print(f"   Tamaños de texto: {[len(str(t)) if isinstance(t, str) else 'No string' for t in text_field[:5]]}")
-        # Devolver resultado vacío pero con estructura correcta
-        return {"input_ids": []}
+        # Devolver resultado vacío pero con estructura correcta - crear algunos ejemplos dummy
+        dummy_text = "Hello world " + tokenizer.eos_token
+        texts = [dummy_text] * min(10, len(text_field))  # Crear algunos ejemplos para evitar dataset vacío
     
     # Tokenización optimizada para streaming masivo
     # Sin padding para mayor eficiencia en memoria y procesamiento
