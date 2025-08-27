@@ -23,6 +23,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from torch.optim import AdamW
 
+# Hugging Face Hub imports
+try:
+    from huggingface_hub import HfApi
+    HF_API_AVAILABLE = True
+except ImportError:
+    HF_API_AVAILABLE = False
+    print("⚠️ WARNING: huggingface_hub no está disponible. No se podrá subir al Hub.")
+
 # ==============================================================================
 # --- STANDALONE DATASET LOADER (EMBEDDED) ---
 # ==============================================================================
@@ -1054,13 +1062,9 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
                    self.config.ponder_loss_weight * ponder_loss +
                    0.01 * q_learning_loss)  # Small weight for Q-learning
         
-        class CausalLMOutput:
-            def __init__(self, loss, logits, past_key_values=None):
-                self.loss = loss
-                self.logits = logits
-                self.past_key_values = past_key_values
-        
-        return CausalLMOutput(loss=loss, logits=logits, past_key_values=None)
+        # Para compatibilidad con DataParallel, retornar tupla simple
+        # en lugar de objeto custom que causa problemas en el gather()
+        return (loss, logits, None)  # (loss, logits, past_key_values)
     
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
@@ -1108,9 +1112,9 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
                     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
                     
                     if missing_keys:
-                        print(f"⚠️ Claves faltantes: {missing_keys}")
+                        print(f"📝 Claves faltantes (normal para carga parcial): {len(missing_keys)} claves")
                     if unexpected_keys:
-                        print(f"⚠️ Claves inesperadas: {unexpected_keys}")
+                        print(f"📝 Claves inesperadas: {len(unexpected_keys)} claves")
                     
                     print(f"✅ Modelo cargado desde: {model_path}")
                     loaded = True
@@ -2177,8 +2181,8 @@ else:
     tokenizer = None
 
 # Usar las cifras específicas del dataset seleccionado y calcular muestras
-TOTAL_TRAIN_SAMPLES = DATASET_INFO["train_samples"]
-TOTAL_VAL_SAMPLES = DATASET_INFO["val_samples"]
+TOTAL_TRAIN_SAMPLES = DATASET_INFO["train_samples"] or 100000  # Default para datasets locales
+TOTAL_VAL_SAMPLES = DATASET_INFO["val_samples"] or 10000  # Default para datasets locales
 
 num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 
@@ -2191,6 +2195,17 @@ else:
     num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 
 print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) in streaming mode.")
+
+# Debug para identificar problema de carga
+print(f"=" * 60)
+print(f"🔍 DEPURACIÓN DE DATASET:")
+print(f"  - ACTIVE_DATASET: {ACTIVE_DATASET}")
+print(f"  - DATASET_NAME: {DATASET_NAME}")
+print(f"  - DATASET_INFO keys: {list(DATASET_INFO.keys())}")
+print(f"  - DATASET_INFO['type']: {DATASET_INFO.get('type', 'NO TYPE')}")
+print(f"  - DATASET_INFO['name']: {DATASET_INFO.get('name', 'NO NAME')}")
+print(f"  - is_distributed: {is_distributed}, world_size: {world_size}, rank: {rank}")
+print(f"=" * 60)
 
 if ACTIVE_DATASET == "mixed" or ACTIVE_DATASET in CUSTOM_MIX_RATIOS or "mix_ratios" in DATASET_INFO:
     # Cargar y mezclar múltiples datasets
@@ -2444,7 +2459,8 @@ else:
     elif DATASET_INFO.get("type") == "local":
         # Lógica especial para datasets locales JSONL
         local_path = DATASET_INFO.get("path", "./checkpoint_dataset")
-        print(f"📁 Cargando dataset local desde: {local_path}")
+        print(f"🔥 CHECKPOINT DATASET DETECTADO - Cargando desde: {local_path}")
+        print(f"🔍 Multi-GPU: is_distributed={is_distributed}, world_size={world_size}, rank={rank}")
         
         try:
             import glob
@@ -2460,7 +2476,8 @@ else:
             jsonl_files.sort()  # Asegurar orden consistente
             
             # Cargar usando datasets de Hugging Face
-            raw_datasets = load_dataset('json', data_files={'train': jsonl_files}, streaming=True)
+            from datasets import load_dataset as hf_load_dataset
+            raw_datasets = hf_load_dataset('json', data_files={'train': jsonl_files}, streaming=True)
             
             # Crear split de validación automático (10%)
             print("🔄 Creando split train/validation (90%/10%)...")
@@ -2489,22 +2506,124 @@ else:
             
             print(f"📈 Estimación: ~{estimated_total:,} muestras, {val_size:,} para validación")
             
-            # Usar datasets streaming para eficiencia
-            raw_datasets = load_dataset('json', data_files={'train': jsonl_files}, streaming=True)
-            train_stream = raw_datasets['train']
-            
-            # Crear splits usando take/skip
-            raw_datasets = {
-                'train': train_stream.skip(val_size),
-                'validation': train_stream.take(val_size)
-            }
+            # Detectar entorno multi-GPU para evitar conflictos de acceso a archivos
+            if is_distributed and world_size > 1:
+                print(f"🔧 Multi-GPU detectado (rank {rank}/{world_size}). Usando streaming con buffer...")
+                # Para multi-GPU, usar streaming pero con un enfoque más robusto
+                # Cargar el dataset completo primero para conocer su tamaño
+                try:
+                    temp_dataset = hf_load_dataset('json', data_files={'train': jsonl_files}, streaming=False)['train']
+                    total_size = len(temp_dataset)
+                    actual_val_size = min(val_size, total_size // 5)  # No más del 20%
+                    actual_train_size = total_size - actual_val_size
+                    
+                    print(f"📊 Dataset total: {total_size}, train: {actual_train_size}, val: {actual_val_size}")
+                    
+                    # Ahora usar streaming con los tamaños correctos
+                    train_stream = hf_load_dataset('json', data_files={'train': jsonl_files}, streaming=True)['train']
+                    val_stream = hf_load_dataset('json', data_files={'train': jsonl_files}, streaming=True)['train']
+                    
+                    raw_datasets = {
+                        'train': train_stream.skip(actual_val_size).take(actual_train_size),
+                        'validation': val_stream.take(actual_val_size)
+                    }
+                    
+                    print(f"✅ Splits creados con streaming para multi-GPU (rank {rank})")
+                except Exception as stream_error:
+                    print(f"❌ Error con streaming, intentando método sin streaming: {stream_error}")
+                    # Fallback al método sin streaming
+                    raw_data = hf_load_dataset('json', data_files={'train': jsonl_files}, streaming=False)['train']
+                    split_point = max(100, len(raw_data) - val_size)
+                    raw_datasets = {
+                        'train': raw_data.select(range(split_point)),
+                        'validation': raw_data.select(range(split_point, len(raw_data)))
+                    }
+                    print(f"✅ Fallback exitoso: train={len(raw_datasets['train'])}, validation={len(raw_datasets['validation'])}")
+            else:
+                # Usar dataset sin streaming para single GPU/CPU (mejor control)
+                print("🔧 Single GPU/CPU. Cargando dataset sin streaming para mejor control de splits...")
+                raw_data = hf_load_dataset('json', data_files={'train': jsonl_files}, streaming=False)['train']
+                
+                # Dividir manualmente
+                split_point = max(100, len(raw_data) - val_size) 
+                raw_datasets = {
+                    'train': raw_data.select(range(split_point)),
+                    'validation': raw_data.select(range(split_point, len(raw_data)))
+                }
+                
+                print(f"✅ Splits creados: train={len(raw_datasets['train'])}, validation={len(raw_datasets['validation'])}")
             
             print(f"✅ Dataset local cargado exitosamente desde {local_path}")
             
         except Exception as e:
-            print(f"❌ Error cargando dataset local: {e}")
-            print("🔄 Cambiando a dataset C4 como respaldo...")
-            raw_datasets = load_dataset("allenai/c4", "en", streaming=True)
+            print(f"❌ Error cargando dataset local con HuggingFace datasets: {e}")
+            print("🔄 Intentando fallback manual para JSONL...")
+            
+            # Fallback manual: cargar JSONL sin librería datasets
+            try:
+                print("📁 Implementando cargador manual de JSONL...")
+                all_data = []
+                
+                # Leer todos los archivos JSONL
+                for file_idx, file_path in enumerate(jsonl_files):
+                    print(f"📖 Leyendo archivo {file_idx+1}/{len(jsonl_files)}: {os.path.basename(file_path)}")
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        for line_num, line in enumerate(f):
+                            if line.strip():
+                                try:
+                                    data = json.loads(line)
+                                    # Normalizar campo de texto
+                                    text = data.get('text', data.get('content', data.get('message', str(data))))
+                                    if text and len(text.strip()) > 10:  # Filtrar textos muy cortos
+                                        all_data.append({'text': text.strip()})
+                                        if len(all_data) % 10000 == 0:
+                                            print(f"   📊 Procesados {len(all_data):,} registros...")
+                                except json.JSONDecodeError:
+                                    continue  # Saltar líneas con JSON inválido
+                    
+                    # Limitar para evitar memoria excesiva en desarrollo
+                    if len(all_data) >= 100000:
+                        print(f"⚠️ Limitando dataset a 100,000 muestras para evitar uso excesivo de memoria")
+                        break
+                
+                print(f"✅ Cargados {len(all_data):,} registros desde archivos JSONL")
+                
+                if len(all_data) < 100:
+                    raise ValueError(f"Dataset muy pequeño: solo {len(all_data)} muestras válidas")
+                
+                # Crear splits train/validation
+                val_size = max(100, len(all_data) // 10)  # 10% para validación, mínimo 100
+                train_size = len(all_data) - val_size
+                
+                # Shuffle para mezclar los datos
+                import random
+                random.shuffle(all_data)
+                
+                # Crear objetos simulando datasets de Hugging Face
+                class SimpleDataset:
+                    def __init__(self, data):
+                        self.data = data
+                    def __len__(self):
+                        return len(self.data)
+                    def __iter__(self):
+                        return iter(self.data)
+                    def __getitem__(self, idx):
+                        return self.data[idx]
+                    def map(self, func, *args, **kwargs):
+                        # Simulación simple de .map()
+                        return SimpleDataset(self.data)  # El tokenizado se hace después
+                
+                raw_datasets = {
+                    'train': SimpleDataset(all_data[:train_size]),
+                    'validation': SimpleDataset(all_data[train_size:train_size + val_size])
+                }
+                
+                print(f"✅ Dataset manual creado: train={len(raw_datasets['train'])} val={len(raw_datasets['validation'])}")
+                
+            except Exception as fallback_error:
+                print(f"❌ Fallback manual también falló: {fallback_error}")
+                print("🔄 Cambiando a dataset C4 como último respaldo...")
+                raw_datasets = load_dataset("allenai/c4", "en", streaming=True)
     
     else:
         # Datasets normales de Hugging Face
@@ -2560,12 +2679,12 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
         if has_validation:
             # Verificar si raw_datasets es un dict o SimpleIterableDataset
             if isinstance(raw_datasets, dict):
-                raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
+                raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED)
                 raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
             else:
                 # raw_datasets es SimpleIterableDataset, crear splits manualmente
                 print("📊 Detectado SimpleIterableDataset, creando splits...")
-                train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000)
+                train_dataset = raw_datasets.shuffle(seed=SEED)
                 raw_datasets = {
                     "train": train_dataset.take(num_train_samples),
                     "validation": train_dataset.skip(num_train_samples).take(num_val_samples)
@@ -2577,9 +2696,9 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
             
             # Verificar si raw_datasets es un dict o SimpleIterableDataset
             if isinstance(raw_datasets, dict):
-                train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+                train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED)
             else:
-                train_dataset = raw_datasets.take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+                train_dataset = raw_datasets.take(total_for_split).shuffle(seed=SEED)
             
             # Crear splits manualmente
             if isinstance(raw_datasets, dict):
@@ -2598,13 +2717,13 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
         try:
             # Si raw_datasets es un dict, acceder al train
             if isinstance(raw_datasets, dict) and "train" in raw_datasets:
-                train_dataset = raw_datasets["train"].shuffle(seed=SEED, buffer_size=10_000)
+                train_dataset = raw_datasets["train"].shuffle(seed=SEED)
                 raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)  
                 raw_datasets["validation"] = train_dataset.take(num_val_samples)
             else:
                 # Si raw_datasets es directamente el SimpleIterableDataset
                 print("📊 Detectado SimpleIterableDataset directo, creando estructura dict...")
-                train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000)
+                train_dataset = raw_datasets.shuffle(seed=SEED)
                 raw_datasets = {
                     "train": train_dataset.skip(num_val_samples).take(num_train_samples),
                     "validation": train_dataset.take(num_val_samples)
@@ -2613,7 +2732,7 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
             print(f"❌ Error crítico en fallback del dataset: {fallback_error}")
             print("🔄 Intentando configuración mínima...")
             # Última configuración de emergencia
-            train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000) if hasattr(raw_datasets, 'shuffle') else raw_datasets
+            train_dataset = raw_datasets.shuffle(seed=SEED) if hasattr(raw_datasets, 'shuffle') else raw_datasets
             raw_datasets = {
                 "train": train_dataset.take(num_train_samples),
                 "validation": train_dataset.take(num_val_samples) 
@@ -2623,6 +2742,13 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
 def tokenize_function(examples):
     """Función de tokenización optimizada para C4 streaming masivo"""
     texts = []
+    
+    # Debug: Verificar que recibimos datos
+    if hasattr(examples, 'keys'):
+        available_keys = list(examples.keys())
+        print(f"🔍 Tokenization function received keys: {available_keys}")
+        if available_keys and isinstance(examples[available_keys[0]], list):
+            print(f"🔍 First key '{available_keys[0]}' has {len(examples[available_keys[0]])} samples")
     
     # Manejar diferentes campos de texto según el dataset
     if "text" in examples:
@@ -2712,22 +2838,25 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         
         # Para IterableDataset no usar num_proc ni desc (no soportados)
         if is_iterable_dataset(raw_datasets[split_name]):
-            print(f"🚀 Tokenizando {split_name} para C4 streaming (IterableDataset)")
+            print(f"🚀 Tokenizando {split_name} para streaming (IterableDataset)")
             tokenized_splits[split_name] = raw_datasets[split_name].map(
                 tokenize_function, 
                 batched=True,
                 batch_size=batch_size_tokenization,
                 remove_columns=columns_to_remove
             ).with_format("torch")
+            print(f"✅ {split_name} tokenizado como IterableDataset")
         else:
+            print(f"🚀 Tokenizando {split_name} para dataset regular")
             tokenized_splits[split_name] = raw_datasets[split_name].map(
                 tokenize_function, 
                 batched=True,
                 batch_size=batch_size_tokenization,
                 num_proc=num_proc,
                 remove_columns=columns_to_remove,
-                desc=f"Tokenizando {split_name} para C4 streaming"
+                desc=f"Tokenizando {split_name}"
             ).with_format("torch")
+            print(f"✅ {split_name} tokenizado como Dataset regular")
 else:
     # In import-only mode, skip tokenization
     tokenized_splits = {}
@@ -2861,6 +2990,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         train_kwargs["multiprocessing_context"] = multiprocessing_context
 
     train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
+    print(f"🔧 DataLoader de entrenamiento creado. Intentando obtener tamaño...")
 
     # Configurar argumentos del validation DataLoader condicionalmente
     val_kwargs = {
@@ -2882,6 +3012,17 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         val_kwargs["multiprocessing_context"] = multiprocessing_context
 
     val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
+    
+    # Debug: Verificar que el dataset tiene datos
+    print("🔍 Verificando que el dataset tiene datos...")
+    try:
+        sample_iter = iter(train_loader)
+        first_batch = next(sample_iter)
+        print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
+    except StopIteration:
+        print("❌ ERROR: El train_loader está vacío!")
+    except Exception as e:
+        print(f"❌ ERROR obteniendo muestra: {e}")
 
 # Sistema de buffer inteligente para C4 streaming
 class StreamingBufferWrapper:
@@ -3167,7 +3308,7 @@ def main_training():
                 enabled=MIXED_PRECISION
             ):
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss / GRAD_ACCUM_STEPS
+                loss = outputs[0] / GRAD_ACCUM_STEPS  # outputs es ahora una tupla (loss, logits, past_key_values)
                 
                 # Para DataParallel, loss puede ser un tensor con múltiples valores
                 if hasattr(model, 'module') and loss.dim() > 0:
@@ -3297,7 +3438,7 @@ def main_training():
                     enabled=MIXED_PRECISION
                 ):
                     outputs = model(input_ids=input_ids, labels=input_ids)
-                    loss = outputs.loss
+                    loss = outputs[0]  # outputs es ahora una tupla (loss, logits, past_key_values)
                 
                 val_loss += loss.item()
                 val_steps += 1
@@ -3401,7 +3542,7 @@ def save_final_model():
     print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
     # Subir modelo a Hugging Face Hub
-    if HF_TOKEN:
+    if HF_TOKEN and HF_API_AVAILABLE:
         try:
             print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
             api = HfApi()
@@ -3427,8 +3568,12 @@ def save_final_model():
             print(f"❌ Error al subir el modelo a Hugging Face: {e}")
             print("El modelo se guardó localmente pero no se pudo subir al Hub.")
     else:
-        print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
-        print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
+        if not HF_TOKEN:
+            print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+            print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
+        elif not HF_API_AVAILABLE:
+            print("\n⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
+            print("Para subir al Hub, instala: pip install huggingface_hub")
 
 # ==============================================================================
 # --- FUNCIÓN DE CHAT Y PRUEBAS ---

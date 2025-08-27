@@ -23,6 +23,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from torch.optim import AdamW
 
+# Hugging Face Hub imports
+try:
+    from huggingface_hub import HfApi
+    HF_API_AVAILABLE = True
+except ImportError:
+    HF_API_AVAILABLE = False
+    print("⚠️ WARNING: huggingface_hub no está disponible. No se podrá subir al Hub.")
+
 # ==============================================================================
 # --- STANDALONE DATASET LOADER (EMBEDDED) ---
 # ==============================================================================
@@ -1006,13 +1014,9 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
                    self.config.ponder_loss_weight * ponder_loss +
                    0.01 * q_learning_loss)  # Small weight for Q-learning
         
-        class CausalLMOutput:
-            def __init__(self, loss, logits, past_key_values=None):
-                self.loss = loss
-                self.logits = logits
-                self.past_key_values = past_key_values
-        
-        return CausalLMOutput(loss=loss, logits=logits, past_key_values=None)
+        # Para compatibilidad con DataParallel, retornar tupla simple
+        # en lugar de objeto custom que causa problemas en el gather()
+        return (loss, logits, None)  # (loss, logits, past_key_values)
     
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
@@ -1060,9 +1064,9 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
                     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
                     
                     if missing_keys:
-                        print(f"⚠️ Claves faltantes: {missing_keys}")
+                        print(f"📝 Claves faltantes (normal para carga parcial): {len(missing_keys)} claves")
                     if unexpected_keys:
-                        print(f"⚠️ Claves inesperadas: {unexpected_keys}")
+                        print(f"📝 Claves inesperadas: {len(unexpected_keys)} claves")
                     
                     print(f"✅ Modelo cargado desde: {model_path}")
                     loaded = True
@@ -1202,7 +1206,17 @@ DATASETS_CONFIG = {
         "description": "Dataset de conversaciones humanas de Kaggle",
         "type": "kaggle"  # Identificador especial para datasets de Kaggle
     }
-}
+,
+    "checkpoint_dataset": {
+        "name": "local_checkpoint",
+        "config": None,
+        "train_samples": None,  # Se detectará automáticamente
+        "val_samples": None,  # Se creará del 10% del entrenamiento
+        "repo_suffix": "Checkpoint",
+        "description": "Dataset local desde checkpoint_dataset/ (JSONL)",
+        "type": "local",  # Identificador para datasets locales
+        "path": "./checkpoint_dataset"  # Ruta local a los archivos JSONL
+    }}
 
 # Añadir las mezclas personalizadas a la configuración principal
 for custom_name, mix_ratios in CUSTOM_MIX_RATIOS.items():
@@ -2085,7 +2099,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         # Intentar obtener token de variable de entorno
         HF_TOKEN = os.environ.get('HF_TOKEN')
         
-        if HF_TOKEN:
+        if HF_TOKEN and HF_API_AVAILABLE:
             # login(token=HF_TOKEN)  # Removed for standalone
             print("✅ Hugging Face token loaded from environment variable.")
         else:
@@ -2100,7 +2114,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     except ImportError:
         print("⚠️  huggingface_hub login not available")
         HF_TOKEN = os.environ.get('HF_TOKEN')
-        if HF_TOKEN:
+        if HF_TOKEN and HF_API_AVAILABLE:
             # HfFolder.save_token(HF_TOKEN)  # Removed for standalone
             print("Hugging Face token loaded (legacy method).")
         else:
@@ -2138,7 +2152,7 @@ else:
     tokenizer = None
 
 # Usar las cifras específicas del dataset seleccionado y calcular muestras
-TOTAL_TRAIN_SAMPLES = DATASET_INFO["train_samples"]
+TOTAL_TRAIN_SAMPLES = DATASET_INFO["train_samples"] or 100000  # Default para datasets locales
 TOTAL_VAL_SAMPLES = DATASET_INFO["val_samples"]
 
 num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
@@ -2451,13 +2465,13 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
             has_validation = False
         
         if has_validation:
-            raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
+            raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED)
             raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
         else:
             # Para datasets sin split de validación, dividir el entrenamiento
             print("Dividiendo dataset de entrenamiento para crear validación...")
             total_for_split = num_train_samples + num_val_samples
-            train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+            train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED)
             
             # Crear splits manualmente
             raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
@@ -2469,13 +2483,13 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
         try:
             # Si raw_datasets es un dict, acceder al train
             if isinstance(raw_datasets, dict) and "train" in raw_datasets:
-                train_dataset = raw_datasets["train"].shuffle(seed=SEED, buffer_size=10_000)
+                train_dataset = raw_datasets["train"].shuffle(seed=SEED)
                 raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)  
                 raw_datasets["validation"] = train_dataset.take(num_val_samples)
             else:
                 # Si raw_datasets es directamente el SimpleIterableDataset
                 print("📊 Detectado SimpleIterableDataset directo, creando estructura dict...")
-                train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000)
+                train_dataset = raw_datasets.shuffle(seed=SEED)
                 raw_datasets = {
                     "train": train_dataset.skip(num_val_samples).take(num_train_samples),
                     "validation": train_dataset.take(num_val_samples)
@@ -2484,7 +2498,7 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
             print(f"❌ Error crítico en fallback del dataset: {fallback_error}")
             print("🔄 Intentando configuración mínima...")
             # Última configuración de emergencia
-            train_dataset = raw_datasets.shuffle(seed=SEED, buffer_size=10_000) if hasattr(raw_datasets, 'shuffle') else raw_datasets
+            train_dataset = raw_datasets.shuffle(seed=SEED) if hasattr(raw_datasets, 'shuffle') else raw_datasets
             raw_datasets = {
                 "train": train_dataset.take(num_train_samples),
                 "validation": train_dataset.take(num_val_samples) 
@@ -2738,6 +2752,18 @@ if multiprocessing_context is not None:
     val_kwargs["multiprocessing_context"] = multiprocessing_context
 
 val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
+    
+    # Debug: Verificar que el dataset tiene datos
+    print("🔍 Verificando que el dataset tiene datos...")
+    try:
+        sample_iter = iter(train_loader)
+        first_batch = next(sample_iter)
+        print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
+    except StopIteration:
+        print("❌ ERROR: El train_loader está vacío!")
+    except Exception as e:
+        print(f"❌ ERROR obteniendo muestra: {e}")
+
 
 # Sistema de buffer inteligente para C4 streaming
 class StreamingBufferWrapper:
@@ -3020,7 +3046,7 @@ def main_training():
                 enabled=MIXED_PRECISION
             ):
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss / GRAD_ACCUM_STEPS
+                loss = outputs[0]  # outputs es ahora una tupla (loss, logits, past_key_values) / GRAD_ACCUM_STEPS
                 
                 # Para DataParallel, loss puede ser un tensor con múltiples valores
                 if hasattr(model, 'module') and loss.dim() > 0:
@@ -3140,7 +3166,7 @@ def main_training():
                     enabled=MIXED_PRECISION
                 ):
                     outputs = model(input_ids=input_ids, labels=input_ids)
-                    loss = outputs.loss
+                    loss = outputs[0]  # outputs es ahora una tupla (loss, logits, past_key_values)
                 
                 val_loss += loss.item()
                 val_steps += 1
@@ -3204,7 +3230,7 @@ def save_final_model():
     print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
     # Subir modelo a Hugging Face Hub
-    if HF_TOKEN:
+    if HF_TOKEN and HF_API_AVAILABLE:
         try:
             print(f"\nSubiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
             api = HfApi()
@@ -3229,7 +3255,14 @@ def save_final_model():
             print(f"❌ Error al subir el modelo a Hugging Face: {e}")
             print("El modelo se guardó localmente pero no se pudo subir al Hub.")
     else:
-        print("\n⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+        if not HF_TOKEN:
+            print("
+⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+            print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
+        elif not HF_API_AVAILABLE:
+            print("
+⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
+            print("Para subir al Hub, instala: pip install huggingface_hub")
         print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
 
 # ==============================================================================
