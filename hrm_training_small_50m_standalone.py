@@ -51,7 +51,7 @@ class SimpleDatasetDict:
             "Natural language processing enables computers to understand human language.",
             "Deep learning uses neural networks with multiple layers to model complex patterns.",
             "Artificial intelligence aims to create systems that can perform tasks requiring human intelligence."
-        ] * 200  # Repetir para tener más muestras
+        ] * 5000  # Aumentar para tener más muestras de entrenamiento
         
         # Dividir en train/validation
         split_idx = int(len(sample_texts) * 0.9)
@@ -2186,7 +2186,12 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     
     # Crear dataset temporal para construir vocabulario
     print("🔧 Cargando muestras de texto para construir vocabulario...")
-    temp_dataset = load_dataset("allenai/dolma", streaming=True, split="train")
+    # Usar el mismo dataset configurado para entrenamiento
+    DATASET_INFO = DATASETS_CONFIG.get(ACTIVE_DATASET, DATASETS_CONFIG["c4"])
+    DATASET_NAME = DATASET_INFO["name"]
+    DATASET_CONFIG = DATASET_INFO.get("config")
+    
+    temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train")
     
     # Recolectar textos para vocabulario (máximo 1000 muestras)
     vocab_texts = []
