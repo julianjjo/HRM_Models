@@ -2103,7 +2103,21 @@ if is_distributed and 'RANK' in os.environ:
     device = torch.device(f"cuda:{local_rank}")
     print(f"Dispositivo distribuido: {device} (rank {rank})")
 else:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Test básico de CUDA para detectar problemas de compute capability
+    cuda_available = False
+    if torch.cuda.is_available():
+        try:
+            # Test simple para verificar si CUDA realmente funciona
+            test_tensor = torch.randn(10).cuda()
+            test_result = test_tensor + 1
+            cuda_available = True
+            print(f"✅ CUDA funciona correctamente")
+        except Exception as e:
+            print(f"⚠️ CUDA disponible pero no funciona: {e}")
+            print(f"💡 Posible problema de compute capability - usando CPU")
+            cuda_available = False
+    
+    device = torch.device("cuda" if cuda_available else "cpu")
     print(f"Dispositivo detectado: {device}")
 
 # Verificar memoria disponible y mostrar información detallada de GPUs
