@@ -3115,8 +3115,18 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
 if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed and not FORCE_SINGLE_GPU:
     if world_size > 1 and 'RANK' in os.environ:
         # Entrenamiento distribuido real con torchrun
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-        print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
+        try:
+            model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+            print(f"🔗 Modelo envuelto con DDP en GPU {local_rank}")
+        except Exception as e:
+            print(f"❌ ERROR en DDP: {e}")
+            print("🔧 CUDA/NCCL incompatible. Fallback a DataParallel...")
+            # Fallback a DataParallel si DDP falla
+            model = model.to('cuda:0')
+            device_ids = list(range(torch.cuda.device_count()))
+            model = torch.nn.DataParallel(model, device_ids=device_ids)
+            print(f"🔗 Modelo envuelto con DataParallel usando GPUs: {device_ids}")
+            print("💡 Para mejor rendimiento, actualiza CUDA/PyTorch/NCCL")
     elif world_size > 1:
         # Auto-inicialización multi-GPU con DataParallel optimizado
         # Asegurar que todos los parámetros estén en cuda:0 antes de DataParallel
