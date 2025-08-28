@@ -1147,7 +1147,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 1.0   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 0.5   # Subset optimizado para entrenamiento rápido
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -1304,15 +1304,15 @@ DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Models-Small-50M"
 SEED = 42
-NUM_EPOCHS = 10             # Épocas para entrenamiento 50M
+NUM_EPOCHS = 3             # Épocas optimizadas para entrenamiento rápido 50M
 CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 # Configuración optimizada para memoria y rendimiento (migrada desde Kaggle)
-BLOCK_SIZE = 768         # Optimizado para memoria eficiente (768 tokens - 25% menos memoria que 1024)
+BLOCK_SIZE = 512         # Optimizado para velocidad (512 tokens - más rápido que 768)
 
 # Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
-BATCH_SIZE = 3           # Optimizado para single-GPU con mejor throughput (6x más eficiente que batch=1)
-GRAD_ACCUM_STEPS = 6     # Batch efectivo de 36 para mejor estabilidad y uso de memoria
-EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
+BATCH_SIZE = 24          # Optimizado para RTX 5090 con 33.7GB VRAM
+GRAD_ACCUM_STEPS = 2     # Batch efectivo de 48 para mejor velocidad
+EVAL_STEPS = 1000        # Evaluar menos frecuentemente para mayor velocidad
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
 LEARNING_RATE_MAX = 5e-5  # Reducido significativamente para evitar gradientes explosivos
@@ -1339,7 +1339,7 @@ MODEL_PARAMS = {
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -0.5,            # Bias inicial más conservador para estabilidad
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
-    "use_flash_attention": False,      # Deshabilitado para mejor compatibilidad y menor memoria
+    "use_flash_attention": True,       # Habilitado para mejor velocidad (~2x más rápido)
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,  # Use global setting
     "h_update_period": 3,              # H-module se actualiza cada 3 pasos para 50M 
 }
@@ -1498,8 +1498,8 @@ def get_dataloader_workers():
             optimal_workers = min(num_gpus * workers_per_gpu, max(8, physical_cpus // 2))
             print(f"🚀 Multi-GPU + hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
         else:
-            optimal_workers = min(4, max(2, physical_cpus // 2))
-            print(f"🔧 Single-GPU + hf_transfer: {optimal_workers} workers conservativos")
+            optimal_workers = min(8, max(4, physical_cpus // 2))
+            print(f"🔧 Single-GPU + hf_transfer: {optimal_workers} workers optimizados")
     else:
         # Sin hf_transfer, más aggressive con workers para multi-GPU
         if num_gpus > 1:
@@ -1508,8 +1508,8 @@ def get_dataloader_workers():
             optimal_workers = min(num_gpus * workers_per_gpu, max(16, physical_cpus))
             print(f"🚀 Multi-GPU sin hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
         else:
-            optimal_workers = min(6, max(3, physical_cpus // 2))
-            print(f"🔧 Single-GPU sin hf_transfer: {optimal_workers} workers moderados")
+            optimal_workers = min(12, max(6, physical_cpus // 2))
+            print(f"🔧 Single-GPU sin hf_transfer: {optimal_workers} workers optimizados")
     
     return optimal_workers
 
@@ -1528,6 +1528,17 @@ def get_tokenization_workers():
     print(f"Tokenización sistema ({gpu_info}): {max_workers} workers")
     
     return max_workers
+
+def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
+    """Calcula prefetch_factor optimizado basado en workers"""
+    if num_workers == 0:
+        return None
+    elif is_multi_gpu:
+        # Multi-GPU: prefetch más agresivo
+        return min(16, max(8, num_workers * 2))
+    else:
+        # Single-GPU: prefetch optimizado
+        return min(12, max(6, num_workers))
 
 def cleanup_dataloaders():
     """Función para limpiar DataLoaders al salir"""
@@ -3108,6 +3119,16 @@ balance_gpu_memory()
 if not os.environ.get('HRM_IMPORT_ONLY'):
     config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
     model = HRMText1(config).to(device)
+    
+    # Compilar modelo para mejor velocidad (PyTorch 2.0+)
+    if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
+        try:
+            print("🚀 Compilando modelo con torch.compile para mayor velocidad...")
+            model = torch.compile(model, mode="max-autotune")
+            print("✅ Modelo compilado exitosamente")
+        except Exception as e:
+            print(f"⚠️ Error compilando modelo: {e}")
+            print("🔧 Continuando sin compilación")
 
 # === CONFIGURACIÓN DE GPU Y MULTI-GPU ===
 if not os.environ.get('HRM_IMPORT_ONLY'):
