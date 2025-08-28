@@ -661,9 +661,7 @@ class RMSNorm(nn.Module):
         # Asegurar que weight esté en el device correcto
         weight = self.weight.to(device)
         
-        # Clone para evitar overwrite en CUDA Graphs
-        result = weight * (x * rms)
-        return result.clone()
+        return weight * (x * rms)
 
 class SwiGLUMuchPelu(nn.Module):
     def __init__(self, n_embd, d_ff, dropout=0.1):
@@ -840,13 +838,20 @@ class HRMInner(nn.Module):
             }
     
     def _run_l_module_to_convergence(self, z_H, z_L, attn_mask, key_padding_mask, training):
-        """Run L-module until convergence or max steps reached"""
+        """Run L-module until convergence or max steps reached (compilable version)"""
+        batch_size, seq_len, d_model = z_L.shape
+        device = z_L.device
+        
         z_L_current = z_L
-        z_L_prev = z_L
         all_q_values = []
         
+        # Máscara para rastrear cuáles continúan ejecutándose
+        continue_mask = torch.ones(batch_size, device=device, dtype=torch.bool)
+        actual_steps = 0
+        
+        # Loop fijo sin breaks para ser completamente compilable
         for l_step in range(self.max_l_steps):
-            # L-module forward pass
+            # L-module forward pass (siempre ejecutar para ser determinístico)
             z_L_input = z_L_current + z_H.detach()
             z_L_next = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
             
@@ -855,36 +860,38 @@ class HRMInner(nn.Module):
                 q_values = self.q_network(z_L_next)
                 all_q_values.append(q_values)
                 
-                # Epsilon-greedy exploration durante entrenamiento (compilable)
+                # Epsilon-greedy exploration (completamente tensorial)
                 epsilon = max(0.1, 1.0 - l_step * 0.1)
-                # Usar operaciones tensoriales sin .item() para evitar graph breaks
-                rand_val = torch.rand(1, device=z_L_next.device)
-                use_random = rand_val < epsilon
+                rand_vals = torch.rand(batch_size, device=device)
+                use_random = rand_vals < epsilon
                 
-                # Generar acción aleatoria
-                random_action = torch.randint(0, 2, (1,), device=z_L_next.device)
+                # Generar acciones para todo el batch
+                random_actions = torch.randint(0, 2, (batch_size,), device=device)
+                avg_q_values = q_values.mean(dim=1)  # Shape: [batch_size, 2]
+                greedy_actions = torch.argmax(avg_q_values, dim=1)  # Shape: [batch_size]
                 
-                # Generar acción greedy
-                avg_q_values = q_values.mean(dim=[0, 1])  # Shape: [2]
-                greedy_action = torch.argmax(avg_q_values).unsqueeze(0)
+                # Seleccionar acciones usando where
+                actions = torch.where(use_random, random_actions, greedy_actions)
                 
-                # Seleccionar acción usando where (compilable)
-                action_tensor = torch.where(use_random, random_action, greedy_action)
-                action = action_tensor.item()  # Solo extraer al final
-                
-                # If action is halt (1), break
-                if action == 1:
-                    break
+                # Actualizar máscara: false donde action == 1 (halt)
+                halt_mask = (actions == 1) & continue_mask
+                continue_mask = continue_mask & (actions == 0)
             
-            # Check convergence
-            diff = torch.norm(z_L_next - z_L_current, p=2, dim=-1).mean()
-            if diff < self.convergence_threshold:
-                break
+            # Check convergence (tensorial)
+            diff = torch.norm(z_L_next - z_L_current, p=2, dim=-1).mean(dim=1)  # [batch_size]
+            converged_mask = diff < self.convergence_threshold
+            continue_mask = continue_mask & ~converged_mask
             
-            z_L_prev = z_L_current
-            z_L_current = z_L_next
+            # Actualizar solo las posiciones que continúan usando where
+            z_L_current = torch.where(
+                continue_mask.unsqueeze(-1).unsqueeze(-1), 
+                z_L_next, 
+                z_L_current
+            )
+            
+            actual_steps = l_step + 1
         
-        return z_L_current, l_step + 1, all_q_values
+        return z_L_current, actual_steps, all_q_values
 
 class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
     config_class = HRMText1Config
@@ -3298,7 +3305,14 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
             torch._dynamo.config.capture_scalar_outputs = True
             # Reducir recompilaciones por cambios dinámicos
             torch._dynamo.config.recompile_limit = 16
-            print("🔧 Configuración torch.dynamo aplicada")
+            # Suprimir errores y warnings de symbolic shapes
+            torch._dynamo.config.suppress_errors = True
+            torch._dynamo.config.verbose = False
+            # Aumentar cache para evitar recompilaciones frecuentes
+            torch._dynamo.config.cache_size_limit = 256
+            # Habilitar dynamic shapes automáticas
+            torch._dynamo.config.automatic_dynamic_shapes = True
+            print("🔧 Configuración torch.dynamo aplicada (con supresión de warnings)")
         except ImportError:
             print("⚠️ torch._dynamo no disponible")
         
@@ -3539,6 +3553,13 @@ def main_training():
             # Contar muestras procesadas
             samples_processed += input_ids.size(0)
             
+            # Mark CUDA graph step to prevent tensor overwrite issues
+            try:
+                if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                    torch.compiler.cudagraph_mark_step_begin()
+            except (AttributeError, RuntimeError):
+                pass  # Función no disponible o CUDA graphs no habilitados
+            
             # Mixed precision forward pass
             with torch.amp.autocast(
                 device_type=device.type, 
@@ -3669,6 +3690,13 @@ def main_training():
                     break
                     
                 input_ids = batch['input_ids'].to(device)
+                
+                # Mark CUDA graph step for validation
+                try:
+                    if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                        torch.compiler.cudagraph_mark_step_begin()
+                except (AttributeError, RuntimeError):
+                    pass
                 
                 with torch.amp.autocast(
                     device_type=device.type,
