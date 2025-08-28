@@ -661,7 +661,9 @@ class RMSNorm(nn.Module):
         # Asegurar que weight esté en el device correcto
         weight = self.weight.to(device)
         
-        return weight * (x * rms)
+        # Clone para evitar overwrite en CUDA Graphs
+        result = weight * (x * rms)
+        return result.clone()
 
 class SwiGLUMuchPelu(nn.Module):
     def __init__(self, n_embd, d_ff, dropout=0.1):
@@ -853,14 +855,22 @@ class HRMInner(nn.Module):
                 q_values = self.q_network(z_L_next)
                 all_q_values.append(q_values)
                 
-                # Epsilon-greedy exploration during training
+                # Epsilon-greedy exploration durante entrenamiento (compilable)
                 epsilon = max(0.1, 1.0 - l_step * 0.1)
-                if torch.rand(1).item() < epsilon:
-                    action = torch.randint(0, 2, (1,)).item()
-                else:
-                    # Average Q-values across batch and sequence dimensions, then select action
-                    avg_q_values = q_values.mean(dim=[0, 1])  # Shape: [2]
-                    action = torch.argmax(avg_q_values).item()
+                # Usar operaciones tensoriales sin .item() para evitar graph breaks
+                rand_val = torch.rand(1, device=z_L_next.device)
+                use_random = rand_val < epsilon
+                
+                # Generar acción aleatoria
+                random_action = torch.randint(0, 2, (1,), device=z_L_next.device)
+                
+                # Generar acción greedy
+                avg_q_values = q_values.mean(dim=[0, 1])  # Shape: [2]
+                greedy_action = torch.argmax(avg_q_values).unsqueeze(0)
+                
+                # Seleccionar acción usando where (compilable)
+                action_tensor = torch.where(use_random, random_action, greedy_action)
+                action = action_tensor.item()  # Solo extraer al final
                 
                 # If action is halt (1), break
                 if action == 1:
@@ -1147,7 +1157,40 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
+# Dataset subset - se puede ajustar dinámicamente basado en memoria
 DATASET_SUBSET_PERCENT = 0.5   # Subset optimizado para entrenamiento rápido
+
+def adjust_dataset_config_for_memory(available_ram_gb):
+    """Ajusta configuración del dataset basada en RAM disponible"""
+    global DATASET_SUBSET_PERCENT
+    
+    print(f"🔧 Ajustando configuración de dataset para {available_ram_gb:.1f}GB RAM:")
+    
+    if available_ram_gb < 8:
+        # RAM baja: usar subset muy pequeño
+        DATASET_SUBSET_PERCENT = min(DATASET_SUBSET_PERCENT, 0.1)  # 10% máximo
+        recommended_workers = 2
+        recommended_buffer = 8
+        print(f"   💾 RAM baja: subset reducido a {DATASET_SUBSET_PERCENT*100:.0f}%")
+    elif available_ram_gb < 16:
+        # RAM media: subset moderado
+        DATASET_SUBSET_PERCENT = min(DATASET_SUBSET_PERCENT, 0.25)  # 25% máximo
+        recommended_workers = 3
+        recommended_buffer = 16
+        print(f"   💾 RAM media: subset limitado a {DATASET_SUBSET_PERCENT*100:.0f}%")
+    else:
+        # RAM alta: puede usar más datos
+        print(f"   💾 RAM suficiente: mantener subset {DATASET_SUBSET_PERCENT*100:.0f}%")
+        recommended_workers = 4
+        recommended_buffer = 32
+    
+    print(f"   💡 Recomendaciones: workers≤{recommended_workers}, buffer≤{recommended_buffer}")
+    
+    return {
+        'subset_percent': DATASET_SUBSET_PERCENT,
+        'recommended_workers': recommended_workers,
+        'recommended_buffer': recommended_buffer
+    }
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -1489,27 +1532,16 @@ def get_dataloader_workers():
     except:
         pass
 
-    # Cálculo optimizado para multi-GPU basado en hf_transfer
-    if hf_transfer_enabled:
-        # Con hf_transfer, más workers para multi-GPU pero controlado
-        if num_gpus > 1:
-            # Para multi-GPU: 2-3 workers por GPU para mantener throughput
-            workers_per_gpu = 2 if num_gpus >= 6 else 3
-            optimal_workers = min(num_gpus * workers_per_gpu, max(8, physical_cpus // 2))
-            print(f"🚀 Multi-GPU + hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
-        else:
-            optimal_workers = min(8, max(4, physical_cpus // 2))
-            print(f"🔧 Single-GPU + hf_transfer: {optimal_workers} workers optimizados")
+    # Configuración conservadora para optimizar memoria RAM
+    # Memoria RAM ≈ num_workers × prefetch_factor × batch_size × sequence_length × 4 bytes
+    if num_gpus > 1:
+        # Multi-GPU: máximo 4 workers total para controlar memoria
+        optimal_workers = min(4, max(2, physical_cpus // 4))
+        print(f"🚀 Multi-GPU (memoria optimizada): {optimal_workers} workers para {num_gpus} GPUs")
     else:
-        # Sin hf_transfer, más aggressive con workers para multi-GPU
-        if num_gpus > 1:
-            # Para multi-GPU sin hf_transfer: 3-4 workers por GPU
-            workers_per_gpu = 3 if num_gpus >= 6 else 4
-            optimal_workers = min(num_gpus * workers_per_gpu, max(16, physical_cpus))
-            print(f"🚀 Multi-GPU sin hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
-        else:
-            optimal_workers = min(12, max(6, physical_cpus // 2))
-            print(f"🔧 Single-GPU sin hf_transfer: {optimal_workers} workers optimizados")
+        # Single-GPU: 2-3 workers para balance memoria/throughput
+        optimal_workers = min(3, max(2, physical_cpus // 8))
+        print(f"🔧 Single-GPU (memoria optimizada): {optimal_workers} workers")
     
     return optimal_workers
 
@@ -1574,28 +1606,19 @@ def get_optimized_buffer_size(num_gpus, dataset_size_hint='medium'):
     return min(max(buffer_size, 8), 128)  # Máximo 128, mínimo 8
 
 def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
-    """Calcula prefetch_factor optimizado para throughput multi-GPU"""
+    """Calcula prefetch_factor optimizado para balance memoria/throughput"""
     if num_workers == 0:
         return None
     
-    hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
+    # Configuración más conservadora para optimizar memoria RAM
+    # RAM usage = num_workers * prefetch_factor * batch_size * data_size
     
-    if hf_transfer_enabled:
-        # Con hf_transfer, balance entre throughput y rate limits
-        if is_multi_gpu:
-            # Multi-GPU: 2-4 items por worker para mantener pipeline lleno
-            return min(4, max(2, num_workers // 4))
-        else:
-            # Single-GPU: 2-3 items por worker
-            return min(3, max(2, num_workers // 2))
+    if is_multi_gpu:
+        # Multi-GPU: máximo 2 items por worker para controlar memoria
+        return min(2, max(1, num_workers // 4))
     else:
-        # Sin hf_transfer, más agresivo para throughput máximo
-        if is_multi_gpu:
-            # Multi-GPU: 4-8 items por worker para maximizar throughput
-            return min(8, max(4, num_workers // 2))
-        else:
-            # Single-GPU: 3-6 items por worker
-            return min(6, max(3, num_workers // 2))
+        # Single-GPU: 1-2 items por worker para memoria óptima
+        return min(2, max(1, num_workers // 8))
 
 # ==============================================================================
 # --- FUNCIONES AUXILIARES PARA VALIDACIÓN DE CONFIGURACIÓN ---
@@ -1672,6 +1695,108 @@ def balance_gpu_memory():
         torch.cuda.set_per_process_memory_fraction(0.95)  # Usar 95% de VRAM disponible
         return True
     return False
+
+def monitor_memory_usage(stage=""):
+    """Monitorea y reporta uso de memoria RAM y GPU"""
+    try:
+        import psutil
+        
+        # Memoria RAM del sistema
+        ram = psutil.virtual_memory()
+        ram_used_gb = ram.used / 1e9
+        ram_total_gb = ram.total / 1e9
+        ram_percent = ram.percent
+        
+        print(f"📊 Memoria {stage}:")
+        print(f"   🖥️  RAM: {ram_used_gb:.1f}GB / {ram_total_gb:.1f}GB ({ram_percent:.1f}%)")
+        
+        # Memoria GPU
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                props = torch.cuda.get_device_properties(i)
+                allocated = torch.cuda.memory_allocated(i) / 1e9
+                reserved = torch.cuda.memory_reserved(i) / 1e9
+                total = props.total_memory / 1e9
+                
+                print(f"   🎮 GPU {i}: {allocated:.1f}GB alloc, {reserved:.1f}GB res / {total:.1f}GB total")
+                
+                # Warning si memoria está alta
+                if reserved / total > 0.9:
+                    print(f"   ⚠️  GPU {i} memoria alta ({reserved/total*100:.1f}%)")
+        
+        return {
+            'ram_used_gb': ram_used_gb,
+            'ram_percent': ram_percent,
+            'gpu_allocated': [torch.cuda.memory_allocated(i) / 1e9 for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else []
+        }
+    except ImportError:
+        print(f"📊 Memoria {stage}: psutil no disponible")
+        return None
+    except Exception as e:
+        print(f"⚠️ Error monitoreando memoria: {e}")
+        return None
+
+def calculate_optimal_batch_size(model_params, block_size, available_vram_gb, dataset_complexity="medium"):
+    """Calcula el batch size óptimo basado en VRAM y complejidad del dataset"""
+    try:
+        # Parámetros del modelo
+        d_model = model_params.get("d_model", 768)
+        n_heads = model_params.get("n_heads", 12)
+        n_layers = model_params.get("n_layers", 12)
+        
+        # Factor de complejidad basado en el dataset
+        complexity_factors = {
+            "simple": 1.0,      # Datasets simples (texto corto, vocabulario pequeño)
+            "medium": 1.3,      # Datasets medianos (C4, textos normales)
+            "complex": 1.8,     # Datasets complejos (código, textos técnicos)
+            "very_complex": 2.5 # Datasets muy complejos (matemáticas, multilingual)
+        }
+        
+        complexity_factor = complexity_factors.get(dataset_complexity, 1.3)
+        
+        # Memoria base por muestra (modelo + activaciones)
+        model_memory_per_sample = block_size * d_model * 4  # fp32
+        
+        # Memoria de atención (cuadrática con sequence length)
+        attention_memory = n_heads * n_layers * (block_size ** 2) * 4 / 1e6  # bytes
+        
+        # Factor de overhead (gradientes, optimizer states, etc.)
+        base_overhead = 3.0
+        dynamic_overhead = complexity_factor * (1.0 + block_size / 1024)  # Más overhead con secuencias largas
+        total_overhead = base_overhead + dynamic_overhead
+        
+        # Memoria total por muestra
+        memory_per_sample = (model_memory_per_sample + attention_memory) * total_overhead
+        memory_per_sample_gb = memory_per_sample / 1e9
+        
+        # Reservar memoria para buffers del sistema
+        reserved_vram = min(available_vram_gb * 0.2, 4.0)  # 20% o 4GB máximo
+        usable_vram_gb = available_vram_gb - reserved_vram
+        
+        # Calcular batch size máximo
+        max_batch_size = max(1, int(usable_vram_gb / memory_per_sample_gb))
+        
+        # Ajustar por complejidad del dataset
+        if dataset_complexity in ["complex", "very_complex"]:
+            max_batch_size = max(1, int(max_batch_size * 0.7))  # Reducir 30%
+        
+        # Limitar a rangos prácticos
+        optimal_batch_size = max(1, min(max_batch_size, 16))  # Máximo 16 para estabilidad
+        
+        print(f"🧮 Cálculo de batch size óptimo:")
+        print(f"   📏 Block size: {block_size}, D model: {d_model}, Complexity: {dataset_complexity}")
+        print(f"   💾 VRAM: {available_vram_gb:.1f}GB total, {usable_vram_gb:.1f}GB usable")
+        print(f"   🔢 Memoria/muestra: {memory_per_sample_gb*1000:.0f}MB (factor: {complexity_factor:.1f}x)")
+        print(f"   📊 Batch size óptimo: {optimal_batch_size}")
+        
+        if optimal_batch_size <= 2:
+            print(f"   ⚠️  Batch size muy pequeño - considera reducir block_size o complejidad del modelo")
+        
+        return optimal_batch_size
+        
+    except Exception as e:
+        print(f"⚠️ Error calculando batch size óptimo: {e}")
+        return 2  # Fallback más conservador
 
 # ==============================================================================
 # --- FUNCIONES AUXILIARES PARA FILTRADO DE IDIOMA ---
@@ -2145,6 +2270,35 @@ if torch.cuda.is_available():
     
     print(f"💾 VRAM total disponible: {total_vram:.1f} GB")
     torch.cuda.empty_cache()
+    
+    # Calcular batch size óptimo basado en VRAM disponible
+    if num_gpus > 0:
+        # Para multi-GPU, usar la GPU con menos memoria como referencia
+        min_vram_gb = min(torch.cuda.get_device_properties(i).total_memory / 1e9 for i in range(num_gpus))
+        
+        # Detectar complejidad del dataset automáticamente
+        dataset_complexity = "medium"  # default
+        if ACTIVE_DATASET in ["code", "math", "multilingual"]:
+            dataset_complexity = "very_complex"
+        elif ACTIVE_DATASET in ["technical", "books", "papers"]:
+            dataset_complexity = "complex"  
+        elif BLOCK_SIZE > 1024:
+            dataset_complexity = "complex"  # Secuencias largas son más complejas
+        elif BLOCK_SIZE < 512:
+            dataset_complexity = "simple"
+            
+        suggested_batch_size = calculate_optimal_batch_size(MODEL_PARAMS, BLOCK_SIZE, min_vram_gb, dataset_complexity)
+        
+        current_effective_batch = BATCH_SIZE * GRAD_ACCUM_STEPS
+        suggested_effective_batch = suggested_batch_size * GRAD_ACCUM_STEPS
+        
+        print(f"💡 Batch size actual: {BATCH_SIZE} (efectivo: {current_effective_batch})")
+        print(f"💡 Batch size sugerido: {suggested_batch_size} (efectivo: {suggested_effective_batch})")
+        
+        if suggested_batch_size > BATCH_SIZE * 1.5:
+            print(f"   ⬆️  Puedes aumentar BATCH_SIZE a {suggested_batch_size} para mejor aprovechamiento de GPU")
+        elif suggested_batch_size < BATCH_SIZE * 0.7:
+            print(f"   ⬇️  Considera reducir BATCH_SIZE a {suggested_batch_size} para evitar OOM")
 
 def balance_gpu_memory():
     """Balancear memoria GPU antes de crear modelo"""
@@ -2235,6 +2389,15 @@ if TOTAL_VAL_SAMPLES is None:
     print(f"Dataset sin split de validación. Usando {num_val_samples:,} ejemplos como validación.")
 else:
     num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
+
+# Ajustar configuración de dataset basado en memoria disponible
+try:
+    import psutil
+    available_ram_gb = psutil.virtual_memory().total / 1e9
+    dataset_config = adjust_dataset_config_for_memory(available_ram_gb)
+except ImportError:
+    print("⚠️ psutil no disponible, usando configuración por defecto")
+    dataset_config = None
 
 print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) in streaming mode.")
 
@@ -3029,6 +3192,9 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
 
     train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
     print(f"🔧 DataLoader de entrenamiento creado. Intentando obtener tamaño...")
+    
+    # Monitorear memoria después de crear DataLoader
+    monitor_memory_usage("después de crear DataLoaders")
 
     # Configurar argumentos del validation DataLoader condicionalmente
     val_kwargs = {
@@ -3120,8 +3286,22 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
     model = HRMText1(config).to(device)
     
-    # Compilar modelo para mejor velocidad (PyTorch 2.0+)
+    # Configurar torch.dynamo para operaciones escalares y CUDA Graphs
     if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
+        # Configurar captura de operaciones escalares para evitar graph breaks
+        import os
+        os.environ['TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS'] = '1'
+        
+        # Configurar torch.dynamo
+        try:
+            import torch._dynamo
+            torch._dynamo.config.capture_scalar_outputs = True
+            # Reducir recompilaciones por cambios dinámicos
+            torch._dynamo.config.recompile_limit = 16
+            print("🔧 Configuración torch.dynamo aplicada")
+        except ImportError:
+            print("⚠️ torch._dynamo no disponible")
+        
         try:
             print("🚀 Compilando modelo con torch.compile para mayor velocidad...")
             model = torch.compile(model, mode="reduce-overhead")
