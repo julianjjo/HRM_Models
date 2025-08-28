@@ -2774,12 +2774,7 @@ def tokenize_function(examples):
     """Función de tokenización optimizada para C4 streaming masivo"""
     texts = []
     
-    # Debug: Verificar que recibimos datos
-    if hasattr(examples, 'keys'):
-        available_keys = list(examples.keys())
-        print(f"🔍 Tokenization function received keys: {available_keys}")
-        if available_keys and isinstance(examples[available_keys[0]], list):
-            print(f"🔍 First key '{available_keys[0]}' has {len(examples[available_keys[0]])} samples")
+    # Debug: Verificar que recibimos datos (debug removido para logs limpios)
     
     # Manejar diferentes campos de texto según el dataset
     if "text" in examples:
