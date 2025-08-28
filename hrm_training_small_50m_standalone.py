@@ -3318,10 +3318,35 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         
         try:
             print("🚀 Compilando modelo con torch.compile para mayor velocidad...")
-            model = torch.compile(model, mode="reduce-overhead")
-            print("✅ Modelo compilado exitosamente")
+            
+            # Intentar diferentes modos para evitar problemas con CUDA graphs
+            compile_modes = ["default", "max-autotune-no-cudagraphs", None]
+            compiled_successfully = False
+            
+            for mode in compile_modes:
+                try:
+                    if mode is None:
+                        # Opción de fallback: deshabilitar CUDA graphs específicamente
+                        import torch._inductor.config
+                        torch._inductor.config.triton.cudagraphs = False
+                        model = torch.compile(model, mode="default")
+                        print("✅ Modelo compilado con CUDA graphs deshabilitados")
+                    else:
+                        model = torch.compile(model, mode=mode)
+                        print(f"✅ Modelo compilado exitosamente (modo: {mode})")
+                    
+                    compiled_successfully = True
+                    break
+                    
+                except Exception as mode_error:
+                    print(f"⚠️ Error con modo {mode}: {mode_error}")
+                    continue
+            
+            if not compiled_successfully:
+                print("🔧 Todos los modos de compilación fallaron, continuando sin compilación")
+                
         except Exception as e:
-            print(f"⚠️ Error compilando modelo: {e}")
+            print(f"⚠️ Error general compilando modelo: {e}")
             print("🔧 Continuando sin compilación")
 
 # === CONFIGURACIÓN DE GPU Y MULTI-GPU ===
