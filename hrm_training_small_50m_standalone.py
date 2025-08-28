@@ -1307,7 +1307,7 @@ SEED = 42
 NUM_EPOCHS = 3             # Épocas optimizadas para entrenamiento rápido 50M
 CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 # Configuración optimizada para memoria y rendimiento (migrada desde Kaggle)
-BLOCK_SIZE = 512         # Optimizado para velocidad (512 tokens - más rápido que 768)
+BLOCK_SIZE = 768         # Revertido para compatibilidad con checkpoint existente
 
 # Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
 BATCH_SIZE = 24          # Optimizado para RTX 5090 con 33.7GB VRAM
@@ -1339,7 +1339,7 @@ MODEL_PARAMS = {
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -0.5,            # Bias inicial más conservador para estabilidad
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
-    "use_flash_attention": True,       # Habilitado para mejor velocidad (~2x más rápido)
+    "use_flash_attention": False,      # Deshabilitado por incompatibilidad fp32 (requiere fp16/bf16)
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,  # Use global setting
     "h_update_period": 3,              # H-module se actualiza cada 3 pasos para 50M 
 }
@@ -3124,7 +3124,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     if torch.__version__.startswith("2") and hasattr(torch, 'compile'):
         try:
             print("🚀 Compilando modelo con torch.compile para mayor velocidad...")
-            model = torch.compile(model, mode="max-autotune")
+            model = torch.compile(model, mode="reduce-overhead")
             print("✅ Modelo compilado exitosamente")
         except Exception as e:
             print(f"⚠️ Error compilando modelo: {e}")
