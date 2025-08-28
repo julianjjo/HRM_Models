@@ -1310,7 +1310,7 @@ CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automát
 BLOCK_SIZE = 768         # Revertido para compatibilidad con checkpoint existente
 
 # Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
-BATCH_SIZE = 24          # Optimizado para RTX 5090 con 33.7GB VRAM
+BATCH_SIZE = 3          # Optimizado para RTX 5090 con 33.7GB VRAM
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 48 para mejor velocidad
 EVAL_STEPS = 1000        # Evaluar menos frecuentemente para mayor velocidad
 
