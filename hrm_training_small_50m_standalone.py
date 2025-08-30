@@ -1165,7 +1165,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
 # Dataset subset - se puede ajustar dinámicamente basado en memoria
-DATASET_SUBSET_PERCENT = 0.5   # Subset optimizado para entrenamiento rápido
+DATASET_SUBSET_PERCENT = 0.01   # Subset optimizado para entrenamiento rápido
 
 def adjust_dataset_config_for_memory(available_ram_gb):
     """Ajusta configuración del dataset basada en RAM disponible"""
@@ -1360,7 +1360,7 @@ CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automát
 BLOCK_SIZE = 768         # Revertido para compatibilidad con checkpoint existente
 
 # Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
-BATCH_SIZE = 3          # Optimizado para RTX 5090 con 33.7GB VRAM
+BATCH_SIZE = 1          # Optimizado para RTX 5090 con 33.7GB VRAM
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 48 para mejor velocidad
 EVAL_STEPS = 1000        # Evaluar menos frecuentemente para mayor velocidad
 
@@ -3303,8 +3303,6 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         try:
             import torch._dynamo
             torch._dynamo.config.capture_scalar_outputs = True
-            # Reducir recompilaciones por cambios dinámicos
-            torch._dynamo.config.recompile_limit = 16
             # Suprimir errores y warnings de symbolic shapes
             torch._dynamo.config.suppress_errors = True
             torch._dynamo.config.verbose = False
@@ -3315,6 +3313,8 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
             print("🔧 Configuración torch.dynamo aplicada (con supresión de warnings)")
         except ImportError:
             print("⚠️ torch._dynamo no disponible")
+        except AttributeError as e:
+            print(f"⚠️ Configuración torch._dynamo no disponible: {e}")
         
         try:
             print("🚀 Compilando modelo con torch.compile para mayor velocidad...")
