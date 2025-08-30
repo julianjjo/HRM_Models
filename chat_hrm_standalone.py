@@ -122,7 +122,7 @@ def load_standalone_model_and_tokenizer(standalone_script_path, model_path):
         print(f"❌ Error al importar o cargar desde script standalone: {e}")
         return None, None, None
 
-def chat_with_standalone_model(prompt_text, model, tokenizer, device, max_new_tokens=100, temperature=0.7):
+def chat_with_standalone_model(prompt_text, model, tokenizer, device, max_new_tokens=100, temperature=0.7, do_sample=True):
     """Genera respuesta del modelo standalone"""
     # Tokenizar el prompt
     if hasattr(tokenizer, 'encode'):
@@ -134,14 +134,30 @@ def chat_with_standalone_model(prompt_text, model, tokenizer, device, max_new_to
         input_ids = torch.tensor([token_ids]).to(device)
     
     with torch.inference_mode():
-        # Usar el método generate del modelo standalone
-        output_ids = model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=True,
-            pad_token_id=tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') else 0
-        )
+        # Generar usando forward manual ya que el método generate del modelo tiene problemas
+        generated_ids = input_ids.clone()
+        
+        for _ in range(max_new_tokens):
+            outputs = model.forward(generated_ids)
+            # El modelo retorna tupla (loss, logits, past_key_values)
+            if isinstance(outputs, tuple):
+                logits = outputs[1][:, -1, :] / temperature
+            else:
+                logits = outputs.logits[:, -1, :] / temperature
+            
+            if do_sample:
+                probs = torch.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            
+            generated_ids = torch.cat([generated_ids, next_token], dim=1)
+            
+            pad_token_id = tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') else 0
+            if next_token.item() == pad_token_id:
+                break
+                
+        output_ids = generated_ids
     
     # Decodificar la respuesta
     if hasattr(tokenizer, 'decode'):
