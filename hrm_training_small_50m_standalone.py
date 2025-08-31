@@ -1165,7 +1165,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
 # Dataset subset - se puede ajustar dinámicamente basado en memoria
-DATASET_SUBSET_PERCENT = 10   # Subset optimizado para entrenamiento rápido
+DATASET_SUBSET_PERCENT = 0.5   # Subset optimizado para entrenamiento rápido
 
 def adjust_dataset_config_for_memory(available_ram_gb):
     """Ajusta configuración del dataset basada en RAM disponible"""
