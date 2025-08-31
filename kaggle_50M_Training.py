@@ -336,7 +336,7 @@ SEED = 42
 BLOCK_SIZE = 768  # Optimizado para T4/P100
 BATCH_SIZE = 1260    # Optimizado para dual-GPU T4/P100 (sin gradient checkpointing)
 GRAD_ACCUM_STEPS = 6  # Batch efectivo de 72 (6*6*2_GPUs = 72)
-LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad
+LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes  # Reducido para estabilidad
 LEARNING_RATE_MIN = 1e-6
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.1

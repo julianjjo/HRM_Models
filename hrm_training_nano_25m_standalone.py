@@ -2564,6 +2564,22 @@ for split_name in ["train", "validation"]:
             batch_size=batch_size_tokenization,
             remove_columns=columns_to_remove
         ).with_format("torch")
+
+    # ### DISTRIBUTED TRAINING SHARDING ###
+    # Aplicar sharding para distributed training con IterableDataset
+    if is_distributed and world_size > 1:
+        print(f"🔀 Aplicando sharding para distributed training (rank {rank}/{world_size})")
+        
+        # Shard tanto train como validation para distributed training
+        for split_name in tokenized_splits.keys():
+            if is_iterable_dataset(tokenized_splits[split_name]):
+                print(f"   📊 Sharding {split_name}: GPU {rank} procesará 1/{world_size} de los datos")
+                tokenized_splits[split_name] = tokenized_splits[split_name].shard(
+                    num_shards=world_size, 
+                    index=rank
+                )
+            else:
+                print(f"   📊 {split_name} no es IterableDataset, usar DistributedSampler en DataLoader")
     else:
         tokenized_splits[split_name] = raw_datasets[split_name].map(
             tokenize_function, 

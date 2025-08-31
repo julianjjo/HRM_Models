@@ -881,7 +881,7 @@ GRAD_ACCUM_STEPS = 16    # Batch efectivo de 64 para entrenamiento estable
 EVAL_STEPS = 1000        # Evaluar cada 1000 pasos para modelo large
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad numérica (migrado desde Kaggle)
+LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes  # Reducido para estabilidad numérica (migrado desde Kaggle)
 LEARNING_RATE_MIN = 1e-6  # Mínimo apropiado para modelo grande
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.2        # 20% de warmup más largo para modelo grande
@@ -2139,6 +2139,22 @@ for split_name in ["train", "validation"]:
             batch_size=batch_size_tokenization,
             remove_columns=columns_to_remove
         ).with_format("torch")
+
+    # ### DISTRIBUTED TRAINING SHARDING ###
+    # Aplicar sharding para distributed training con IterableDataset
+    if is_distributed and world_size > 1:
+        print(f"🔀 Aplicando sharding para distributed training (rank {rank}/{world_size})")
+        
+        # Shard tanto train como validation para distributed training
+        for split_name in tokenized_splits.keys():
+            if is_iterable_dataset(tokenized_splits[split_name]):
+                print(f"   📊 Sharding {split_name}: GPU {rank} procesará 1/{world_size} de los datos")
+                tokenized_splits[split_name] = tokenized_splits[split_name].shard(
+                    num_shards=world_size, 
+                    index=rank
+                )
+            else:
+                print(f"   📊 {split_name} no es IterableDataset, usar DistributedSampler en DataLoader")
     else:
         tokenized_splits[split_name] = raw_datasets[split_name].map(
             tokenize_function, 
@@ -2433,7 +2449,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 2e-4   # LR reducido para estabilidad (sincronizado con MAX)
+    NEW_LEARNING_RATE = 1e-5   # LR reducido urgentemente para evitar explosión de gradientes   # LR reducido para estabilidad (sincronizado con MAX)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
