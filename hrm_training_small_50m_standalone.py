@@ -1355,12 +1355,12 @@ DATASET_CONFIG = DATASET_INFO["config"]
 HF_REPO_ID = f"dreamwar/HRM-Models-Small-50M"
 SEED = 42
 NUM_EPOCHS = 6             # Épocas optimizadas para entrenamiento rápido 50M
-CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
+CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 # Configuración optimizada para memoria y rendimiento (migrada desde Kaggle)
 BLOCK_SIZE = 768         # Revertido para compatibilidad con checkpoint existente
 
 # Configuración de entrenamiento para modelo 50M optimizada para memoria y throughput
-BATCH_SIZE = 3          # Optimizado para RTX 5090 con 33.7GB VRAM
+BATCH_SIZE = 6          # Optimizado para RTX 5090 con 33.7GB VRAM
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 48 para mejor velocidad
 EVAL_STEPS = 1000        # Evaluar menos frecuentemente para mayor velocidad
 
