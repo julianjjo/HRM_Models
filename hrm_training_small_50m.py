@@ -881,8 +881,8 @@ GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper efic
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 2e-4  # Reducido para estabilidad numérica (migrado desde Kaggle)
-LEARNING_RATE_MIN = 2e-6  # Mínimo más alto para evitar estancamiento
+LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes
+LEARNING_RATE_MIN = 1e-7  # Mínimo reducido proporcionalmente
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
@@ -2441,7 +2441,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 2e-4   # LR reducido para estabilidad (sincronizado con MAX)
+    NEW_LEARNING_RATE = 1e-5   # LR reducido urgentemente para evitar explosión de gradientes
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
