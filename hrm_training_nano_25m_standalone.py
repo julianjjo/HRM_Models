@@ -2562,11 +2562,8 @@ tokenization_workers = get_tokenization_workers() if not os.environ.get('HRM_IMP
 def is_iterable_dataset(dataset):
     return isinstance(dataset, IterableDataset)
 
-# Detectar columnas a eliminar dinámicamente
-sample = next(iter(raw_datasets["train"]))
-columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
-print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
-print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+# Usar configuración estándar de columnas como en el modelo 50M
+columns_to_remove = ["text"]  # Columna típica de datasets de texto
 
 for split_name in ["train", "validation"]:
     # Optimización para C4 streaming: batch size más grande y configuración eficiente
