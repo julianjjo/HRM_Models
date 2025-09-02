@@ -316,9 +316,9 @@ class SimpleTokenizer:
         
         word_counts = Counter()
         
-        # Agregar vocabulario base primero
+        # Agregar vocabulario base con alta prioridad
         for word in self.base_vocabulary:
-            word_counts[word] = word_counts.get(word, 0) + 100  # Dar alta prioridad
+            word_counts[word] = word_counts.get(word, 0) + 1000  # Dar alta prioridad
         
         for text in texts:
             tokens = self._tokenize_text(text)
