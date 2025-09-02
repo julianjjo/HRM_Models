@@ -1570,7 +1570,14 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
                 nn.init.constant_(param, 0.0)
         
         # Inicialización específica para embeddings
-        nn.init.normal_(self.token_embeddings.weight, mean=0.0, std=0.02)
+        # AdaptiveEmbedding tiene adaptive_embed, no weight directamente
+        if hasattr(self.token_embeddings, 'weight'):
+            nn.init.normal_(self.token_embeddings.weight, mean=0.0, std=0.02)
+        elif hasattr(self.token_embeddings, 'adaptive_embed'):
+            nn.init.normal_(self.token_embeddings.adaptive_embed.weight, mean=0.0, std=0.02)
+            if hasattr(self.token_embeddings, 'project_in') and self.token_embeddings.project_in is not None:
+                nn.init.normal_(self.token_embeddings.project_in.weight, mean=0.0, std=0.02)
+        
         if self.pos_embeddings is not None:
             nn.init.normal_(self.pos_embeddings.weight, mean=0.0, std=0.02)
     

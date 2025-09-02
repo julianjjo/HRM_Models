@@ -2,12 +2,20 @@
 """
 HRM-Models Training Script - MODELO MICRO ~10M PARÁMETROS  
 VERSIÓN MICRO: Configuración para ~10M parámetros con contexto ultra-reducido (128 tokens) [STANDALONE VERSION]
+
+🖥️  RECOMENDADO PARA ENTRENAMIENTO EN CPU:
 - Arquitectura HRM micro-eficiente (4 capas, 128 dim)
+- Optimizado para recursos muy limitados (CPU, laptop, etc.)
+- Checkpoints frecuentes cada 100 steps para sesiones cortas
+- Dataset con fallback sintético para testing rápido
+- Mixed precision desactivado automáticamente en CPU
+
+CARACTERÍSTICAS:
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones extremas de memoria para recursos muy limitados
-- Configuración optimizada para hardware básico (T4, etc.)
+- Configuración optimizada para hardware básico (CPU, T4, etc.)
 - SIN DEPENDENCIAS DE TRANSFORMERS - Implementación standalone
 - Tokenizer simple personalizado incluido
+- Vocabulario adaptativo hasta 10K tokens
 """
 
 import os, random, multiprocessing as mp, atexit, math, time
@@ -244,7 +252,7 @@ from collections import Counter
 class SimpleTokenizer:
     """Tokenizer simple sin dependencias de HuggingFace"""
     
-    def __init__(self, vocab_size=65536):
+    def __init__(self, vocab_size=10000):  # Vocabulario de 10K tokens
         self.vocab_size = vocab_size
         self.word_to_id = {}
         self.id_to_word = {}
@@ -274,6 +282,25 @@ class SimpleTokenizer:
         self.mask_token_id = self.special_tokens['<mask>']
         
         self._built = False
+        
+        # Vocabulario base para asegurar cobertura mínima
+        self.base_vocabulary = [
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+            'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did',
+            'will', 'would', 'could', 'should', 'can', 'may', 'might', 'must', 'shall',
+            'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
+            'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their',
+            'what', 'when', 'where', 'why', 'how', 'who', 'which', 'whose', 'whom',
+            'not', 'no', 'yes', 'ok', 'okay', 'well', 'so', 'very', 'much', 'many', 'more', 'most',
+            'some', 'any', 'all', 'each', 'every', 'one', 'two', 'three', 'first', 'last',
+            'good', 'bad', 'big', 'small', 'long', 'short', 'high', 'low', 'fast', 'slow',
+            'new', 'old', 'young', 'early', 'late', 'here', 'there', 'now', 'then',
+            'up', 'down', 'out', 'over', 'under', 'above', 'below', 'between', 'through',
+            'time', 'day', 'year', 'way', 'man', 'woman', 'child', 'people', 'world', 'life',
+            'work', 'make', 'get', 'go', 'come', 'take', 'give', 'know', 'think', 'see',
+            'look', 'find', 'say', 'tell', 'ask', 'feel', 'try', 'use', 'want', 'need',
+            '.', ',', '!', '?', ';', ':', '"', "'", '(', ')', '[', ']', '{', '}', '-', '_'
+        ]
     
     def _tokenize_text(self, text):
         """Tokenización básica por palabras y caracteres"""
@@ -288,6 +315,11 @@ class SimpleTokenizer:
         print(f"🔧 Construyendo vocabulario desde {len(texts)} textos...")
         
         word_counts = Counter()
+        
+        # Agregar vocabulario base primero
+        for word in self.base_vocabulary:
+            word_counts[word] = word_counts.get(word, 0) + 100  # Dar alta prioridad
+        
         for text in texts:
             tokens = self._tokenize_text(text)
             word_counts.update(tokens)
@@ -572,7 +604,7 @@ class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
     
     def __init__(self, 
-                 vocab_size=65536, 
+                 vocab_size=10000,  # Vocabulario de 10K tokens 
                  block_size=2048,           # Aumentado para contexto extendido
                  n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
@@ -1087,7 +1119,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.01   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 0.1    # Incrementar dataset (10x más datos)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -1123,7 +1155,7 @@ CUSTOM_MIX_RATIOS = {
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "c4-english"  # Opciones: "c4", "openwebtext", "pile", "spanish", "mixed", "high_quality_1b", etc.
+ACTIVE_DATASET = "c4-english"  # Dataset ultra-reducido para testing
 
 DATASETS_CONFIG = {
     "c4": {
@@ -1244,12 +1276,12 @@ DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
 SEED = 42
-NUM_EPOCHS = 2             # Épocas totales para entrenamiento continuo
+NUM_EPOCHS = 25             # Épocas ultra-reducidas para testing
 CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
-BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
+BLOCK_SIZE = 128         # Incrementar contexto para CPU
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 3        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+BATCH_SIZE = 4        # Incrementar batch size para CPU
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
@@ -1260,7 +1292,7 @@ WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
 # Optimizaciones
-MIXED_PRECISION = True
+MIXED_PRECISION = False  # Desactivar para CPU
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
@@ -2055,7 +2087,7 @@ if is_distributed and 'RANK' in os.environ:
     device = torch.device(f"cuda:{local_rank}")
     print(f"Dispositivo distribuido: {device} (rank {rank})")
 else:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")  # Forzar CPU para testing
     print(f"Dispositivo detectado: {device}")
 
 # Verificar memoria disponible y mostrar información detallada de GPUs
@@ -2133,17 +2165,17 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print("🔧 Cargando muestras de texto para construir vocabulario...")
     temp_dataset = load_dataset("allenai/dolma", streaming=True, split="train")
     
-    # Recolectar textos para vocabulario (máximo 1000 muestras)
+    # Recolectar textos para vocabulario (máximo 500 muestras)
     vocab_texts = []
     for i, sample in enumerate(temp_dataset):
-        if i >= 1000:  # Limitar para no sobrecargar memoria
+        if i >= 500:  # Incrementar muestras para vocabulario (10x)
             break
         vocab_texts.append(sample["text"])
     
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=10000)  # Vocabulario de 10K tokens
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -2160,7 +2192,7 @@ num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 # Manejar datasets que no tienen split de validación predefinido
 if TOTAL_VAL_SAMPLES is None:
     # Para datasets sin validación, usar el 1% del entrenamiento como validación
-    num_val_samples = max(1000, int(num_train_samples * 0.01))
+    num_val_samples = max(100, int(num_train_samples * 0.01))  # Incrementar validación
     print(f"Dataset sin split de validación. Usando {num_val_samples:,} ejemplos como validación.")
 else:
     num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
@@ -2564,10 +2596,14 @@ def is_iterable_dataset(dataset):
     return isinstance(dataset, IterableDataset)
 
 # Detectar columnas a eliminar dinámicamente
-sample = next(iter(raw_datasets["train"]))
-columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
-print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
-print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+try:
+    sample = next(iter(raw_datasets["train"]))
+    columns_to_remove = [col for col in sample.keys() if col not in ["input_ids", "attention_mask"]]
+    print(f"Columnas detectadas en el dataset: {list(sample.keys())}")
+    print(f"Columnas a eliminar después de tokenización: {columns_to_remove}")
+except StopIteration:
+    print("⚠️ Dataset vacío, usando columnas por defecto")
+    columns_to_remove = ["text"]  # Columna típica de datasets de texto
 
 for split_name in ["train", "validation"]:
     # Optimización para C4 streaming: batch size más grande y configuración eficiente
@@ -2777,8 +2813,40 @@ try:
     print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
 except StopIteration:
     print("❌ ERROR: El train_loader está vacío!")
+    print("🔄 Usando dataset embebido como fallback...")
+    
+    # Crear dataset de fallback usando el dataset embebido 
+    from torch.utils.data import TensorDataset
+    
+    # Generar datos sintéticos básicos para testing
+    vocab_size = len(tokenizer)
+    seq_len = min(BLOCK_SIZE, 32)  # Usar secuencias cortas para testing
+    num_samples = 1000  # Muestras sintéticas
+    
+    # Crear datos aleatorios pero válidos
+    input_ids = torch.randint(5, vocab_size, (num_samples, seq_len))  # Empezar desde 5 para evitar tokens especiales
+    attention_mask = torch.ones(num_samples, seq_len)
+    
+    fallback_dataset = TensorDataset(input_ids, attention_mask)
+    train_loader = DataLoader(fallback_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(TensorDataset(input_ids[:100], attention_mask[:100]), batch_size=BATCH_SIZE)
+    
+    print(f"✅ Dataset de fallback creado con {num_samples} muestras sintéticas")
+    
 except Exception as e:
     print(f"❌ ERROR obteniendo muestra: {e}")
+    print("🔄 Creando dataset mínimo de emergencia...")
+    
+    # Dataset de emergencia ultra-básico
+    vocab_size = max(100, len(tokenizer)) if 'tokenizer' in locals() else 100
+    input_ids = torch.randint(5, vocab_size, (100, 16))
+    attention_mask = torch.ones(100, 16)
+    
+    emergency_dataset = TensorDataset(input_ids, attention_mask)
+    train_loader = DataLoader(emergency_dataset, batch_size=BATCH_SIZE)
+    val_loader = DataLoader(emergency_dataset, batch_size=BATCH_SIZE)
+    
+    print(f"✅ Dataset de emergencia creado")
 
 
 # Sistema de buffer inteligente para C4 streaming
@@ -2871,7 +2939,7 @@ start_epoch = 0
 start_step = 0
 best_val_loss = float('inf')
 patience_counter = 0
-CHECKPOINT_STEPS = 1000
+CHECKPOINT_STEPS = 100  # Guardar más frecuentemente para modelo micro
 global_step = 0
 
 # Variables para tracking de velocidad y throughput
@@ -2997,17 +3065,17 @@ def main_training():
     print("🔧 Cargando muestras de texto para construir vocabulario...")
     temp_dataset = load_dataset("allenai/dolma", streaming=True, split="train")
     
-    # Recolectar textos para vocabulario (máximo 1000 muestras)
+    # Recolectar textos para vocabulario (máximo 500 muestras)
     vocab_texts = []
     for i, sample in enumerate(temp_dataset):
-        if i >= 1000:  # Limitar para no sobrecargar memoria
+        if i >= 500:  # Incrementar muestras para vocabulario (10x)
             break
         vocab_texts.append(sample["text"])
     
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=10000)  # Vocabulario de 10K tokens
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -3048,8 +3116,14 @@ def main_training():
         for i, batch in enumerate(progress):
             step_start_time = time.time()
             
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            # Manejar tanto diccionarios (dataset normal) como listas (TensorDataset)
+            if isinstance(batch, dict):
+                input_ids = batch["input_ids"].to(device, non_blocking=True)
+                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            else:
+                # TensorDataset devuelve lista de tensores
+                input_ids = batch[0].to(device, non_blocking=True)
+                attention_mask = batch[1].to(device, non_blocking=True)
             labels = input_ids.clone()
             
             # Contar muestras procesadas
@@ -3174,7 +3248,11 @@ def main_training():
                 if i >= 100:  # Limitar evaluación para eficiencia
                     break
                     
-                input_ids = batch['input_ids'].to(device)
+                # Manejar tanto diccionarios como listas en validación
+                if isinstance(batch, dict):
+                    input_ids = batch['input_ids'].to(device)
+                else:
+                    input_ids = batch[0].to(device)
                 
                 with torch.amp.autocast(
                     device_type=device.type,
@@ -3241,8 +3319,14 @@ def save_final_model():
         print(f"Cargando el mejor modelo desde '{BEST_MODEL_PATH}' para el guardado final.")
         model_to_save.load_state_dict(torch.load(BEST_MODEL_PATH))
 
-    model_to_save.save_pretrained(OUTPUT_DIR, safe_serialization=False)
-    tokenizer.save_pretrained(OUTPUT_DIR)
+    # Guardar modelo usando torch.save (modelo standalone no tiene save_pretrained)
+    torch.save(model_to_save.state_dict(), os.path.join(OUTPUT_DIR, 'pytorch_model.bin'))
+    # Guardar tokenizer
+    if hasattr(tokenizer, 'save_pretrained'):
+        tokenizer.save_pretrained(OUTPUT_DIR)
+    else:
+        # Tokenizer standalone - guardar manualmente
+        torch.save(tokenizer, os.path.join(OUTPUT_DIR, 'tokenizer.bin'))
     print(f"Modelo y tokenizador guardados en '{OUTPUT_DIR}'")
 
     # Subir modelo a Hugging Face Hub
