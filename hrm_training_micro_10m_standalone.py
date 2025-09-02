@@ -1277,7 +1277,7 @@ DATASET_CONFIG = DATASET_INFO["config"]
 HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
 SEED = 42
 NUM_EPOCHS = 2500             # Épocas ultra-reducidas para testing
-CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
+CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 128         # Incrementar contexto para CPU
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
@@ -2647,31 +2647,33 @@ for split_name in ["train", "validation"]:
             batch_size=batch_size_tokenization,
             remove_columns=columns_to_remove
         ).with_format("torch")
-
-    # ### DISTRIBUTED TRAINING SHARDING ###
-    # Aplicar sharding para distributed training con IterableDataset
-    if is_distributed and world_size > 1:
-        print(f"🔀 Aplicando sharding para distributed training (rank {rank}/{world_size})")
-        
-        # Shard tanto train como validation para distributed training
-        for split_name in tokenized_splits.keys():
-            if is_iterable_dataset(tokenized_splits[split_name]):
-                print(f"   📊 Sharding {split_name}: GPU {rank} procesará 1/{world_size} de los datos")
-                tokenized_splits[split_name] = tokenized_splits[split_name].shard(
-                    num_shards=world_size, 
-                    index=rank
-                )
-            else:
-                print(f"   📊 {split_name} no es IterableDataset, usar DistributedSampler en DataLoader")
     else:
+        # Dataset normal (no streaming)
+        print(f"🚀 Tokenizando {split_name} con procesamiento paralelo")
         tokenized_splits[split_name] = raw_datasets[split_name].map(
             tokenize_function, 
             batched=True,
             batch_size=batch_size_tokenization,
             num_proc=num_proc,
             remove_columns=columns_to_remove,
-            desc=f"Tokenizando {split_name} para C4 streaming"
+            desc=f"Tokenizando {split_name}"
         ).with_format("torch")
+
+# ### DISTRIBUTED TRAINING SHARDING ###
+# Aplicar sharding para distributed training con IterableDataset  
+if is_distributed and world_size > 1:
+    print(f"🔀 Aplicando sharding para distributed training (rank {rank}/{world_size})")
+    
+    # Shard tanto train como validation para distributed training
+    for split_name in tokenized_splits.keys():
+        if is_iterable_dataset(tokenized_splits[split_name]):
+            print(f"   📊 Sharding {split_name}: GPU {rank} procesará 1/{world_size} de los datos")
+            tokenized_splits[split_name] = tokenized_splits[split_name].shard(
+                num_shards=world_size, 
+                index=rank
+            )
+        else:
+            print(f"   📊 {split_name} no es IterableDataset, usar DistributedSampler en DataLoader")
 
 # ### FIX DATALOADER ###: Variables ya definidas arriba
 
