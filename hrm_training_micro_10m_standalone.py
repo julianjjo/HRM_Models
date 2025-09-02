@@ -244,7 +244,7 @@ from collections import Counter
 class SimpleTokenizer:
     """Tokenizer simple sin dependencias de HuggingFace"""
     
-    def __init__(self, vocab_size=32000):
+    def __init__(self, vocab_size=65536):
         self.vocab_size = vocab_size
         self.word_to_id = {}
         self.id_to_word = {}
@@ -572,7 +572,7 @@ class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
     
     def __init__(self, 
-                 vocab_size=32128, 
+                 vocab_size=65536, 
                  block_size=2048,           # Aumentado para contexto extendido
                  n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
@@ -2143,7 +2143,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=32000)
+    tokenizer = SimpleTokenizer(vocab_size=65536)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -3007,7 +3007,7 @@ def main_training():
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=32000)
+    tokenizer = SimpleTokenizer(vocab_size=65536)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")

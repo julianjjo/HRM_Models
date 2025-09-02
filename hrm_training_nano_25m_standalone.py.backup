@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Models Training Script - MODELO LARGE ~1B PARÁMETROS  
-VERSIÓN LARGE: Configuración para ~1B parámetros con contexto extendido (2048 tokens) [STANDALONE VERSION]
-- Arquitectura HRM large-eficiente (24 capas, 1536 dim)
+HRM-Models Training Script - MODELO NANO ~25M PARÁMETROS  
+VERSIÓN NANO: Configuración para ~25M parámetros con contexto optimizado (512 tokens) [STANDALONE VERSION]
+- Arquitectura HRM nano-eficiente (8 capas, 320 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones de memoria para hardware potente
-- Configuración optimizada para hardware alto (RTX 4090, H100, etc.)
+- Optimizaciones de memoria para recursos limitados
+- Configuración optimizada para hardware básico-medio (T4, RTX 4060, etc.)
 - SIN DEPENDENCIAS DE TRANSFORMERS - Implementación standalone
 - Tokenizer simple personalizado incluido
 """
@@ -244,7 +244,7 @@ from collections import Counter
 class SimpleTokenizer:
     """Tokenizer simple sin dependencias de HuggingFace"""
     
-    def __init__(self, vocab_size=65536):
+    def __init__(self, vocab_size=32000):
         self.vocab_size = vocab_size
         self.word_to_id = {}
         self.id_to_word = {}
@@ -572,7 +572,7 @@ class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
     
     def __init__(self, 
-                 vocab_size=65536, 
+                 vocab_size=32128, 
                  block_size=2048,           # Aumentado para contexto extendido
                  n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
@@ -581,7 +581,7 @@ class HRMText1Config(SimpleConfig):
                  dropout=0.1,
                  halt_max_steps=12,         # Más pasos para secuencias largas
                  ponder_loss_weight=1e-2,
-                 halt_bias_init=-0.5,
+                 halt_bias_init=-0.5,         # Bias conservador para estabilidad
                  use_rotary_embeddings=True, # NUEVO: RoPE
                  rotary_embedding_base=10000,
                  use_flash_attention=True,   # NUEVO: Flash Attention
@@ -1242,40 +1242,40 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Models-Large-1B"
+HF_REPO_ID = f"dreamwar/HRM-Models-Nano-25M"
 SEED = 42
 NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
 CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
-BLOCK_SIZE = 2048        # Contexto extendido para modelo large (2048 tokens)
+BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
-# Configuración de entrenamiento para modelo large optimizada para hardware potente
-BATCH_SIZE = 4         # Batch conservador para GPUs de ~24GB+ VRAM
-GRAD_ACCUM_STEPS = 16    # Batch efectivo de 64 para entrenamiento estable
-EVAL_STEPS = 1000        # Evaluar cada 1000 pasos para modelo large
+# Configuración de entrenamiento para modelo nano optimizada para hardware básico-medio
+BATCH_SIZE = 32        # Batch optimizado para GPUs básicas (~6GB uso estimado)
+GRAD_ACCUM_STEPS = 4     # Batch efectivo de 128 para entrenamiento eficiente
+EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes  # Reducido para estabilidad numérica (migrado desde Kaggle)
-LEARNING_RATE_MIN = 1e-6  # Mínimo apropiado para modelo grande
+LEARNING_RATE_MAX = 5e-5  # Reducido significativamente para evitar gradientes explosivos
+LEARNING_RATE_MIN = 1e-6  # Mínimo más bajo para estabilidad
 WEIGHT_DECAY = 0.1
-WARMUP_RATIO = 0.2        # 20% de warmup más largo para modelo grande
+WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
 # Optimizaciones
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
-# --- CONFIGURACIÓN PARA MODELO LARGE (~1B PARÁMETROS) ---
-# Configuración large escalada desde el modelo 10M que funciona perfectamente
+# --- CONFIGURACIÓN PARA MODELO NANO (~25M PARÁMETROS) ---
+# Configuración nano escalada desde el modelo 10M que funciona perfectamente
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 1536,                    # Dimensión escalada para 1B (1536)
-    "n_head": 24,                      # 24 cabezas de atención (1536/24 = 64 dim por cabeza)
-    "n_layers": 24,                    # 24 capas HRM (escalado desde 6 del 10M)
-    "d_ff": 6144,                      # 4 * n_embd para FFN (1536 * 4)
+    "n_embd": 320,                     # Dimensión escalada para 25M (320)
+    "n_head": 8,                       # 8 cabezas de atención (320/8 = 40 dim por cabeza)
+    "n_layers": 8,                     # 8 capas HRM (escalado desde 6 del 10M)
+    "d_ff": 1280,                      # 4 * n_embd para FFN (320 * 4)
     "dropout": 0.1,
     "halt_max_steps": 4,               # Pasos optimizados para modelo expandido
     "ponder_loss_weight": 1e-2,
-    "halt_bias_init": -0.5,
+    "halt_bias_init": -2.2,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
@@ -1352,7 +1352,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Large-1B-standalone-v1.0-output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Nano-25M-standalone-v1.0-output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -2123,7 +2123,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=32000)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -2719,17 +2719,17 @@ if multiprocessing_context is not None:
     val_kwargs["multiprocessing_context"] = multiprocessing_context
 
 val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
-    
-    # Debug: Verificar que el dataset tiene datos
-    print("🔍 Verificando que el dataset tiene datos...")
-    try:
-        sample_iter = iter(train_loader)
-        first_batch = next(sample_iter)
-        print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
-    except StopIteration:
-        print("❌ ERROR: El train_loader está vacío!")
-    except Exception as e:
-        print(f"❌ ERROR obteniendo muestra: {e}")
+
+# Debug: Verificar que el dataset tiene datos
+print("🔍 Verificando que el dataset tiene datos...")
+try:
+    sample_iter = iter(train_loader)
+    first_batch = next(sample_iter)
+    print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
+except StopIteration:
+    print("❌ ERROR: El train_loader está vacío!")
+except Exception as e:
+    print(f"❌ ERROR obteniendo muestra: {e}")
 
 
 # Sistema de buffer inteligente para C4 streaming
@@ -2737,8 +2737,8 @@ class StreamingBufferWrapper:
     """Buffer inteligente para datasets streaming masivos como C4"""
     def __init__(self, dataloader, buffer_size=None, min_buffer_ratio=0.4):
         self.dataloader = dataloader
-        # Buffer adaptativo basado en número de GPUs
-        self.buffer_size = buffer_size or get_optimized_buffer_size(num_gpus, 'medium')
+        # Buffer adaptativo basado en número de GPUs - optimizado conservativo
+        self.buffer_size = buffer_size or get_optimized_buffer_size(num_gpus, 'large')
         self.min_buffer_ratio = min_buffer_ratio
         self.buffer = []
         self.iterator = iter(dataloader)
@@ -2776,7 +2776,9 @@ class StreamingBufferWrapper:
 if is_multi_gpu and ACTIVE_DATASET == "c4":
     print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
     # Buffer más grande para mejor utilización de CPU en paralelo
-    buffer_size = get_optimized_buffer_size(num_gpus, 'large')  # Optimizado conservativo
+    # Calcular buffer size optimizado independiente de workers
+    dataset_hint = 'large' if is_streaming else 'medium'
+    buffer_size = get_optimized_buffer_size(num_gpus, dataset_hint)
     train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
     print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
 
@@ -2888,7 +2890,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 1e-5   # LR reducido urgentemente para evitar explosión de gradientes   # LR reducido para estabilidad (sincronizado con MAX)
+    NEW_LEARNING_RATE = 5e-5   # LR reducido para estabilidad (sincronizado con MAX)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
@@ -2930,6 +2932,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
                 # CRITICAL FIX: Actualizar start_step al nuevo valor calculado
                 start_step = new_step
                 print(f"🔄 start_step actualizado de checkpoint para nuevo dataset: {start_step}")
+
     # Actualizar global_step con el valor cargado (ahora potencialmente ajustado)
     global_step = start_step
 
@@ -2955,7 +2958,7 @@ def main_training():
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=32000)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -3023,14 +3026,24 @@ def main_training():
                 epoch_steps += 1
                 
                 if (i + 1) % GRAD_ACCUM_STEPS == 0:
-                    # Gradient clipping y update
+                    # Gradient clipping mejorado y update
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-                    scheduler.step()
-                    global_step += 1
+                    
+                    # Verificar gradientes antes del clipping
+                    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)  # Clipping más agresivo
+                    
+                    # Solo actualizar si los gradientes son finitos
+                    if torch.isfinite(total_norm):
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad()
+                        scheduler.step()
+                        global_step += 1
+                    else:
+                        # Skip update si gradientes son inf/nan
+                        print(f"⚠️ Gradientes infinitos detectados en step {global_step}, saltando update")
+                        scaler.update()
+                        optimizer.zero_grad()
                     
                     # Métricas de tiempo y velocidad
                     step_end_time = time.time()
@@ -3203,14 +3216,14 @@ def save_final_model():
             model_to_save.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload HRM-Models 1B large model"
+                commit_message=f"Upload HRM-Models 25M nano model"
             )
 
             # Subir el tokenizador
             tokenizer.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Models 1B large model"
+                commit_message=f"Upload tokenizer for HRM-Models 25M nano model"
             )
 
             print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")

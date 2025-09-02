@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Models Training Script - MODELO LARGE ~1B PARÁMETROS  
-VERSIÓN LARGE: Configuración para ~1B parámetros con contexto extendido (2048 tokens) [STANDALONE VERSION]
-- Arquitectura HRM large-eficiente (24 capas, 1536 dim)
+HRM-Models Training Script - MODELO MICRO ~10M PARÁMETROS  
+VERSIÓN MICRO: Configuración para ~10M parámetros con contexto ultra-reducido (128 tokens) [STANDALONE VERSION]
+- Arquitectura HRM micro-eficiente (4 capas, 128 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones de memoria para hardware potente
-- Configuración optimizada para hardware alto (RTX 4090, H100, etc.)
+- Optimizaciones extremas de memoria para recursos muy limitados
+- Configuración optimizada para hardware básico (T4, etc.)
 - SIN DEPENDENCIAS DE TRANSFORMERS - Implementación standalone
 - Tokenizer simple personalizado incluido
 """
@@ -244,7 +244,7 @@ from collections import Counter
 class SimpleTokenizer:
     """Tokenizer simple sin dependencias de HuggingFace"""
     
-    def __init__(self, vocab_size=65536):
+    def __init__(self, vocab_size=32000):
         self.vocab_size = vocab_size
         self.word_to_id = {}
         self.id_to_word = {}
@@ -572,7 +572,7 @@ class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
     
     def __init__(self, 
-                 vocab_size=65536, 
+                 vocab_size=32128, 
                  block_size=2048,           # Aumentado para contexto extendido
                  n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
@@ -1087,7 +1087,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 100   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 0.01   # Usar más datos para modelo pequeño (más eficiente)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -1242,36 +1242,36 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Models-Large-1B"
+HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
 SEED = 42
-NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
-CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
-BLOCK_SIZE = 2048        # Contexto extendido para modelo large (2048 tokens)
+NUM_EPOCHS = 2             # Épocas totales para entrenamiento continuo
+CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
+BLOCK_SIZE = 512         # Contexto expandido para H200 - mejor calidad de modelo (512 tokens)
 
-# Configuración de entrenamiento para modelo large optimizada para hardware potente
-BATCH_SIZE = 4         # Batch conservador para GPUs de ~24GB+ VRAM
-GRAD_ACCUM_STEPS = 16    # Batch efectivo de 64 para entrenamiento estable
-EVAL_STEPS = 1000        # Evaluar cada 1000 pasos para modelo large
+# Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
+BATCH_SIZE = 3        # Batch masivo para aprovechar VRAM de H200 (~13GB uso estimado)
+GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
+EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
 LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes  # Reducido para estabilidad numérica (migrado desde Kaggle)
-LEARNING_RATE_MIN = 1e-6  # Mínimo apropiado para modelo grande
+LEARNING_RATE_MIN = 1e-7  # Mínimo reducido proporcionalmente  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
-WARMUP_RATIO = 0.2        # 20% de warmup más largo para modelo grande
+WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
 # Optimizaciones
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
-# --- CONFIGURACIÓN PARA MODELO LARGE (~1B PARÁMETROS) ---
-# Configuración large escalada desde el modelo 10M que funciona perfectamente
+# --- CONFIGURACIÓN PARA MODELO MICRO OPTIMIZADO PARA H200 (~25M PARÁMETROS) ---
+# Configuración micro expandida para aprovechar mejor hardware potente (H200)
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 1536,                    # Dimensión escalada para 1B (1536)
-    "n_head": 24,                      # 24 cabezas de atención (1536/24 = 64 dim por cabeza)
-    "n_layers": 24,                    # 24 capas HRM (escalado desde 6 del 10M)
-    "d_ff": 6144,                      # 4 * n_embd para FFN (1536 * 4)
+    "n_embd": 256,                     # Dimensión expandida para H200 (256)
+    "n_head": 8,                       # 8 cabezas de atención (256/8 = 32 dim por cabeza)
+    "n_layers": 6,                     # 6 capas HRM (más capacidad)
+    "d_ff": 1024,                      # 4 * n_embd para FFN (256 * 4)
     "dropout": 0.1,
     "halt_max_steps": 4,               # Pasos optimizados para modelo expandido
     "ponder_loss_weight": 1e-2,
@@ -1352,7 +1352,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Large-1B-standalone-v1.0-output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Micro-10M-standalone-v1.0-output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -1387,6 +1387,7 @@ if TENSORBOARD_AVAILABLE:
 def get_system_info():
     """Obtiene información precisa del sistema"""
     try:
+        # Intentar obtener CPU count de diferentes formas
         import psutil
         logical_cpus = psutil.cpu_count(logical=True)
         physical_cpus = psutil.cpu_count(logical=False)
@@ -1394,94 +1395,117 @@ def get_system_info():
         print(f"🖥️  Sistema detectado - {cpu_info}")
         return logical_cpus, physical_cpus
     except ImportError:
+        # Fallback a multiprocessing
         logical_cpus = mp.cpu_count()
-        physical_cpus = logical_cpus // 2
+        physical_cpus = logical_cpus // 2  # Estimación conservadora
         print(f"🖥️  Sistema detectado - CPUs: ~{physical_cpus} físicos, {logical_cpus} lógicos (estimado)")
         return logical_cpus, physical_cpus
 
 def get_dataloader_workers():
-    """Determina workers conservativos para DataLoader considerando hf_transfer"""
-    logical_cpus, physical_cpus = get_system_info()
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    """Determina workers para DataLoader de forma conservadora y eficiente"""
     hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
+    logical_cpus, physical_cpus = get_system_info()
     
     # Para entrenamiento distribuido
     if is_distributed and world_size > 1:
-        workers_per_process = 2 if hf_transfer_enabled else 3
-        optimal_workers = min(workers_per_process, physical_cpus // world_size)
-        print(f"🚀 Modo distribuido: {optimal_workers} workers por proceso")
+        # Conservador: 1-2 workers por proceso para evitar contención
+        workers_per_process = 1 if hf_transfer_enabled else 2
+        optimal_workers = min(workers_per_process, logical_cpus // world_size, 4)
+        transfer_status = "🚀 hf_transfer" if hf_transfer_enabled else "🐌 standard"
+        print(f"🚀 Distribuido ({transfer_status}): {optimal_workers} workers por proceso")
         return optimal_workers
     
-    # Detección de entornos especiales
     try:
+        # Google Colab: muy conservador
         if 'google.colab' in str(get_ipython()):
-            print("🔧 Google Colab: usando 2 workers conservativos")
-            return 2
+            workers = 1 if hf_transfer_enabled else 2
+            print(f"Google Colab: {workers} workers (hf_transfer={hf_transfer_enabled})")
+            return workers
     except:
         pass
 
     try:
+        # Jupyter/IPython: conservador
         get_ipython()
-        print("🔧 Jupyter/IPython: usando 2 workers conservativos")
-        return 2
+        workers = 2 if hf_transfer_enabled else 3
+        print(f"Jupyter/IPython: {workers} workers (hf_transfer={hf_transfer_enabled})")
+        return workers
     except:
         pass
 
     # Cálculo optimizado para multi-GPU basado en hf_transfer
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    
     if hf_transfer_enabled:
         # Con hf_transfer, más workers para multi-GPU pero controlado
         if num_gpus > 1:
             # Para multi-GPU: 2-3 workers por GPU para mantener throughput
             workers_per_gpu = 2 if num_gpus >= 6 else 3
             optimal_workers = min(num_gpus * workers_per_gpu, max(8, physical_cpus // 2))
-            print(f"🚀 Multi-GPU + hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
         else:
             optimal_workers = min(4, max(2, physical_cpus // 2))
-            print(f"🔧 Single-GPU + hf_transfer: {optimal_workers} workers conservativos")
     else:
         # Sin hf_transfer, más aggressive con workers para multi-GPU
         if num_gpus > 1:
             # Para multi-GPU sin hf_transfer: 3-4 workers por GPU
             workers_per_gpu = 3 if num_gpus >= 6 else 4
             optimal_workers = min(num_gpus * workers_per_gpu, max(16, physical_cpus))
-            print(f"🚀 Multi-GPU sin hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
         else:
             optimal_workers = min(6, max(3, physical_cpus // 2))
+    
+    gpu_info = f"{num_gpus} GPU{'s' if num_gpus > 1 else ''}"
+    if hf_transfer_enabled:
+        if num_gpus > 1:
+            workers_per_gpu = 2 if num_gpus >= 6 else 3
+            print(f"🚀 Multi-GPU + hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
+        else:
+            print(f"🔧 Single-GPU + hf_transfer: {optimal_workers} workers conservativos")
+    else:
+        if num_gpus > 1:
+            workers_per_gpu = 3 if num_gpus >= 6 else 4
+            print(f"🚀 Multi-GPU sin hf_transfer: {optimal_workers} workers ({workers_per_gpu}/GPU) para {num_gpus} GPUs")
+        else:
             print(f"🔧 Single-GPU sin hf_transfer: {optimal_workers} workers moderados")
     
     return optimal_workers
 
 def get_tokenization_workers():
-    """Workers específicos para tokenización (independiente de DataLoader)"""
+    """Determina workers para tokenización de forma conservadora (independiente de DataLoader)"""
     logical_cpus, physical_cpus = get_system_info()
+    
+    # Para entrenamiento distribuido: muy conservador
+    if is_distributed and world_size > 1:
+        optimal_workers = min(2, max(1, physical_cpus // world_size))
+        print(f"Tokenización distribuida: {optimal_workers} workers por proceso")
+        return optimal_workers
+    
+    try:
+        # Google Colab: extremadamente conservador
+        if 'google.colab' in str(get_ipython()):
+            workers = min(2, max(1, physical_cpus // 2))
+            print(f"Tokenización Colab: {workers} workers")
+            return workers
+    except:
+        pass
+
+    try:
+        # Jupyter/IPython: conservador
+        get_ipython()
+        workers = min(3, max(2, physical_cpus // 2))
+        print(f"Tokenización Jupyter: {workers} workers")
+        return workers
+    except:
+        pass
+
+    # Sistema normal: usar máximo 50-75% de CPUs físicos para tokenización
+    # pero limitado para evitar saturación
+    max_workers = min(6, max(2, (physical_cpus * 3) // 4))  # 75% de CPUs físicos, máximo 6
+    
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    
-    # Tokenización necesita más workers que DataLoader
-    if num_gpus > 1:
-        max_workers = min(6, physical_cpus)
-    else:
-        max_workers = min(4, physical_cpus)
-    
     gpu_info = f"{num_gpus} GPU{'s' if num_gpus > 1 else ''}"
     print(f"Tokenización sistema ({gpu_info}): {max_workers} workers")
     
     return max_workers
-
-def cleanup_dataloaders():
-    """Función para limpiar DataLoaders al salir"""
-    global train_loader, val_loader
-    try:
-        if 'train_loader' in globals():
-            del train_loader
-        if 'val_loader' in globals():
-            del val_loader
-        torch.cuda.empty_cache()
-        print("DataLoaders limpiados correctamente.")
-    except:
-        pass
-
-# Registrar la función de limpieza
-atexit.register(cleanup_dataloaders)
 
 def get_optimized_buffer_size(num_gpus, dataset_size_hint='medium'):
     """Calcula buffer size óptimo conservativo para evitar saturación de memoria"""
@@ -1500,29 +1524,25 @@ def get_optimized_buffer_size(num_gpus, dataset_size_hint='medium'):
     # Límites muy conservativos para evitar saturar memoria
     return min(max(buffer_size, 8), 128)  # Máximo 128, mínimo 8
 
-def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
-    """Calcula prefetch_factor optimizado para throughput multi-GPU"""
-    if num_workers == 0:
-        return None
-    
-    hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
-    
-    if hf_transfer_enabled:
-        # Con hf_transfer, balance entre throughput y rate limits
-        if is_multi_gpu:
-            # Multi-GPU: 2-4 items por worker para mantener pipeline lleno
-            return min(4, max(2, num_workers // 4))
-        else:
-            # Single-GPU: 2-3 items por worker
-            return min(3, max(2, num_workers // 2))
-    else:
-        # Sin hf_transfer, más agresivo para throughput máximo
-        if is_multi_gpu:
-            # Multi-GPU: 4-8 items por worker para maximizar throughput
-            return min(8, max(4, num_workers // 2))
-        else:
-            # Single-GPU: 3-6 items por worker
-            return min(6, max(3, num_workers // 2))
+def cleanup_dataloaders():
+    """Función para limpiar DataLoaders al salir"""
+    global train_loader, val_loader
+    try:
+        if 'train_loader' in globals():
+            del train_loader
+        if 'val_loader' in globals():
+            del val_loader
+        torch.cuda.empty_cache()
+        print("DataLoaders limpiados correctamente.")
+    except:
+        pass
+
+# Registrar la función de limpieza
+atexit.register(cleanup_dataloaders)
+
+# ==============================================================================
+# --- FUNCIONES AUXILIARES PARA VALIDACIÓN DE CONFIGURACIÓN ---
+# ==============================================================================
 
 def validate_mix_ratios(mix_ratios, dataset_name=""):
     """
@@ -2123,7 +2143,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=32000)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -2531,8 +2551,13 @@ tokenized_splits = {}
 # Configuración para multi-GPU (necesario antes del loop de tokenización)
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
 is_multi_gpu = num_gpus > 1
+# Separar conceptos de workers para diferentes propósitos
 safe_num_workers = get_dataloader_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
 tokenization_workers = get_tokenization_workers() if not os.environ.get('HRM_IMPORT_ONLY') else 0
+
+print(f"🔧 Configuración de workers optimizada:")
+print(f"   📥 DataLoader workers: {safe_num_workers} (optimizado para hf_transfer)")
+print(f"   🔄 Tokenization workers: {tokenization_workers} (basado en CPU cores)")
 
 # Función para verificar si es IterableDataset (necesaria en el loop)
 def is_iterable_dataset(dataset):
@@ -2549,11 +2574,11 @@ for split_name in ["train", "validation"]:
     if ACTIVE_DATASET == "c4" and is_multi_gpu:
         # Configuración optimizada para C4 streaming masivo
         batch_size_tokenization = 2000  # Batch más grande para C4
-        num_proc = min(tokenization_workers, 8)  # Paralelización limitada
-        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc}")
+        num_proc = min(tokenization_workers, 8)  # Usar tokenization_workers en lugar de safe_num_workers
+        print(f"🚀 Tokenización optimizada C4: batch_size={batch_size_tokenization}, num_proc={num_proc} (tokenization_workers={tokenization_workers})")
     else:
         batch_size_tokenization = 1000
-        num_proc = min(tokenization_workers, 4)
+        num_proc = min(tokenization_workers, 6)  # Usar tokenization_workers y aumentar límite a 6
     
     # Para IterableDataset no usar num_proc ni desc (no soportados)
     if is_iterable_dataset(raw_datasets[split_name]):
@@ -2640,6 +2665,30 @@ def custom_collate_fn(batch):
         'input_ids': torch.stack(padded_input_ids),
         'attention_mask': torch.stack(attention_mask)
     }
+
+def get_optimized_prefetch_factor(num_workers, is_multi_gpu=False):
+    """Calcula prefetch_factor ultra-conservativo para evitar rate limits y saturación"""
+    if num_workers == 0:
+        return None
+    
+    hf_transfer_enabled = os.environ.get('HF_HUB_ENABLE_HF_TRANSFER', '0') == '1'
+    
+    if hf_transfer_enabled:
+        # Con hf_transfer, balance entre throughput y rate limits
+        if is_multi_gpu:
+            # Multi-GPU: 2-4 items por worker para mantener pipeline lleno
+            return min(4, max(2, num_workers // 4))
+        else:
+            # Single-GPU: 2-3 items por worker
+            return min(3, max(2, num_workers // 2))
+    else:
+        # Sin hf_transfer, más agresivo para throughput máximo
+        if is_multi_gpu:
+            # Multi-GPU: 4-8 items por worker para maximizar throughput
+            return min(8, max(4, num_workers // 2))
+        else:
+            # Single-GPU: 3-6 items por worker
+            return min(6, max(3, num_workers // 2))
 
 print(f"Creando DataLoaders optimizados con {safe_num_workers} workers...")
 
@@ -2737,8 +2786,8 @@ class StreamingBufferWrapper:
     """Buffer inteligente para datasets streaming masivos como C4"""
     def __init__(self, dataloader, buffer_size=None, min_buffer_ratio=0.4):
         self.dataloader = dataloader
-        # Buffer adaptativo basado en número de GPUs
-        self.buffer_size = buffer_size or get_optimized_buffer_size(num_gpus, 'medium')
+        # Buffer adaptativo basado en número de GPUs - optimizado independiente de workers
+        self.buffer_size = buffer_size or get_optimized_buffer_size(num_gpus, 'large')
         self.min_buffer_ratio = min_buffer_ratio
         self.buffer = []
         self.iterator = iter(dataloader)
@@ -2776,7 +2825,9 @@ class StreamingBufferWrapper:
 if is_multi_gpu and ACTIVE_DATASET == "c4":
     print(f"🚀 Activando buffer inteligente para C4 streaming multi-GPU")
     # Buffer más grande para mejor utilización de CPU en paralelo
-    buffer_size = get_optimized_buffer_size(num_gpus, 'large')  # Optimizado conservativo
+    # Calcular buffer size optimizado independiente de workers
+    dataset_hint = 'large' if is_streaming else 'medium'
+    buffer_size = get_optimized_buffer_size(num_gpus, dataset_hint)
     train_loader = StreamingBufferWrapper(train_loader, buffer_size=buffer_size)
     print(f"📦 Buffer streaming: {buffer_size} batches para {num_gpus} GPUs")
 
@@ -2930,6 +2981,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
                 # CRITICAL FIX: Actualizar start_step al nuevo valor calculado
                 start_step = new_step
                 print(f"🔄 start_step actualizado de checkpoint para nuevo dataset: {start_step}")
+
     # Actualizar global_step con el valor cargado (ahora potencialmente ajustado)
     global_step = start_step
 
@@ -2955,7 +3007,7 @@ def main_training():
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=32000)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -3203,14 +3255,14 @@ def save_final_model():
             model_to_save.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload HRM-Models 1B large model"
+                commit_message=f"Upload HRM-Models 10M micro model"
             )
 
             # Subir el tokenizador
             tokenizer.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Models 1B large model"
+                commit_message=f"Upload tokenizer for HRM-Models 10M micro model"
             )
 
             print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Models Training Script - MODELO LARGE ~1B PARÁMETROS  
-VERSIÓN LARGE: Configuración para ~1B parámetros con contexto extendido (2048 tokens) [STANDALONE VERSION]
-- Arquitectura HRM large-eficiente (24 capas, 1536 dim)
+HRM-Models Training Script - MODELO MEDIUM ~100M PARÁMETROS  
+VERSIÓN MEDIUM: Configuración para ~100M parámetros con contexto extendido (1024 tokens) [STANDALONE VERSION]
+- Arquitectura HRM medium-eficiente (12 capas, 512 dim)
 - Rotary Position Embeddings (RoPE) para mejor extrapolación
-- Optimizaciones de memoria para hardware potente
-- Configuración optimizada para hardware alto (RTX 4090, H100, etc.)
+- Optimizaciones extremas de memoria para recursos muy limitados
+- Configuración optimizada para hardware avanzado (A100, H100, etc.)
 - SIN DEPENDENCIAS DE TRANSFORMERS - Implementación standalone
 - Tokenizer simple personalizado incluido
 """
@@ -244,7 +244,7 @@ from collections import Counter
 class SimpleTokenizer:
     """Tokenizer simple sin dependencias de HuggingFace"""
     
-    def __init__(self, vocab_size=65536):
+    def __init__(self, vocab_size=32000):
         self.vocab_size = vocab_size
         self.word_to_id = {}
         self.id_to_word = {}
@@ -572,7 +572,7 @@ class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
     
     def __init__(self, 
-                 vocab_size=65536, 
+                 vocab_size=32128, 
                  block_size=2048,           # Aumentado para contexto extendido
                  n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
@@ -1242,44 +1242,44 @@ DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
-HF_REPO_ID = f"dreamwar/HRM-Models-Large-1B"
+HF_REPO_ID = f"dreamwar/HRM-Models-Medium-100M"
 SEED = 42
-NUM_EPOCHS = 5             # Épocas totales para entrenamiento continuo
+NUM_EPOCHS = 3             # Épocas para entrenamiento 100M
 CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
-BLOCK_SIZE = 2048        # Contexto extendido para modelo large (2048 tokens)
+BLOCK_SIZE = 1024        # Contexto extendido para mejor calidad de modelo (1024 tokens)
 
-# Configuración de entrenamiento para modelo large optimizada para hardware potente
-BATCH_SIZE = 4         # Batch conservador para GPUs de ~24GB+ VRAM
-GRAD_ACCUM_STEPS = 16    # Batch efectivo de 64 para entrenamiento estable
-EVAL_STEPS = 1000        # Evaluar cada 1000 pasos para modelo large
+# Configuración de entrenamiento para modelo 100M optimizada para A100/H100
+BATCH_SIZE = 16        # Batch balanceado para modelo 100M (~12GB uso estimado)
+GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
+EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
 LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes  # Reducido para estabilidad numérica (migrado desde Kaggle)
-LEARNING_RATE_MIN = 1e-6  # Mínimo apropiado para modelo grande
+LEARNING_RATE_MIN = 1e-7  # Mínimo reducido proporcionalmente  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
-WARMUP_RATIO = 0.2        # 20% de warmup más largo para modelo grande
+WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
 # Optimizaciones
 MIXED_PRECISION = True
 EARLY_STOPPING_PATIENCE = 3
 USE_GRADIENT_CHECKPOINTING = False  # Disabled for small model - dynamic HRM computation incompatible with checkpointing
 
-# --- CONFIGURACIÓN PARA MODELO LARGE (~1B PARÁMETROS) ---
-# Configuración large escalada desde el modelo 10M que funciona perfectamente
+# --- CONFIGURACIÓN PARA MODELO MICRO OPTIMIZADO PARA H200 (~25M PARÁMETROS) ---
+# Configuración micro expandida para aprovechar mejor hardware potente (H200)
 # Fórmula aproximada: params ≈ vocab_size * n_embd + n_layers * (4 * n_embd² + 3 * n_embd * d_ff)
 MODEL_PARAMS = {
-    "n_embd": 1536,                    # Dimensión escalada para 1B (1536)
-    "n_head": 24,                      # 24 cabezas de atención (1536/24 = 64 dim por cabeza)
-    "n_layers": 24,                    # 24 capas HRM (escalado desde 6 del 10M)
-    "d_ff": 6144,                      # 4 * n_embd para FFN (1536 * 4)
+    "n_embd": 512,                     # Dimensión para ~100M params (512)
+    "n_head": 16,                      # 16 cabezas de atención (512/16 = 32 dim por cabeza)
+    "n_layers": 12,                    # 12 capas HRM (capacidad 100M)
+    "d_ff": 2048,                      # 4 * n_embd para FFN (512 * 4)
     "dropout": 0.1,
-    "halt_max_steps": 4,               # Pasos optimizados para modelo expandido
+    "halt_max_steps": 8,               # Pasos optimizados para modelo 100M
     "ponder_loss_weight": 1e-2,
     "halt_bias_init": -0.5,
     "use_rotary_embeddings": True,     # RoPE para mejor extrapolación
     "use_flash_attention": True,       # Flash Attention si está disponible
     "gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
-    "h_update_period": 2,              # H-module se actualiza cada 2 pasos 
+    "h_update_period": 4,              # H-module se actualiza cada 4 pasos para 100M 
 }
 
 T5_TOKENIZER_REPO = None  # Using SimpleTokenizer instead
@@ -1352,7 +1352,7 @@ def determine_output_base():
 
 # Configurar rutas finales
 OUTPUT_BASE = determine_output_base()
-OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Large-1B-standalone-v1.0-output")
+OUTPUT_DIR = os.path.join(OUTPUT_BASE, "HRM-Medium-100M-standalone-v1.0-output")
 BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model.bin")
 CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
 
@@ -2123,7 +2123,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=32000)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -2955,7 +2955,7 @@ def main_training():
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=65536)
+    tokenizer = SimpleTokenizer(vocab_size=32000)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -3203,14 +3203,14 @@ def save_final_model():
             model_to_save.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload HRM-Models 1B large model"
+                commit_message=f"Upload HRM-Models 100M medium model"
             )
 
             # Subir el tokenizador
             tokenizer.push_to_hub(
                 HF_REPO_ID,
                 token=HF_TOKEN,
-                commit_message=f"Upload tokenizer for HRM-Models 1B large model"
+                commit_message=f"Upload tokenizer for HRM-Models 100M medium model"
             )
 
             print(f"✅ Modelo subido exitosamente a https://huggingface.co/{HF_REPO_ID}")
@@ -3228,6 +3228,8 @@ def save_final_model():
 ⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
             print("Para subir al Hub, instala: pip install huggingface_hub")
         print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
+
+
 
 # ==============================================================================
 # --- FUNCIÓN DE CHAT Y PRUEBAS ---
@@ -3295,5 +3297,3 @@ if __name__ == "__main__" and not os.environ.get('HRM_IMPORT_ONLY'):
     main_training()
     save_final_model()
     test_model_and_summary()
-
-
