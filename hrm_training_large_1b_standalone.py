@@ -274,6 +274,25 @@ class SimpleTokenizer:
         self.mask_token_id = self.special_tokens['<mask>']
         
         self._built = False
+        
+        # Base vocabulary with common English words and punctuation
+        self.base_vocabulary = [
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+            'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did',
+            'will', 'would', 'could', 'should', 'can', 'may', 'might', 'must', 'shall',
+            'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
+            'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their',
+            'what', 'when', 'where', 'why', 'how', 'who', 'which', 'whose', 'whom',
+            'not', 'no', 'yes', 'ok', 'okay', 'well', 'so', 'very', 'much', 'many', 'more', 'most',
+            'some', 'any', 'all', 'each', 'every', 'one', 'two', 'three', 'first', 'last',
+            'good', 'bad', 'big', 'small', 'long', 'short', 'high', 'low', 'fast', 'slow',
+            'new', 'old', 'young', 'early', 'late', 'here', 'there', 'now', 'then',
+            'up', 'down', 'out', 'over', 'under', 'above', 'below', 'between', 'through',
+            'time', 'day', 'year', 'way', 'man', 'woman', 'child', 'people', 'world', 'life',
+            'work', 'make', 'get', 'go', 'come', 'take', 'give', 'know', 'think', 'see',
+            'look', 'find', 'say', 'tell', 'ask', 'feel', 'try', 'use', 'want', 'need',
+            '.', ',', '!', '?', ';', ':', '"', "'", '(', ')', '[', ']', '{', '}', '-', '_'
+        ]
     
     def _tokenize_text(self, text):
         """Tokenización básica por palabras y caracteres"""
@@ -288,6 +307,11 @@ class SimpleTokenizer:
         print(f"🔧 Construyendo vocabulario desde {len(texts)} textos...")
         
         word_counts = Counter()
+        
+        # Agregar vocabulario base con alta prioridad
+        for word in self.base_vocabulary:
+            word_counts[word] = word_counts.get(word, 0) + 1000  # Dar alta prioridad
+        
         for text in texts:
             tokens = self._tokenize_text(text)
             word_counts.update(tokens)
