@@ -2719,17 +2719,17 @@ if multiprocessing_context is not None:
     val_kwargs["multiprocessing_context"] = multiprocessing_context
 
 val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
-    
-    # Debug: Verificar que el dataset tiene datos
-    print("🔍 Verificando que el dataset tiene datos...")
-    try:
-        sample_iter = iter(train_loader)
-        first_batch = next(sample_iter)
-        print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
-    except StopIteration:
-        print("❌ ERROR: El train_loader está vacío!")
-    except Exception as e:
-        print(f"❌ ERROR obteniendo muestra: {e}")
+
+# Debug: Verificar que el dataset tiene datos
+print("🔍 Verificando que el dataset tiene datos...")
+try:
+    sample_iter = iter(train_loader)
+    first_batch = next(sample_iter)
+    print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
+except StopIteration:
+    print("❌ ERROR: El train_loader está vacío!")
+except Exception as e:
+    print(f"❌ ERROR obteniendo muestra: {e}")
 
 
 # Sistema de buffer inteligente para C4 streaming
@@ -2983,7 +2983,7 @@ def main_training():
     
     for epoch in range(start_epoch, final_epochs):
         epoch_start_time = time.time()
-        print(f"\\n🚀 Iniciando Época {epoch+1}/{final_epochs}")
+        print(f"\n🚀 Iniciando Época {epoch+1}/{final_epochs}")
         
         model.train()
         optimizer.zero_grad()
@@ -3110,7 +3110,7 @@ def main_training():
                         # [Resto del código TensorBoard anterior se mantiene]
         
         # Validación al final de cada época
-        print(f"\\n📊 Ejecutando validación para época {epoch+1}")
+        print(f"\n📊 Ejecutando validación para época {epoch+1}")
         model.eval()
         
         val_loss = 0.0
@@ -3220,12 +3220,10 @@ def save_final_model():
             print("El modelo se guardó localmente pero no se pudo subir al Hub.")
     else:
         if not HF_TOKEN:
-            print("
-⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+            print("⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
             print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
         elif not HF_API_AVAILABLE:
-            print("
-⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
+            print("⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
             print("Para subir al Hub, instala: pip install huggingface_hub")
         print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
 

@@ -387,7 +387,7 @@ class AdaptiveBPETokenizer:
         return [token for token in tokens if token.strip()]
     
     def _intelligent_word_filtering(self, word_freq: Counter) -> Dict[str, int]:
-        \"\"\"Filtrado inteligente con múltiples criterios de calidad\"\"\"
+        """Filtrado inteligente con múltiples criterios de calidad"""
         filtered_words = {}
         
         # Listas de palabras a filtrar
@@ -439,8 +439,8 @@ class AdaptiveBPETokenizer:
         if len(sorted_words) > max_words:
             sorted_words = dict(list(sorted_words.items())[:max_words])
         
-        print(f\"📊 Filtrado inteligente: {len(word_freq):,} -> {len(sorted_words):,} palabras\")
-        print(f\"   Criterios aplicados: frecuencia ≥ {self.min_frequency}, longitud 2-50, patrones válidos\")
+        print(f"📊 Filtrado inteligente: {len(word_freq):,} -> {len(sorted_words):,} palabras")
+        print(f"   Criterios aplicados: frecuencia ≥ {self.min_frequency}, longitud 2-50, patrones válidos")
         
         return sorted_words
     
@@ -734,8 +734,7 @@ class AdaptiveBPETokenizer:
         
         if clean_up_tokenization_spaces:
             # Restaurar espacios normalizados
-            text = text.replace('<newline>', '
-')
+            text = text.replace('<newline>', '\n')
             text = text.replace('<tab>', '\t')
             text = re.sub(r'\s+', ' ', text)
             text = text.strip()
@@ -788,13 +787,11 @@ class AdaptiveBPETokenizer:
         # Guardar merges de BPE
         merges_file = os.path.join(save_directory, "merges.txt")
         with open(merges_file, 'w', encoding='utf-8') as f:
-            f.write("#version: 0.2
-")
+            f.write("#version: 0.2\n")
             # Ordenar merges por ranking
             sorted_merges = sorted(self.byte_pairs.items(), key=lambda x: self.merge_ranks.get(x[1], 0))
             for (token1, token2), merge_id in sorted_merges:
-                f.write(f"{token1} {token2}
-")
+                f.write(f"{token1} {token2}\n")
         
         # Guardar estadísticas
         stats_file = os.path.join(save_directory, "tokenizer_stats.json")
@@ -1033,7 +1030,7 @@ def apply_rotary_pos_emb(q, k, cos, sin):
 # ==============================================================================
 
 class AdaptiveEmbedding(nn.Module):
-    \"\"\"Embeddings adaptativos con factorización y compartición de pesos\"\"\"
+    """Embeddings adaptativos con factorización y compartición de pesos"""
     
     def __init__(self, vocab_size, n_embd, config, factorize=True):
         super().__init__()
@@ -1047,8 +1044,8 @@ class AdaptiveEmbedding(nn.Module):
             self.adaptive_embed = nn.Embedding(vocab_size, self.adaptive_size)
             self.project_in = nn.Linear(self.adaptive_size, n_embd, bias=False)
             
-            print(f\"📊 Embeddings factorizados: {vocab_size:,} -> {self.adaptive_size:,} -> {n_embd:,}\")
-            print(f\"   Parámetros ahorrados: {(vocab_size * n_embd) - (vocab_size * self.adaptive_size + self.adaptive_size * n_embd):,}\")
+            print(f"📊 Embeddings factorizados: {vocab_size:,} -> {self.adaptive_size:,} -> {n_embd:,}")
+            print(f"   Parámetros ahorrados: {(vocab_size * n_embd) - (vocab_size * self.adaptive_size + self.adaptive_size * n_embd):,}")
         else:
             # Embeddings tradicionales
             self.adaptive_embed = nn.Embedding(vocab_size, n_embd)
@@ -1061,7 +1058,7 @@ class AdaptiveEmbedding(nn.Module):
         return embeddings
     
     def expand_vocab(self, new_vocab_size):
-        \"\"\"Expandir vocabulario dinámicamente\"\"\"
+        """Expandir vocabulario dinámicamente"""
         if new_vocab_size <= self.vocab_size:
             return
         
@@ -1082,10 +1079,10 @@ class AdaptiveEmbedding(nn.Module):
         self.adaptive_embed = new_embed
         self.vocab_size = new_vocab_size
         
-        print(f\"📈 Vocabulario expandido a {new_vocab_size:,} tokens\")
+        print(f"📈 Vocabulario expandido a {new_vocab_size:,} tokens")
 
 class DynamicVocabularyManager:
-    \"\"\"Gestor de vocabulario dinámico para aprendizaje incremental\"\"\"
+    """Gestor de vocabulario dinámico para aprendizaje incremental"""
     
     def __init__(self, config):
         self.config = config
@@ -1095,7 +1092,7 @@ class DynamicVocabularyManager:
         self.min_frequency = 5  # Frecuencia mínima para agregar token
         
     def observe_tokens(self, token_ids, tokenizer):
-        \"\"\"Observar tokens en un batch para identificar patrones\"\"\"
+        """Observar tokens en un batch para identificar patrones"""
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.cpu().numpy()
         
@@ -1105,12 +1102,12 @@ class DynamicVocabularyManager:
                 self.token_frequencies[token_id] += 1
     
     def should_expand_vocab(self):
-        \"\"\"Determinar si es necesario expandir el vocabulario\"\"\"
+        """Determinar si es necesario expandir el vocabulario"""
         unk_frequency = self.token_frequencies.get(1, 0)  # unk_token_id = 1
         return unk_frequency >= self.expansion_threshold
     
     def suggest_expansion(self, tokenizer, texts_sample):
-        \"\"\"Sugerir nuevos tokens basado en patrones observados\"\"\"
+        """Sugerir nuevos tokens basado en patrones observados"""
         if not texts_sample:
             return []
         
@@ -1129,7 +1126,7 @@ class DynamicVocabularyManager:
         return candidates
 
 class EmbeddingSharing(nn.Module):
-    \"\"\"Compartición de pesos entre embeddings de entrada y salida\"\"\"
+    """Compartición de pesos entre embeddings de entrada y salida"""
     
     def __init__(self, embedding_layer, vocab_size, n_embd):
         super().__init__()
@@ -1141,7 +1138,7 @@ class EmbeddingSharing(nn.Module):
         self.output_projection = None
         
     def get_output_embeddings(self):
-        \"\"\"Obtener matriz de embeddings para la cabeza de salida\"\"\"
+        """Obtener matriz de embeddings para la cabeza de salida"""
         if hasattr(self.embedding_layer, 'adaptive_embed'):
             embeddings = self.embedding_layer.adaptive_embed.weight
             
@@ -1154,7 +1151,7 @@ class EmbeddingSharing(nn.Module):
             return self.embedding_layer.weight
     
     def forward(self, hidden_states):
-        \"\"\"Aplicar embeddings compartidos para generar logits\"\"\"
+        """Aplicar embeddings compartidos para generar logits"""
         output_embeddings = self.get_output_embeddings()
         return F.linear(hidden_states, output_embeddings)
 
@@ -1516,11 +1513,11 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
             module.gradient_checkpointing = value
     
     def expand_vocabulary(self, tokenizer, new_vocab_size: int):
-        \"\"\"Expandir vocabulario dinámicamente durante el entrenamiento\"\"\"
+        """Expandir vocabulario dinámicamente durante el entrenamiento"""
         if new_vocab_size <= self.config.vocab_size:
             return
             
-        print(f\"🔄 Expandiendo vocabulario del modelo: {self.config.vocab_size:,} -> {new_vocab_size:,}\")
+        print(f"🔄 Expandiendo vocabulario del modelo: {self.config.vocab_size:,} -> {new_vocab_size:,}")
         
         # Expandir embeddings adaptativos
         self.token_embeddings.expand_vocab(new_vocab_size)
@@ -1531,20 +1528,20 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
         # Actualizar el gestor de vocabulario dinámico
         self.dynamic_vocab.config.vocab_size = new_vocab_size
         
-        print(f\"✅ Vocabulario del modelo expandido exitosamente\")
+        print(f"✅ Vocabulario del modelo expandido exitosamente")
     
     def observe_batch_tokens(self, tokenizer, input_ids):
-        \"\"\"Observar tokens en un batch para análisis de vocabulario dinámico\"\"\"
+        """Observar tokens en un batch para análisis de vocabulario dinámico"""
         self.dynamic_vocab.observe_tokens(input_ids, tokenizer)
         
         # Verificar si es necesario expandir
         if self.dynamic_vocab.should_expand_vocab():
-            print(f\"🔍 Detectada alta frecuencia de tokens desconocidos\")
+            print(f"🔍 Detectada alta frecuencia de tokens desconocidos")
             return True
         return False
     
     def get_vocab_stats(self):
-        \"\"\"Obtener estadísticas del vocabulario actual\"\"\"
+        """Obtener estadísticas del vocabulario actual"""
         stats = {
             'vocab_size': self.config.vocab_size,
             'embedding_params': self.token_embeddings.vocab_size * self.token_embeddings.n_embd,
@@ -2270,8 +2267,7 @@ def show_mix_summary(mix_ratios, dataset_name=""):
     """
     Muestra un resumen de la configuración de mezcla
     """
-    print(f"
-=== CONFIGURACIÓN DE MEZCLA: {dataset_name.upper()} ===")
+    print(f"\n=== CONFIGURACIÓN DE MEZCLA: {dataset_name.upper()} ===")
     for dataset, ratio in sorted(mix_ratios.items()):
         desc = DATASETS_CONFIG.get(dataset, {}).get("description", "Desconocido")
         print(f"• {dataset:20} {ratio:>6.1%} - {desc}")
@@ -2585,8 +2581,7 @@ def set_seed(seed: int):
 set_seed(SEED)
 
 # Validar y crear directorios
-print("
-🔍 Validando configuración de directorios...")
+print("🔍 Validando configuración de directorios...")
 if not validate_and_create_output_dir(OUTPUT_DIR):
     print("❌ No se pudo configurar el directorio de salida. Abortando.")
     exit(1)
@@ -2643,8 +2638,7 @@ def save_complete_model_for_inference(model, tokenizer, output_dir):
         elif hasattr(model, 'module'):
             model_to_save = model.module     # DataParallel
         
-        print(f"
-💾 Guardando modelo completo para inferencia en: {output_dir}")
+        print(f"💾 Guardando modelo completo para inferencia en: {output_dir}")
         
         # Crear directorio si no existe
         os.makedirs(output_dir, exist_ok=True)
@@ -2713,8 +2707,7 @@ def save_checkpoint_distributed(model, optimizer, scheduler, scaler, epoch, glob
         elif hasattr(model, 'module'):
             model_to_save = model.module     # DataParallel
         
-        print(f"
-💾 Guardando checkpoint en paso {global_step}...")
+        print(f"💾 Guardando checkpoint en paso {global_step}...")
         
         # Crear directorio si no existe
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
@@ -3471,16 +3464,13 @@ language_filter_info = ""
 if DATASET_INFO.get("language_filter"):
     language_filter_info = f" (FILTRADO: {DATASET_INFO['language_filter'].upper()})"
 
-print(f"
-!!! USANDO DATASET: {ACTIVE_DATASET.upper()} - {DATASET_INFO['description']}{language_filter_info} !!!")
+print(f"!!! USANDO DATASET: {ACTIVE_DATASET.upper()} - {DATASET_INFO['description']}{language_filter_info} !!!")
 print(f"!!! USANDO UN SUBCONJUNTO DEL {DATASET_SUBSET_PERCENT}% DEL DATASET !!!")
 print(f"Tomando aprox. {num_train_samples:,} ejemplos de entrenamiento.")
-print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.
-")
+print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.")
 
 # STANDALONE MODE DISABLED: Using full dataset for training
-print(f"🚀 FULL DATASET MODE: Usando {num_train_samples:,} train + {num_val_samples:,} val samples
-")
+print(f"🚀 FULL DATASET MODE: Usando {num_train_samples:,} train + {num_val_samples:,} val samples")
 
 # Configurar los splits según el dataset
 if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
@@ -3975,8 +3965,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
 
 # === CONFIGURACIÓN DE GPU Y MULTI-GPU ===
 if not os.environ.get('HRM_IMPORT_ONLY'):
-    print(f"
-🔧 Configuración GPU:")
+    print(f"🔧 Configuración GPU:")
     print(f"   💻 GPUs disponibles: {num_gpus}")
     print(f"   🎯 Forzar single-GPU: {FORCE_SINGLE_GPU}")
     print(f"   🔗 Multi-GPU habilitado: {is_multi_gpu}")
@@ -4094,8 +4083,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
         }
         
         # Log hyperparams como texto
-        hyperparams_text = "
-".join([f"{k}: {v}" for k, v in hyperparams.items()])
+        hyperparams_text = "\n".join([f"{k}: {v}" for k, v in hyperparams.items()])
         writer.add_text("Hyperparameters", hyperparams_text, 0)
 
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
@@ -4463,8 +4451,7 @@ def save_final_model():
     # Subir modelo a Hugging Face Hub
     if HF_TOKEN and HF_API_AVAILABLE:
         try:
-            print(f"
-Subiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
+            print(f"Subiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
             api = HfApi()
 
             # Crear el repositorio si no existe
@@ -4489,12 +4476,10 @@ Subiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
             print("El modelo se guardó localmente pero no se pudo subir al Hub.")
     else:
         if not HF_TOKEN:
-            print("
-⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+            print("⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
             print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
         elif not HF_API_AVAILABLE:
-            print("
-⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
+            print("⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
             print("Para subir al Hub, instala: pip install huggingface_hub")
 
 # ==============================================================================
@@ -4503,8 +4488,7 @@ Subiendo modelo a Hugging Face Hub: {HF_REPO_ID}")
 
 def test_model_and_summary():
     """Prueba el modelo final y muestra el resumen del entrenamiento"""
-    print("
---- Probando la Generación del Modelo Final ---")
+    print("--- Probando la Generación del Modelo Final ---")
     try:
         inference_model = HRMText1.from_pretrained(OUTPUT_DIR).to(device)
         # torch.compile deshabilitado para ahorrar memoria
@@ -4521,15 +4505,12 @@ def test_model_and_summary():
         
         for prompt in prompts:
             response = chat_with_model(prompt, inference_model, tokenizer)
-            print(f"
-Prompt: {prompt}
-Respuesta: {response}")
+            print(f"Prompt: {prompt}\nRespuesta: {response}")
             
     except Exception as e:
         print(f"El test de generación falló: {e}")
 
-    print(f"
-=== RESUMEN DEL ENTRENAMIENTO ===")
+    print(f"=== RESUMEN DEL ENTRENAMIENTO ===")
     print(f"Parámetros del modelo: {total_params:,}")
     print(f"Contexto máximo: {BLOCK_SIZE}")
     print(f"Capas HRM: {MODEL_PARAMS['n_layers']}")
@@ -4538,8 +4519,7 @@ Respuesta: {response}")
     print(f"Mejor pérdida de validación: {best_val_loss:.4f}")
     print(f"Modelo guardado en: {OUTPUT_DIR}")
 
-    print("
---- Script completado exitosamente ---")
+    print("--- Script completado exitosamente ---")
 
 def chat_with_model(prompt_text, model, tokenizer, max_new_tokens=100, temperature=0.7, top_k=50):
     model.eval()

@@ -3233,12 +3233,10 @@ def save_final_model():
             print("El modelo se guardó localmente pero no se pudo subir al Hub.")
     else:
         if not HF_TOKEN:
-            print("
-⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
+            print("⚠️  No se encontró HF_TOKEN. El modelo solo se guardó localmente.")
             print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
         elif not HF_API_AVAILABLE:
-            print("
-⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
+            print("⚠️ huggingface_hub no disponible. El modelo no se subirá al Hub.")
             print("Para subir al Hub, instala: pip install huggingface_hub")
         print("Para subir a Hugging Face Hub, configura la variable de entorno HF_TOKEN.")
 
