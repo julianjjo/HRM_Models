@@ -1119,7 +1119,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 10.0   # Usar más datos para asegurar suficientes muestras
+DATASET_SUBSET_PERCENT = 0.005   # Usar más datos para asegurar suficientes muestras
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -2450,10 +2450,39 @@ else:
     
     else:
         # Datasets normales de Hugging Face
-        if DATASET_CONFIG:
-            raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True)
+        
+        # RANDOMIZACIÓN ESPECIAL PARA C4 EN MODELO MICRO 10M
+        if DATASET_NAME == "allenai/c4" and ACTIVE_DATASET in ["c4", "c4-english", "spanish"]:
+            import random
+            import time
+            
+            # Generar seed aleatorio basado en tiempo + random
+            random_seed = int(time.time() * 1000) % 2147483647  # Mantener en rango int32
+            random_offset = random.randint(0, 1000000)
+            final_seed = (random_seed + random_offset) % 2147483647
+            
+            print(f"🎲 ALEATORIEDAD C4 ACTIVADA (Solo para modelo micro 10M)")
+            print(f"   🔢 Seed aleatorio generado: {final_seed}")
+            print(f"   🔄 Cada reinicio usará datos diferentes del C4")
+            print(f"   💡 Esto mejora la diversidad del entrenamiento\n")
+            
+            # Aplicar seed aleatorio al dataset C4
+            if DATASET_CONFIG:
+                # Usar el seed para hacer shuffle del dataset
+                from datasets import load_dataset as hf_load_dataset
+                raw_datasets = hf_load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True)
+                # Para IterableDataset, el shuffle se aplica internamente
+                raw_datasets = raw_datasets.shuffle(seed=final_seed, buffer_size=10000)
+            else:
+                from datasets import load_dataset as hf_load_dataset  
+                raw_datasets = hf_load_dataset(DATASET_NAME, streaming=True)
+                raw_datasets = raw_datasets.shuffle(seed=final_seed, buffer_size=10000)
         else:
-            raw_datasets = load_dataset(DATASET_NAME, streaming=True)
+            # Carga normal para otros datasets
+            if DATASET_CONFIG:
+                raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True)
+            else:
+                raw_datasets = load_dataset(DATASET_NAME, streaming=True)
     
     # Aplicar filtro de idioma si está especificado
     language_filter = DATASET_INFO.get("language_filter")
