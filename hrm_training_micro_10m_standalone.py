@@ -1155,7 +1155,7 @@ CUSTOM_MIX_RATIOS = {
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "c4-english"  # Dataset ultra-reducido para testing
+ACTIVE_DATASET = "openwebtext"  # Cambiar a dataset más estable para CPU
 
 DATASETS_CONFIG = {
     "c4": {
