@@ -45,6 +45,7 @@ def load_standalone_model_and_tokenizer(standalone_script_path, model_path):
         # Cargar tokenizer
         vocab_path = os.path.join(model_path, "vocab.json")
         if os.path.exists(vocab_path):
+            print(f"🔄 Cargando tokenizer desde: {vocab_path}")
             tokenizer = SimpleTokenizer()
             # Cargar desde vocab.json
             import json
@@ -52,16 +53,32 @@ def load_standalone_model_and_tokenizer(standalone_script_path, model_path):
                 vocab_data = json.load(f)
                 tokenizer.word_to_id = vocab_data['word_to_id']
                 tokenizer.id_to_word = {int(k): v for k, v in vocab_data['id_to_word'].items()}
-                tokenizer.vocab_size = vocab_data['vocab_size']
+                tokenizer.vocab_size = vocab_data.get('vocab_size', len(vocab_data['word_to_id']))
                 if 'special_tokens' in vocab_data:
                     tokenizer.special_tokens = vocab_data['special_tokens']
-            print(f"✅ Tokenizer cargado desde: {vocab_path}")
+                
+                # Asegurar que los atributos de tokens estén configurados
+                tokenizer.pad_token_id = tokenizer.special_tokens.get('<pad>', 0)
+                tokenizer.unk_token_id = tokenizer.special_tokens.get('<unk>', 1)
+                tokenizer.bos_token_id = tokenizer.special_tokens.get('<s>', 2)
+                tokenizer.eos_token_id = tokenizer.special_tokens.get('</s>', 3)
+                tokenizer.mask_token_id = tokenizer.special_tokens.get('<mask>', 4)
+                
+                tokenizer._built = True  # Marcar como construido
+                
+            print(f"✅ Tokenizer cargado: {tokenizer.vocab_size} tokens")
         else:
             print("⚠️ Tokenizer no encontrado, creando uno básico...")
-            tokenizer = SimpleTokenizer(vocab_size=32000)
-            # Construir vocabulario básico
-            sample_text = "The quick brown fox jumps over the lazy dog. Hello world! How are you today?"
-            tokenizer.build_vocab([sample_text])
+            tokenizer = SimpleTokenizer()
+            # Construir vocabulario básico - usar más texto para un vocabulario mejor
+            sample_texts = [
+                "The quick brown fox jumps over the lazy dog. Hello world! How are you today?",
+                "This is a sample text for building vocabulary. We need more words to create a good tokenizer.",
+                "Machine learning models require proper tokenization for good performance.",
+                "The model will learn to predict the next token in sequence."
+            ]
+            tokenizer.build_vocab(sample_texts)
+            print(f"✅ Tokenizer básico creado: {tokenizer.vocab_size} tokens")
         
         # Intentar cargar modelo guardado
         try:
@@ -89,12 +106,12 @@ def load_standalone_model_and_tokenizer(standalone_script_path, model_path):
                         inferred_block_size = 768  # Fallback
                     
                     config = HRMText1Config(
-                        vocab_size=len(tokenizer.word_to_id) if hasattr(tokenizer, 'word_to_id') else 32000,
-                        block_size=inferred_block_size,
-                        n_embd=384,
-                        n_head=12,
-                        n_layers=8,
-                        d_ff=1536,
+                        vocab_size=205,  # Vocabulario fijo del modelo micro 10M
+                        block_size=128,  # Block size del modelo micro 10M
+                        n_embd=256,     # Embedding dimension del modelo micro
+                        n_head=8,       # Número de heads del modelo micro
+                        n_layers=6,     # Capas del modelo micro
+                        d_ff=1024,      # Feed forward dimension
                         dropout=0.1,
                         halt_max_steps=4,
                         ponder_loss_weight=1e-2,
