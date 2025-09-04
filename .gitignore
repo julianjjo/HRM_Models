@@ -221,3 +221,4 @@ tensorboard_logs/
 *.DS_Storedolma_data/
 dolma_data
 checkpoint_dataset
+HRM/*
