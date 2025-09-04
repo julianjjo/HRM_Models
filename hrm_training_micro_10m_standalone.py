@@ -1284,7 +1284,7 @@ GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper efic
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 3e-4  # Aumentado para vocabulario grande (~8K tokens)
+LEARNING_RATE_MAX = 3e-3  # Aumentado para vocabulario grande (~8K tokens)
 LEARNING_RATE_MIN = 1e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
@@ -3068,7 +3068,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 3e-4   # LR aumentado para vocabulario grande (~8K tokens)
+    NEW_LEARNING_RATE = 3e-3   # LR aumentado para vocabulario grande (~8K tokens)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
