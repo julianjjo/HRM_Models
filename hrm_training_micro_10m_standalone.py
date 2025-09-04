@@ -271,7 +271,7 @@ from collections import Counter
 class SimpleTokenizer:
     """Tokenizer simple sin dependencias de HuggingFace"""
     
-    def __init__(self, vocab_size=10000):  # Vocabulario de 10K tokens
+    def __init__(self, vocab_size=5000):  # Vocabulario de 10K tokens
         self.vocab_size = vocab_size
         self.word_to_id = {}
         self.id_to_word = {}
@@ -600,7 +600,7 @@ class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
     
     def __init__(self, 
-                 vocab_size=10000,  # Vocabulario de 10K tokens 
+                 vocab_size=5000,  # Vocabulario de 10K tokens 
                  block_size=2048,           # Aumentado para contexto extendido
                  n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
@@ -1284,8 +1284,8 @@ GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper efic
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes  # Reducido para estabilidad numérica (migrado desde Kaggle)
-LEARNING_RATE_MIN = 1e-7  # Mínimo reducido proporcionalmente  # Mínimo más alto para evitar estancamiento
+LEARNING_RATE_MAX = 3e-4  # Aumentado para vocabulario grande (~8K tokens)
+LEARNING_RATE_MIN = 1e-6  # Mínimo más alto para evitar estancamiento
 WEIGHT_DECAY = 0.1
 WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
 
@@ -2197,7 +2197,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=10000)  # Vocabulario de 10K tokens
+    tokenizer = SimpleTokenizer(vocab_size=5000)  # Vocabulario de 10K tokens
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
@@ -3068,7 +3068,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 1e-5   # LR reducido urgentemente para evitar explosión de gradientes   # LR reducido para estabilidad (sincronizado con MAX)
+    NEW_LEARNING_RATE = 3e-4   # LR aumentado para vocabulario grande (~8K tokens)
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
@@ -3136,7 +3136,7 @@ def main_training():
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = SimpleTokenizer(vocab_size=10000)  # Vocabulario de 10K tokens
+    tokenizer = SimpleTokenizer(vocab_size=5000)  # Vocabulario de 10K tokens
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
