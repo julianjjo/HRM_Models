@@ -51,9 +51,7 @@ from typing import Iterator, Dict, Any, List
 class SimpleDatasetDict:
     """Simple dataset dict for compatibility"""
     def __init__(self):
-        self._datasets = {}
-        # Crear datasets simples de texto en inglés
-        sample_texts = [
+        self._all_texts = [
             "The quick brown fox jumps over the lazy dog.",
             "Machine learning is a method of data analysis that automates analytical model building.",
             "Natural language processing enables computers to understand human language.",
@@ -61,18 +59,39 @@ class SimpleDatasetDict:
             "Artificial intelligence aims to create systems that can perform tasks requiring human intelligence."
         ] * 200  # Repetir para tener más muestras
         
-        # Dividir en train/validation
-        split_idx = int(len(sample_texts) * 0.9)
-        self._datasets["train"] = [{"text": text} for text in sample_texts[:split_idx]]
-        self._datasets["validation"] = [{"text": text} for text in sample_texts[split_idx:]]
+        # Crear splits iniciales
+        self._create_random_splits()
+    
+    def _create_random_splits(self, seed=None):
+        """Crear splits aleatorios del dataset"""
+        import random
+        if seed is not None:
+            random.seed(seed)
+        
+        # Shuffle los textos cada vez
+        shuffled_texts = self._all_texts.copy()
+        random.shuffle(shuffled_texts)
+        
+        # Dividir en train/validation con nuevo orden
+        split_idx = int(len(shuffled_texts) * 0.9)
+        self._datasets = {
+            "train": [{"text": text} for text in shuffled_texts[:split_idx]],
+            "validation": [{"text": text} for text in shuffled_texts[split_idx:]]
+        }
+    
+    def reshuffle(self, seed=None):
+        """Recrear splits con nuevo orden aleatorio"""
+        self._create_random_splits(seed)
+        return self
     
     def __getitem__(self, split):
-        return SimpleIterableDataset(self._datasets[split])
+        return SimpleIterableDataset(self._datasets[split], dataset_dict=self)
 
 class SimpleIterableDataset:
     """Simple iterable dataset"""
-    def __init__(self, data):
+    def __init__(self, data, dataset_dict=None):
         self.data = data
+        self._dataset_dict = dataset_dict  # Referencia al dict original
     
     def __iter__(self):
         for item in self.data:
@@ -97,17 +116,17 @@ class SimpleIterableDataset:
             random.seed(seed)
         shuffled_data = list(self.data)
         random.shuffle(shuffled_data)
-        return SimpleIterableDataset(shuffled_data)
+        return SimpleIterableDataset(shuffled_data, dataset_dict=self._dataset_dict)
     
     def take(self, count):
         """Take first count items"""
         taken_data = list(self.data)[:count]
-        return SimpleIterableDataset(taken_data)
+        return SimpleIterableDataset(taken_data, dataset_dict=self._dataset_dict)
     
     def skip(self, count):
         """Skip first count items"""
         skipped_data = list(self.data)[count:]
-        return SimpleIterableDataset(skipped_data)
+        return SimpleIterableDataset(skipped_data, dataset_dict=self._dataset_dict)
     
     def map(self, function, batched=False, batch_size=1000, remove_columns=None, num_proc=None, desc=None):
         """Apply a function to all examples in the dataset"""
@@ -165,7 +184,7 @@ class SimpleIterableDataset:
                     filtered_data.append(item)
             mapped_data = filtered_data
         
-        return SimpleIterableDataset(mapped_data)
+        return SimpleIterableDataset(mapped_data, dataset_dict=self._dataset_dict)
     
     def with_format(self, format_type):
         """Set format for the dataset (compatibility method)"""
@@ -3169,6 +3188,39 @@ def main_training():
     for epoch in range(start_epoch, final_epochs):
         epoch_start_time = time.time()
         print(f"\\n🚀 Iniciando Época {epoch+1}/{final_epochs}")
+        
+        # Para streaming datasets, cambiar offset para obtener diferentes muestras
+        if epoch > start_epoch and 'is_streaming' in globals() and is_streaming:
+            print(f"🔀 Streaming: Cambiando offset del dataset para época {epoch+1}...")
+            # Calcular nuevo offset basado en la época
+            epoch_offset = int(num_train_samples * 0.1 * epoch)  # 10% offset por época
+            try:
+                # Recrear train_loader con nuevo offset
+                new_train_dataset = raw_datasets["train"].skip(epoch_offset).take(num_train_samples)
+                new_train_dataset = new_train_dataset.shuffle(seed=epoch, buffer_size=10000)
+                
+                # Re-tokenizar con el nuevo dataset
+                tokenized_train = new_train_dataset.map(
+                    lambda examples: tokenize_function(examples, tokenizer),
+                    batched=True,
+                    batch_size=1000,
+                    remove_columns=list(new_train_dataset.take(1).column_names) if hasattr(new_train_dataset.take(1), 'column_names') else None
+                )
+                
+                # Recrear DataLoader
+                global train_loader
+                train_loader = DataLoader(tokenized_train, **train_kwargs)
+                print(f"✅ Nuevo subset del dataset cargado para época {epoch+1} (offset: {epoch_offset:,})")
+            except Exception as e:
+                print(f"⚠️ Error cambiando offset del dataset: {e}")
+                print(f"🔄 Continuando con dataset actual...")
+        
+        # Para datasets no-streaming, reshuffle splits locales
+        elif hasattr(tokenized_splits, 'get') and hasattr(tokenized_splits.get("train"), '_dataset_dict'):
+            print(f"🔀 Reshuffling dataset splits para época {epoch+1}...")
+            original_dict = tokenized_splits["train"]._dataset_dict
+            original_dict.reshuffle(seed=epoch)
+            print(f"✅ Nuevo split train/val generado para época {epoch+1}")
         
         model.train()
         optimizer.zero_grad()
