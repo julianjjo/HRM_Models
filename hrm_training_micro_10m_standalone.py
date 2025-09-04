@@ -49,42 +49,18 @@ import requests
 from typing import Iterator, Dict, Any, List
 
 class SimpleDatasetDict:
-    """Simple dataset dict for compatibility"""
+    """Simple dataset dict for compatibility - removed hardcoded data"""
     def __init__(self):
-        self._all_texts = [
-            "The quick brown fox jumps over the lazy dog.",
-            "Machine learning is a method of data analysis that automates analytical model building.",
-            "Natural language processing enables computers to understand human language.",
-            "Deep learning uses neural networks with multiple layers to model complex patterns.",
-            "Artificial intelligence aims to create systems that can perform tasks requiring human intelligence."
-        ] * 200  # Repetir para tener más muestras
-        
-        # Crear splits iniciales
-        self._create_random_splits()
-    
-    def _create_random_splits(self, seed=None):
-        """Crear splits aleatorios del dataset"""
-        import random
-        if seed is not None:
-            random.seed(seed)
-        
-        # Shuffle los textos cada vez
-        shuffled_texts = self._all_texts.copy()
-        random.shuffle(shuffled_texts)
-        
-        # Dividir en train/validation con nuevo orden
-        split_idx = int(len(shuffled_texts) * 0.9)
+        # No más datos quemados - usar solo datasets reales
         self._datasets = {
-            "train": [{"text": text} for text in shuffled_texts[:split_idx]],
-            "validation": [{"text": text} for text in shuffled_texts[split_idx:]]
+            "train": [],
+            "validation": []
         }
-    
-    def reshuffle(self, seed=None):
-        """Recrear splits con nuevo orden aleatorio"""
-        self._create_random_splits(seed)
-        return self
+        print("⚠️ SimpleDatasetDict creado vacío - usar solo datasets reales")
     
     def __getitem__(self, split):
+        if not self._datasets[split]:
+            raise ValueError(f"Dataset {split} está vacío. Use un dataset real como allenai/c4.")
         return SimpleIterableDataset(self._datasets[split], dataset_dict=self)
 
 class SimpleIterableDataset:
@@ -192,17 +168,19 @@ class SimpleIterableDataset:
         return self
 
 def load_dataset(name, config=None, streaming=True, split="train"):
-    """Standalone dataset loader with fallback data"""
-    print(f"🔄 Loading standalone dataset: {name}")
+    """Load datasets from Hugging Face only - no synthetic fallbacks"""
+    print(f"🔄 Loading dataset: {name}")
     
-    # Por ahora usar datos simples de ejemplo
-    # En producción esto se conectaría al dataset real
-    dataset_dict = SimpleDatasetDict()
-    
-    if split:
-        return dataset_dict[split]
-    else:
-        return dataset_dict
+    try:
+        from datasets import load_dataset as hf_load_dataset
+        print(f"📡 Cargando dataset real: {name}")
+        real_dataset = hf_load_dataset(name, config, streaming=streaming, split=split)
+        print(f"✅ Dataset cargado: {name}")
+        return real_dataset
+    except Exception as e:
+        print(f"❌ Error cargando dataset {name}: {e}")
+        print("💡 Asegúrate de tener conexión a internet y datasets instalado")
+        raise e
 
 print("✅ Embedded standalone dataset loader initialized")
 
@@ -258,7 +236,29 @@ class SimpleModelOutput:
 
 class SimpleGenerationMixin:
     """Mixin simple para reemplazar GenerationMixin"""
-    pass
+    
+    def generate(self, input_ids, max_new_tokens=50, temperature=0.8, do_sample=True, pad_token_id=0, **kwargs):
+        """Generación simple de texto"""
+        self.eval()
+        batch_size, seq_len = input_ids.shape
+        
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                outputs = self.forward(input_ids)
+                logits = outputs.logits[:, -1, :] / temperature
+                
+                if do_sample:
+                    probs = F.softmax(logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                else:
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                
+                input_ids = torch.cat([input_ids, next_token], dim=1)
+                
+                if next_token.item() == pad_token_id:
+                    break
+        
+        return input_ids
 
 # ==============================================================================
 # --- TOKENIZER SIMPLE STANDALONE ---
