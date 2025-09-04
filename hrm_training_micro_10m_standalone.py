@@ -1275,7 +1275,7 @@ HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
 import time
 SEED = int(time.time() * 1000) % 2147483647  # Seed aleatorio basado en tiempo
 NUM_EPOCHS = 25000             # Épocas ultra-reducidas para testing
-CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
+CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 128         # Incrementar contexto para CPU
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
