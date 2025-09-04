@@ -256,7 +256,7 @@ import heapq
 class AdaptiveBPETokenizer:
     """Tokenizador BPE avanzado con vocabulario dinámico y optimizaciones"""
     
-    def __init__(self, vocab_size=65536, min_frequency=2):
+    def __init__(self, vocab_size=12000, min_frequency=2):
         # Aumentar vocabulario de 32k a 65k para mejor cobertura
         self.vocab_size = vocab_size
         self.min_frequency = min_frequency
@@ -1130,7 +1130,7 @@ class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
     
     def __init__(self, 
-                 vocab_size=65536, 
+                 vocab_size=12000, 
                  block_size=2048,           # Aumentado para contexto extendido
                  n_embd=512,                # Para ~100M params
                  n_head=24,                 # Más cabezas de atención
@@ -2950,7 +2950,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
     
     # Inicializar tokenizer y construir vocabulario
-    tokenizer = AdaptiveBPETokenizer(vocab_size=65536, min_frequency=2)
+    tokenizer = AdaptiveBPETokenizer(vocab_size=12000, min_frequency=2)
     tokenizer.build_vocab(vocab_texts)
     
     print(f"✅ SimpleTokenizer inicializado. Vocab size: {len(tokenizer)}")
