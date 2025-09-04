@@ -1274,7 +1274,7 @@ HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
 # Generar seed aleatorio basado en tiempo para garantizar aleatoriedad entre ejecuciones
 import time
 SEED = int(time.time() * 1000) % 2147483647  # Seed aleatorio basado en tiempo
-NUM_EPOCHS = 2500             # Épocas ultra-reducidas para testing
+NUM_EPOCHS = 25000             # Épocas ultra-reducidas para testing
 CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 128         # Incrementar contexto para CPU
 
