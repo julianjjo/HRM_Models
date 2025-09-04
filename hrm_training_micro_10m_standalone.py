@@ -1275,7 +1275,9 @@ DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
-SEED = 42
+# Generar seed aleatorio basado en tiempo para garantizar aleatoriedad entre ejecuciones
+import time
+SEED = int(time.time() * 1000) % 2147483647  # Seed aleatorio basado en tiempo
 NUM_EPOCHS = 2500             # Épocas ultra-reducidas para testing
 CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 128         # Incrementar contexto para CPU
@@ -1824,6 +1826,7 @@ def set_seed(seed: int):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+print(f"🎲 Seed aleatorio global generado: {SEED}")
 set_seed(SEED)
 
 # Validar y crear directorios
@@ -2835,6 +2838,21 @@ try:
     sample_iter = iter(train_loader)
     first_batch = next(sample_iter)
     print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
+    
+    # Imprimir los primeros 2 textos para verificar aleatoriedad
+    print("\n📝 Primeros 2 textos del dataset (verificación de aleatoriedad):")
+    try:
+        sample_iter = iter(train_loader)
+        for idx in range(2):
+            batch = next(sample_iter)
+            # Decodificar el primer texto del batch
+            if 'input_ids' in batch:
+                input_ids = batch['input_ids'][0]  # Primer elemento del batch
+                decoded_text = tokenizer.decode(input_ids, skip_special_tokens=True)
+                print(f"Texto {idx+1}: {decoded_text[:200]}...")  # Mostrar primeros 200 caracteres
+    except Exception as text_error:
+        print(f"⚠️ No se pudieron decodificar los textos: {text_error}")
+    
 except StopIteration:
     print("❌ ERROR: El train_loader está vacío!")
     print("🔄 Usando dataset embebido como fallback...")
