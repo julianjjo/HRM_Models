@@ -2085,13 +2085,36 @@ def load_checkpoint_distributed(checkpoint_path, model, optimizer, scheduler, sc
 # Configurar distributed training
 is_distributed, rank, world_size, local_rank = setup_distributed()
 
-# Configurar dispositivo
+# Configurar dispositivo con verificación de compatibilidad CUDA
 if is_distributed and 'RANK' in os.environ:
     device = torch.device(f"cuda:{local_rank}")
     print(f"Dispositivo distribuido: {device} (rank {rank})")
 else:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Dispositivo detectado: {device}")
+    # Verificar compatibilidad CUDA antes de usar GPU
+    device_type = "cpu"  # Default fallback
+    
+    if torch.cuda.is_available():
+        try:
+            # Test básico de CUDA con un tensor pequeño
+            test_tensor = torch.tensor([1.0], device="cuda")
+            test_tensor = test_tensor * 2  # Operación simple
+            device_type = "cuda"
+            print("✅ CUDA disponible y compatible")
+        except RuntimeError as e:
+            if "no kernel image is available" in str(e):
+                print("⚠️ CUDA detectada pero incompatible (kernel image issue)")
+                print("   Cayendo a CPU para evitar errores de kernel")
+            else:
+                print(f"⚠️ Error CUDA: {e}")
+                print("   Cayendo a CPU por seguridad")
+        except Exception as e:
+            print(f"⚠️ Error inesperado verificando CUDA: {e}")
+            print("   Cayendo a CPU por seguridad")
+    else:
+        print("ℹ️ CUDA no disponible")
+    
+    device = torch.device(device_type)
+    print(f"Dispositivo seleccionado: {device}")
 
 # Verificar memoria disponible y mostrar información detallada de GPUs
 if torch.cuda.is_available():
@@ -2168,10 +2191,10 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     print("🔧 Cargando muestras de texto para construir vocabulario...")
     temp_dataset = load_dataset("allenai/c4", "en", streaming=True, split="train")
     
-    # Recolectar textos para vocabulario (máximo 500 muestras)
+    # Recolectar textos para vocabulario (máximo 5000 muestras)
     vocab_texts = []
     for i, sample in enumerate(temp_dataset):
-        if i >= 500:  # Incrementar muestras para vocabulario (10x)
+        if i >= 5000:  # Incrementar muestras para vocabulario (10x más)
             break
         vocab_texts.append(sample["text"])
     
@@ -3107,10 +3130,10 @@ def main_training():
     print("🔧 Cargando muestras de texto para construir vocabulario...")
     temp_dataset = load_dataset("allenai/c4", "en", streaming=True, split="train")
     
-    # Recolectar textos para vocabulario (máximo 500 muestras)
+    # Recolectar textos para vocabulario (máximo 5000 muestras)
     vocab_texts = []
     for i, sample in enumerate(temp_dataset):
-        if i >= 500:  # Incrementar muestras para vocabulario (10x)
+        if i >= 5000:  # Incrementar muestras para vocabulario (10x más)
             break
         vocab_texts.append(sample["text"])
     
