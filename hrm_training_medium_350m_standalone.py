@@ -41,30 +41,25 @@ import requests
 from typing import Iterator, Dict, Any, List
 
 class SimpleDatasetDict:
-    """Simple dataset dict for compatibility"""
+    """Simple dataset dict for compatibility - removed hardcoded data"""
     def __init__(self):
-        self._datasets = {}
-        # Crear datasets simples de texto en inglés
-        sample_texts = [
-            "The quick brown fox jumps over the lazy dog.",
-            "Machine learning is a method of data analysis that automates analytical model building.",
-            "Natural language processing enables computers to understand human language.",
-            "Deep learning uses neural networks with multiple layers to model complex patterns.",
-            "Artificial intelligence aims to create systems that can perform tasks requiring human intelligence."
-        ] * 200  # Repetir para tener más muestras
-        
-        # Dividir en train/validation
-        split_idx = int(len(sample_texts) * 0.9)
-        self._datasets["train"] = [{"text": text} for text in sample_texts[:split_idx]]
-        self._datasets["validation"] = [{"text": text} for text in sample_texts[split_idx:]]
+        # No más datos quemados - usar solo datasets reales
+        self._datasets = {
+            "train": [],
+            "validation": []
+        }
+        print("⚠️ SimpleDatasetDict creado vacío - usar solo datasets reales")
     
     def __getitem__(self, split):
-        return SimpleIterableDataset(self._datasets[split])
+        if not self._datasets[split]:
+            raise ValueError(f"Dataset {split} está vacío. Use un dataset real como allenai/c4.")
+        return SimpleIterableDataset(self._datasets[split], dataset_dict=self)
 
 class SimpleIterableDataset:
     """Simple iterable dataset"""
-    def __init__(self, data):
+    def __init__(self, data, dataset_dict=None):
         self.data = data
+        self._dataset_dict = dataset_dict  # Referencia al dict original
     
     def __iter__(self):
         for item in self.data:
@@ -165,17 +160,19 @@ class SimpleIterableDataset:
         return self
 
 def load_dataset(name, config=None, streaming=True, split="train"):
-    """Standalone dataset loader with fallback data"""
-    print(f"🔄 Loading standalone dataset: {name}")
+    """Load datasets from Hugging Face only - no synthetic fallbacks"""
+    print(f"🔄 Loading dataset: {name}")
     
-    # Por ahora usar datos simples de ejemplo
-    # En producción esto se conectaría al dataset real
-    dataset_dict = SimpleDatasetDict()
-    
-    if split:
-        return dataset_dict[split]
-    else:
-        return dataset_dict
+    try:
+        from datasets import load_dataset as hf_load_dataset
+        print(f"📡 Cargando dataset real: {name}")
+        real_dataset = hf_load_dataset(name, config, streaming=streaming, split=split)
+        print(f"✅ Dataset cargado: {name}")
+        return real_dataset
+    except Exception as e:
+        print(f"❌ Error cargando dataset {name}: {e}")
+        print("💡 Asegúrate de tener conexión a internet y datasets instalado")
+        raise e
 
 print("✅ Embedded standalone dataset loader initialized")
 
@@ -274,25 +271,6 @@ class SimpleTokenizer:
         self.mask_token_id = self.special_tokens['<mask>']
         
         self._built = False
-        
-        # Base vocabulary with common English words and punctuation
-        self.base_vocabulary = [
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
-            'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did',
-            'will', 'would', 'could', 'should', 'can', 'may', 'might', 'must', 'shall',
-            'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
-            'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their',
-            'what', 'when', 'where', 'why', 'how', 'who', 'which', 'whose', 'whom',
-            'not', 'no', 'yes', 'ok', 'okay', 'well', 'so', 'very', 'much', 'many', 'more', 'most',
-            'some', 'any', 'all', 'each', 'every', 'one', 'two', 'three', 'first', 'last',
-            'good', 'bad', 'big', 'small', 'long', 'short', 'high', 'low', 'fast', 'slow',
-            'new', 'old', 'young', 'early', 'late', 'here', 'there', 'now', 'then',
-            'up', 'down', 'out', 'over', 'under', 'above', 'below', 'between', 'through',
-            'time', 'day', 'year', 'way', 'man', 'woman', 'child', 'people', 'world', 'life',
-            'work', 'make', 'get', 'go', 'come', 'take', 'give', 'know', 'think', 'see',
-            'look', 'find', 'say', 'tell', 'ask', 'feel', 'try', 'use', 'want', 'need',
-            '.', ',', '!', '?', ';', ':', '"', "'", '(', ')', '[', ']', '{', '}', '-', '_'
-        ]
     
     def _tokenize_text(self, text):
         """Tokenización básica por palabras y caracteres"""
@@ -307,10 +285,6 @@ class SimpleTokenizer:
         print(f"🔧 Construyendo vocabulario desde {len(texts)} textos...")
         
         word_counts = Counter()
-        
-        # Agregar vocabulario base con alta prioridad
-        for word in self.base_vocabulary:
-            word_counts[word] = word_counts.get(word, 0) + 1000  # Dar alta prioridad
         
         for text in texts:
             tokens = self._tokenize_text(text)
