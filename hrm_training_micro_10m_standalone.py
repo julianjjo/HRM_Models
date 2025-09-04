@@ -2090,7 +2090,7 @@ if is_distributed and 'RANK' in os.environ:
     device = torch.device(f"cuda:{local_rank}")
     print(f"Dispositivo distribuido: {device} (rank {rank})")
 else:
-    device = torch.device("cpu")  # Forzar CPU para testing
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Dispositivo detectado: {device}")
 
 # Verificar memoria disponible y mostrar información detallada de GPUs
@@ -2166,7 +2166,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     
     # Crear dataset temporal para construir vocabulario
     print("🔧 Cargando muestras de texto para construir vocabulario...")
-    temp_dataset = load_dataset("allenai/dolma", streaming=True, split="train")
+    temp_dataset = load_dataset("allenai/c4", "en", streaming=True, split="train")
     
     # Recolectar textos para vocabulario (máximo 500 muestras)
     vocab_texts = []
@@ -3105,7 +3105,7 @@ def main_training():
     
     # Crear dataset temporal para construir vocabulario
     print("🔧 Cargando muestras de texto para construir vocabulario...")
-    temp_dataset = load_dataset("allenai/dolma", streaming=True, split="train")
+    temp_dataset = load_dataset("allenai/c4", "en", streaming=True, split="train")
     
     # Recolectar textos para vocabulario (máximo 500 muestras)
     vocab_texts = []
