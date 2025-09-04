@@ -1283,7 +1283,7 @@ CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automát
 BLOCK_SIZE = 128         # Incrementar contexto para CPU
 
 # Configuración de entrenamiento para modelo micro optimizada para H200 (150GB VRAM)
-BATCH_SIZE = 100        # Reducir para CPU y dataset pequeño
+BATCH_SIZE = 20        # Reducir para CPU y dataset pequeño
 GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
