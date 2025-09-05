@@ -30,6 +30,477 @@ from datasets import load_dataset
 
 from huggingface_hub import HfFolder, HfApi
 
+# --- ENHANCED BPE TOKENIZER WITH DYNAMIC VOCABULARY ---
+# ==============================================================================
+
+import re
+import json
+import unicodedata
+from collections import Counter, defaultdict
+from typing import List, Dict, Set, Tuple, Optional, Union
+import heapq
+
+class AdaptiveBPETokenizer:
+    """Tokenizador BPE avanzado con vocabulario dinámico y optimizaciones"""
+    
+    def __init__(self, vocab_size=32100, min_frequency=2):  # Mantener 32100 para compatibilidad
+        self.vocab_size = vocab_size
+        self.min_frequency = min_frequency
+        
+        # Tokens especiales mejorados
+        self.special_tokens = {
+            '<pad>': 0,
+            '<unk>': 1, 
+            '<s>': 2,
+            '</s>': 3,
+            '<mask>': 4,
+            '<cls>': 5,
+            '<sep>': 6,
+            '<newline>': 7,
+            '<tab>': 8,
+            '<url>': 9,
+            '<email>': 10,
+            '<number>': 11
+        }
+        
+        # Mapeos de vocabulario
+        self.vocab = {}  # token -> id
+        self.inverse_vocab = {}  # id -> token
+        self.byte_pairs = {}  # par -> merge_id
+        self.merge_ranks = {}  # merge_id -> rank
+        
+        # Inicializar tokens especiales
+        for token, token_id in self.special_tokens.items():
+            self.vocab[token] = token_id
+            self.inverse_vocab[token_id] = token
+        
+        # Aliases para compatibilidad
+        self.word_to_id = self.vocab
+        self.id_to_word = self.inverse_vocab
+        
+        self.pad_token = '<pad>'
+        self.unk_token = '<unk>'
+        self.bos_token = '<s>'
+        self.eos_token = '</s>'
+        self.mask_token = '<mask>'
+        self.cls_token = '<cls>'
+        self.sep_token = '<sep>'
+        
+        self.pad_token_id = self.special_tokens['<pad>']
+        self.unk_token_id = self.special_tokens['<unk>']
+        self.bos_token_id = self.special_tokens['<s>']
+        self.eos_token_id = self.special_tokens['</s>']
+        self.mask_token_id = self.special_tokens['<mask>']
+        self.cls_token_id = self.special_tokens['<cls>']
+        self.sep_token_id = self.special_tokens['<sep>']
+        
+        # Cache y estadísticas
+        self.encoding_cache = {}
+        self.token_frequencies = Counter()
+        self._built = False
+        
+        # Regex mejorados para preprocessing
+        self.patterns = {
+            'url': re.compile(r'https?://\S+|www\.\S+', re.IGNORECASE),
+            'email': re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
+            'number': re.compile(r'\b\d+(?:\.\d+)?\b'),
+            'whitespace': re.compile(r'\s+'),
+            'punctuation': re.compile(r'[^\w\s]')
+        }
+        
+        print(f"🔧 Inicializado AdaptiveBPETokenizer con vocabulario de {vocab_size:,} tokens")
+    
+    def _normalize_text(self, text: str) -> str:
+        """Normalización avanzada de texto"""
+        # Normalizar Unicode
+        text = unicodedata.normalize('NFKC', text)
+        
+        # Reemplazar patrones especiales
+        text = self.patterns['url'].sub('<url>', text)
+        text = self.patterns['email'].sub('<email>', text)
+        text = self.patterns['number'].sub('<number>', text)
+        
+        # Normalizar espacios en blanco
+        text = text.replace('\n', '<newline>')
+        text = text.replace('\t', '<tab>')
+        text = self.patterns['whitespace'].sub(' ', text)
+        
+        return text.strip()
+    
+    def _get_byte_pairs(self, word: str) -> List[Tuple[str, str]]:
+        """Obtener todos los pares de bytes consecutivos en una palabra"""
+        pairs = []
+        prev_char = word[0]
+        for char in word[1:]:
+            pairs.append((prev_char, char))
+            prev_char = char
+        return pairs
+    
+    def _get_word_tokens(self, text: str) -> List[str]:
+        """Tokenización inicial por palabras con manejo de caracteres especiales"""
+        # Pre-tokenizar manteniendo espacios y puntuación
+        tokens = re.findall(r'\w+|[^\w\s]|\s+', text)
+        # Filtrar tokens vacíos
+        return [token for token in tokens if token.strip()]
+    
+    def _intelligent_word_filtering(self, word_freq: Counter) -> Dict[str, int]:
+        """Filtrado inteligente con múltiples criterios de calidad"""
+        filtered_words = {}
+        
+        # Listas de palabras a filtrar
+        stopwords = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        
+        # Patrones problemáticos
+        problematic_patterns = [
+            re.compile(r'^[^a-zA-Z0-9]*$'),  # Solo símbolos
+            re.compile(r'^.{1}$'),           # Caracteres únicos
+            re.compile(r'^\d+$'),            # Solo números
+            re.compile(r'^[A-Z]{4,}$'),      # Acrónimos muy largos
+        ]
+        
+        total_words = sum(word_freq.values())
+        
+        for word, freq in word_freq.items():
+            # Criterio 1: Frecuencia mínima
+            if freq < self.min_frequency:
+                continue
+                
+            # Criterio 2: Filtrar palabras muy cortas o muy largas
+            if len(word) < 2 or len(word) > 50:
+                continue
+                
+            # Criterio 3: Filtrar patrones problemáticos
+            is_problematic = any(pattern.match(word) for pattern in problematic_patterns)
+            if is_problematic:
+                continue
+                
+            # Criterio 4: Priorizar palabras con buena ratio frecuencia/longitud
+            freq_ratio = freq / total_words
+            length_penalty = 1.0 / (1.0 + len(word) * 0.1)
+            quality_score = freq_ratio * length_penalty
+            
+            # Criterio 5: Dar prioridad a palabras frecuentes
+            if freq >= 100 or quality_score >= 1e-6:
+                filtered_words[word] = freq
+            elif word.lower() not in stopwords and freq >= self.min_frequency * 2:
+                filtered_words[word] = freq
+        
+        # Ordenar por frecuencia para priorizar tokens más útiles
+        sorted_words = dict(sorted(filtered_words.items(), key=lambda x: x[1], reverse=True))
+        
+        # Limitar vocabulario si es muy grande
+        max_words = self.vocab_size - len(self.special_tokens) - 1000
+        if len(sorted_words) > max_words:
+            sorted_words = dict(list(sorted_words.items())[:max_words])
+        
+        print(f"📊 Filtrado inteligente: {len(word_freq):,} -> {len(sorted_words):,} palabras")
+        
+        return sorted_words
+    
+    def build_vocab(self, texts: List[str], verbose: bool = True):
+        """Construir vocabulario BPE desde corpus de textos"""
+        if verbose:
+            print(f"🔧 Construyendo vocabulario BPE desde {len(texts):,} textos...")
+        
+        # Fase 1: Recopilar caracteres únicos
+        char_freq = Counter()
+        word_freq = Counter()
+        
+        for i, text in enumerate(texts):
+            if verbose and i % 5000 == 0:
+                print(f"   Procesando texto {i+1:,}/{len(texts):,}")
+            
+            normalized_text = self._normalize_text(text)
+            words = self._get_word_tokens(normalized_text)
+            
+            for word in words:
+                word_freq[word] += 1
+                for char in word:
+                    char_freq[char] += 1
+        
+        # Filtrado inteligente de palabras
+        filtered_words = self._intelligent_word_filtering(word_freq)
+        
+        if verbose:
+            print(f"   Palabras únicas: {len(word_freq):,} -> {len(filtered_words):,}")
+            print(f"   Caracteres únicos: {len(char_freq):,}")
+        
+        # Fase 2: Inicializar vocabulario con caracteres
+        current_id = len(self.special_tokens)
+        
+        # Agregar caracteres más frecuentes primero
+        for char, freq in char_freq.most_common():
+            if char not in self.vocab:
+                self.vocab[char] = current_id
+                self.inverse_vocab[current_id] = char
+                current_id += 1
+        
+        # Fase 3: Aplicar BPE iterativamente
+        vocab_words = {word: list(word) for word, freq in filtered_words.items()}
+        
+        num_merges = self.vocab_size - len(self.vocab)
+        if verbose:
+            print(f"   Realizando {num_merges:,} merges de BPE...")
+        
+        for merge_step in range(num_merges):
+            if verbose and merge_step % 2000 == 0 and merge_step > 0:
+                print(f"   Merge {merge_step:,}/{num_merges:,}")
+            
+            # Contar pares de tokens adyacentes
+            pair_counts = Counter()
+            for word, word_tokens in vocab_words.items():
+                word_pairs = self._get_pairs(word_tokens)
+                word_frequency = filtered_words[word]
+                for pair in word_pairs:
+                    pair_counts[pair] += word_frequency
+            
+            if not pair_counts:
+                break
+                
+            # Encontrar el par más frecuente
+            best_pair = pair_counts.most_common(1)[0][0]
+            
+            # Crear nuevo token combinando el par
+            new_token = best_pair[0] + best_pair[1]
+            
+            # Actualizar vocabulario
+            if new_token not in self.vocab:
+                self.vocab[new_token] = current_id
+                self.inverse_vocab[current_id] = new_token
+                current_id += 1
+                
+                # Guardar información del merge
+                self.byte_pairs[best_pair] = merge_step
+                self.merge_ranks[merge_step] = len(self.merge_ranks)
+            
+            # Actualizar representaciones de palabras
+            vocab_words = self._merge_vocab(vocab_words, best_pair, new_token)
+        
+        # Actualizar estadísticas
+        self.token_frequencies.update(filtered_words)
+        self._built = True
+        
+        if verbose:
+            print(f"✅ Vocabulario BPE construido:")
+            print(f"   Total tokens: {len(self.vocab):,}")
+            print(f"   Merges realizados: {len(self.byte_pairs):,}")
+        
+        return self
+    
+    def _get_pairs(self, word_tokens: List[str]) -> Set[Tuple[str, str]]:
+        """Obtener pares de tokens adyacentes"""
+        pairs = set()
+        prev_token = word_tokens[0]
+        for token in word_tokens[1:]:
+            pairs.add((prev_token, token))
+            prev_token = token
+        return pairs
+    
+    def _merge_vocab(self, vocab_words: Dict[str, List[str]], pair: Tuple[str, str], new_token: str) -> Dict[str, List[str]]:
+        """Aplicar merge a todo el vocabulario"""
+        new_vocab_words = {}
+        for word, word_tokens in vocab_words.items():
+            new_word_tokens = []
+            i = 0
+            while i < len(word_tokens):
+                if (i < len(word_tokens) - 1 and 
+                    word_tokens[i] == pair[0] and 
+                    word_tokens[i + 1] == pair[1]):
+                    new_word_tokens.append(new_token)
+                    i += 2
+                else:
+                    new_word_tokens.append(word_tokens[i])
+                    i += 1
+            new_vocab_words[word] = new_word_tokens
+        return new_vocab_words
+    
+    def _bpe_encode_word(self, word: str) -> List[int]:
+        """Codificar palabra usando BPE"""
+        if not word:
+            return []
+        
+        # Usar cache si disponible
+        if word in self.encoding_cache:
+            return self.encoding_cache[word]
+        
+        # Tokenizar palabra a nivel de caracteres
+        word_tokens = list(word)
+        
+        # Aplicar merges en orden de ranking
+        while len(word_tokens) > 1:
+            pairs = self._get_pairs(word_tokens)
+            if not pairs:
+                break
+                
+            # Encontrar el mejor par para merger según el ranking
+            best_pair = None
+            best_rank = float('inf')
+            
+            for pair in pairs:
+                if pair in self.byte_pairs:
+                    rank = self.merge_ranks.get(self.byte_pairs[pair], float('inf'))
+                    if rank < best_rank:
+                        best_pair = pair
+                        best_rank = rank
+            
+            if best_pair is None:
+                break
+                
+            # Realizar merge
+            new_token = best_pair[0] + best_pair[1]
+            new_word_tokens = []
+            i = 0
+            while i < len(word_tokens):
+                if (i < len(word_tokens) - 1 and 
+                    word_tokens[i] == best_pair[0] and 
+                    word_tokens[i + 1] == best_pair[1]):
+                    new_word_tokens.append(new_token)
+                    i += 2
+                else:
+                    new_word_tokens.append(word_tokens[i])
+                    i += 1
+            word_tokens = new_word_tokens
+        
+        # Convertir tokens a IDs
+        token_ids = []
+        for token in word_tokens:
+            if token in self.vocab:
+                token_ids.append(self.vocab[token])
+            else:
+                # Manejar tokens desconocidos a nivel de caracteres
+                for char in token:
+                    if char in self.vocab:
+                        token_ids.append(self.vocab[char])
+                    else:
+                        token_ids.append(self.unk_token_id)
+        
+        # Guardar en cache
+        self.encoding_cache[word] = token_ids
+        return token_ids
+    
+    def encode(self, text: str, max_length: Optional[int] = None, 
+               truncation: bool = True, padding: bool = False, 
+               return_tensors: Optional[str] = None, 
+               add_special_tokens: bool = True, 
+               return_attention_mask: bool = True) -> Union[List[int], Dict]:
+        """Codificar texto usando BPE"""
+        if not self._built:
+            print("⚠️ Vocabulario no construido. Usando vocabulario básico.")
+            self.build_vocab([text])
+        
+        # Normalizar texto
+        normalized_text = self._normalize_text(text)
+        
+        # Tokenizar por palabras y espacios
+        words = self._get_word_tokens(normalized_text)
+        
+        # Codificar cada palabra con BPE
+        token_ids = []
+        if add_special_tokens:
+            token_ids.append(self.bos_token_id)
+        
+        for word in words:
+            word_tokens = self._bpe_encode_word(word)
+            token_ids.extend(word_tokens)
+        
+        if add_special_tokens:
+            token_ids.append(self.eos_token_id)
+        
+        # Truncar si es necesario
+        if max_length and truncation and len(token_ids) > max_length:
+            token_ids = token_ids[:max_length-1] + [self.eos_token_id] if add_special_tokens else token_ids[:max_length]
+        
+        # Padding si es necesario
+        if padding and max_length:
+            if len(token_ids) < max_length:
+                token_ids.extend([self.pad_token_id] * (max_length - len(token_ids)))
+        
+        if return_tensors == "pt":
+            result = {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+            if return_attention_mask:
+                attention_mask = [1 if token_id != self.pad_token_id else 0 for token_id in token_ids]
+                result["attention_mask"] = torch.tensor([attention_mask], dtype=torch.long)
+            return result
+        
+        return token_ids
+    
+    def __call__(self, text: Union[str, List[str]], **kwargs) -> Dict:
+        """Hacer el tokenizer callable como HuggingFace"""
+        if isinstance(text, list):
+            # Procesar batch de textos
+            all_input_ids = []
+            all_attention_masks = []
+            
+            for t in text:
+                result = self.encode(t, **kwargs)
+                if isinstance(result, dict):
+                    all_input_ids.append(result["input_ids"][0].tolist() if hasattr(result["input_ids"], 'tolist') else result["input_ids"])
+                    if "attention_mask" in result:
+                        all_attention_masks.append(result["attention_mask"][0].tolist() if hasattr(result["attention_mask"], 'tolist') else result["attention_mask"])
+                else:
+                    all_input_ids.append(result)
+            
+            result_dict = {"input_ids": all_input_ids}
+            if all_attention_masks:
+                result_dict["attention_mask"] = all_attention_masks
+            return result_dict
+        else:
+            # Procesar texto individual
+            result = self.encode(text, **kwargs)
+            if isinstance(result, dict):
+                return result
+            else:
+                return {"input_ids": result}
+    
+    def decode(self, token_ids: Union[List[int], torch.Tensor], 
+               skip_special_tokens: bool = True, 
+               clean_up_tokenization_spaces: bool = True) -> str:
+        """Decodificar tokens a texto"""
+        if hasattr(token_ids, 'tolist'):  # Es un tensor
+            if len(token_ids.shape) > 1:
+                token_ids = token_ids.squeeze()
+            token_ids = token_ids.tolist()
+        
+        tokens = []
+        for token_id in token_ids:
+            if token_id in self.inverse_vocab:
+                token = self.inverse_vocab[token_id]
+                if skip_special_tokens and token in self.special_tokens:
+                    continue
+                tokens.append(token)
+        
+        # Reconstruir texto
+        text = "".join(tokens)
+        
+        if clean_up_tokenization_spaces:
+            # Restaurar espacios normalizados
+            text = text.replace('<newline>', '\n')
+            text = text.replace('<tab>', '\t')
+            text = re.sub(r'\s+', ' ', text)
+            text = text.strip()
+        
+        return text
+    
+    def __len__(self) -> int:
+        return len(self.vocab)
+    
+    def save_pretrained(self, save_directory: str):
+        """Guardar tokenizer"""
+        os.makedirs(save_directory, exist_ok=True)
+        
+        # Guardar vocabulario principal
+        vocab_file = os.path.join(save_directory, "vocab.json")
+        with open(vocab_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                'vocab': self.vocab,
+                'inverse_vocab': {str(k): v for k, v in self.inverse_vocab.items()},
+                'vocab_size': self.vocab_size,
+                'special_tokens': self.special_tokens,
+                'min_frequency': self.min_frequency
+            }, f, indent=2, ensure_ascii=False)
+        
+        print(f"💾 AdaptiveBPETokenizer guardado en: {save_directory}")
+
 # Scheduler simple alternativo para casos sin Transformers
 class SimpleCosineScheduler:
     """Scheduler coseno simple como alternativa a get_cosine_schedule_with_warmup"""
@@ -886,10 +1357,10 @@ GRAD_ACCUM_STEPS = 6     # Batch efectivo de 8192 para entrenamiento súper efic
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 1e-6  # Ultra reducido para máxima estabilidad
-LEARNING_RATE_MIN = 1e-9  # Mínimo ultra bajo para convergencia suave
-WEIGHT_DECAY = 0.05       # Weight decay reducido para menos agresividad
-WARMUP_RATIO = 0.25       # 25% de warmup muy gradual para estabilidad máxima
+LEARNING_RATE_MAX = 1e-7  # Learning rate extremadamente bajo
+LEARNING_RATE_MIN = 1e-10 # Mínimo microscópico
+WEIGHT_DECAY = 0.01       # Weight decay mínimo
+WARMUP_RATIO = 0.05       # Warmup corto para llegar rápido al LR bajo
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -1745,11 +2216,31 @@ else:
 # Tokenizer se carga solo cuando se ejecuta el script directamente
 # Verificar si solo se está importando para usar las clases
 if not os.environ.get('HRM_IMPORT_ONLY'):
-    print("Loading tokenizer (T5 slow)...")
-    tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "<pad>"})
-    print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
+    print("Initializing AdaptiveBPETokenizer with dataset vocabulary...")
+    
+    # Crear dataset temporal para construir vocabulario
+    print("🔧 Cargando muestras de texto para construir vocabulario...")
+    vocab_texts = []
+    
+    # Cargar muestras del dataset configurado
+    if DATASET_CONFIG:
+        temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train")
+    else:
+        temp_dataset = load_dataset(DATASET_NAME, streaming=True, split="train")
+    
+    # Tomar 10,000 muestras para construir vocabulario
+    for i, sample in enumerate(temp_dataset):
+        if i >= 10000:
+            break
+        vocab_texts.append(sample["text"])
+    
+    print(f"📝 Construyendo vocabulario desde {len(vocab_texts)} muestras...")
+    
+    # Inicializar tokenizer y construir vocabulario
+    tokenizer = AdaptiveBPETokenizer(vocab_size=32100, min_frequency=2)
+    tokenizer.build_vocab(vocab_texts)
+    
+    print(f"✅ AdaptiveBPETokenizer inicializado. Vocab size: {len(tokenizer)}")
 else:
     # Solo definir variable para imports, el tokenizer se carga después
     tokenizer = None
@@ -2414,21 +2905,21 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     
     # Inicialización de pesos más conservativa para estabilidad
     def init_weights_conservative(module):
-        """Inicialización conservativa para prevenir explosión de gradientes"""
+        """Inicialización ultra-conservativa para prevenir explosión de gradientes"""
         if isinstance(module, nn.Linear):
-            # Xavier/Glorot initialization con escala reducida
-            nn.init.xavier_uniform_(module.weight, gain=0.5)  # Reducir ganancia
+            # Xavier/Glorot initialization con escala ultra-reducida
+            nn.init.xavier_uniform_(module.weight, gain=0.1)  # Ultra conservativo
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            # Embedding con varianza reducida
-            nn.init.normal_(module.weight, mean=0.0, std=0.01)  # Reducir std de 0.02 a 0.01
+            # Embedding con varianza ultra-reducida
+            nn.init.normal_(module.weight, mean=0.0, std=0.002)  # Ultra conservativo
         elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
     
     model.apply(init_weights_conservative)
-    print("🎯 Inicialización conservativa de pesos aplicada para mayor estabilidad")
+    print("🎯 Inicialización ULTRA-conservativa aplicada - gain=0.1, std=0.002")
 
 # Envolver modelo para multi-GPU (solo si no es import-only)
 if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
@@ -2668,8 +3159,8 @@ def main_training():
                 if (i + 1) % GRAD_ACCUM_STEPS == 0:
                     # Gradient clipping más agresivo para prevenir explosión de gradientes
                     scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    if grad_norm > 5.0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+                    if grad_norm > 1.0:
                         print(f"⚠️ Gradientes grandes detectados: {grad_norm:.2f}")
                     scaler.step(optimizer)
                     scaler.update()
