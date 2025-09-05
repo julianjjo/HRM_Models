@@ -1357,10 +1357,10 @@ GRAD_ACCUM_STEPS = 6     # Batch efectivo de 8192 para entrenamiento súper efic
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 1e-7  # Learning rate extremadamente bajo
+LEARNING_RATE_MAX = 3e-7  # Conservador pero con suficiente señal para aprender
 LEARNING_RATE_MIN = 1e-10 # Mínimo microscópico
 WEIGHT_DECAY = 0.01       # Weight decay mínimo
-WARMUP_RATIO = 0.05       # Warmup corto para llegar rápido al LR bajo
+WARMUP_RATIO = 0.25       # Warmup largo para evitar convergencia prematura
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -3026,7 +3026,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 5e-7   # LR ultra reducido para estabilidad máxima
+    NEW_LEARNING_RATE = 1e-7   # LR para reanudar entrenamientos con estabilidad
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
@@ -3160,8 +3160,8 @@ def main_training():
                     # Gradient clipping más agresivo para prevenir explosión de gradientes
                     scaler.unscale_(optimizer)
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-                    if grad_norm > 1.0:
-                        print(f"⚠️ Gradientes grandes detectados: {grad_norm:.2f}")
+                    if grad_norm > 10000.0:
+                        print(f"⚠️ Gradientes EXTREMOS detectados: {grad_norm:.2f}")
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
