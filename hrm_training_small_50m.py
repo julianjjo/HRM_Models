@@ -1764,12 +1764,41 @@ num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 if USE_RANDOM_OFFSET:
     # Usar timestamp para asegurar offset diferente en cada ejecución
     random.seed(int(time.time()) % 1000000)
-    max_offset_samples = int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0))
+    
+    # Lógica adaptativa basada en el tamaño del subset
+    if DATASET_SUBSET_PERCENT < 0.1:  # Subsets muy pequeños (< 0.1%)
+        # Limitar offset a máximo 1M muestras o 20x el tamaño del subset
+        max_offset_limit = min(1_000_000, num_train_samples * 20)
+        max_offset_samples = min(
+            int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0)),
+            max_offset_limit
+        )
+        offset_strategy = "ultra-conservative"
+    elif DATASET_SUBSET_PERCENT < 1.0:  # Subsets pequeños (0.1% - 1%)
+        # Limitar offset a máximo 10M muestras o 10x el tamaño del subset
+        max_offset_limit = min(10_000_000, num_train_samples * 10)
+        max_offset_samples = min(
+            int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0)),
+            max_offset_limit
+        )
+        offset_strategy = "conservative"
+    else:  # Subsets grandes (> 1%)
+        # Usar lógica original
+        max_offset_samples = int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0))
+        offset_strategy = "original"
+    
     # Asegurar que el offset permita tomar todas las muestras requeridas
     max_valid_offset = max_offset_samples - num_train_samples
     if max_valid_offset > 0:
         random_offset = random.randint(0, max_valid_offset)
-        print(f"🎲 Offset aleatorio activado: saltando {random_offset:,} muestras ({random_offset/TOTAL_TRAIN_SAMPLES*100:.3f}% del dataset)")
+        # Calcular rango efectivo de datos
+        start_percent = (random_offset / TOTAL_TRAIN_SAMPLES) * 100
+        end_percent = ((random_offset + num_train_samples) / TOTAL_TRAIN_SAMPLES) * 100
+        
+        print(f"🎲 Offset aleatorio ({offset_strategy}): saltando {random_offset:,} muestras")
+        print(f"   📊 Usando datos del {start_percent:.3f}% al {end_percent:.3f}% del dataset total")
+        print(f"   🎯 Rango efectivo: {end_percent - start_percent:.3f}% del dataset C4")
+        
         # Restablecer semilla para el entrenamiento
         random.seed(SEED)
     else:
@@ -2070,8 +2099,6 @@ if DATASET_INFO.get("language_filter"):
 
 print(f"\n!!! USANDO DATASET: {ACTIVE_DATASET.upper()} - {DATASET_INFO['description']}{language_filter_info} !!!")
 print(f"!!! USANDO UN SUBCONJUNTO DEL {DATASET_SUBSET_PERCENT}% DEL DATASET !!!")
-if USE_RANDOM_OFFSET and random_offset > 0:
-    print(f"🎲 Con offset aleatorio de {random_offset:,} muestras para entrenar con datos diferentes")
 print(f"Tomando aprox. {num_train_samples:,} ejemplos de entrenamiento.")
 print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.\n")
 
