@@ -724,7 +724,12 @@ class HRMText1(PreTrainedModel, GenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.03   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 0.01   # Usar más datos para modelo pequeño (más eficiente)
+
+# --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
+# Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
+USE_RANDOM_OFFSET = True  # Activar offset aleatorio
+MAX_OFFSET_PERCENT = 80   # Máximo offset como % del dataset (deja 20% al final sin usar)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
@@ -1755,6 +1760,25 @@ TOTAL_VAL_SAMPLES = DATASET_INFO["val_samples"]
 
 num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 
+# Calcular offset aleatorio para usar diferentes partes del dataset
+if USE_RANDOM_OFFSET:
+    # Usar timestamp para asegurar offset diferente en cada ejecución
+    random.seed(int(time.time()) % 1000000)
+    max_offset_samples = int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0))
+    # Asegurar que el offset permita tomar todas las muestras requeridas
+    max_valid_offset = max_offset_samples - num_train_samples
+    if max_valid_offset > 0:
+        random_offset = random.randint(0, max_valid_offset)
+        print(f"🎲 Offset aleatorio activado: saltando {random_offset:,} muestras ({random_offset/TOTAL_TRAIN_SAMPLES*100:.3f}% del dataset)")
+        # Restablecer semilla para el entrenamiento
+        random.seed(SEED)
+    else:
+        random_offset = 0
+        print(f"⚠️  Dataset muy pequeño para offset aleatorio, usando offset=0")
+else:
+    random_offset = 0
+    print(f"📍 Offset aleatorio desactivado, usando primeras muestras")
+
 # Manejar datasets que no tienen split de validación predefinido
 if TOTAL_VAL_SAMPLES is None:
     # Para datasets sin validación, usar el 1% del entrenamiento como validación
@@ -2046,6 +2070,8 @@ if DATASET_INFO.get("language_filter"):
 
 print(f"\n!!! USANDO DATASET: {ACTIVE_DATASET.upper()} - {DATASET_INFO['description']}{language_filter_info} !!!")
 print(f"!!! USANDO UN SUBCONJUNTO DEL {DATASET_SUBSET_PERCENT}% DEL DATASET !!!")
+if USE_RANDOM_OFFSET and random_offset > 0:
+    print(f"🎲 Con offset aleatorio de {random_offset:,} muestras para entrenar con datos diferentes")
 print(f"Tomando aprox. {num_train_samples:,} ejemplos de entrenamiento.")
 print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.\n")
 
@@ -2053,18 +2079,25 @@ print(f"Tomando aprox. {num_val_samples:,} ejemplos de validación.\n")
 if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
     # Para datasets únicos, aplicar la lógica original
     if "validation" in raw_datasets:
-        raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
+        raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
         raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
     else:
         # Para datasets sin split de validación, dividir el entrenamiento
         print("Dividiendo dataset de entrenamiento para crear validación...")
         total_for_split = num_train_samples + num_val_samples
-        train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+        train_dataset = raw_datasets["train"].skip(random_offset).take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
         
         # Crear splits manualmente
         raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
         raw_datasets["validation"] = train_dataset.take(num_val_samples)
-# Para dataset mezclado, los splits ya están configurados
+# Para dataset mezclado, aplicar offset aleatorio si está configurado
+else:
+    if USE_RANDOM_OFFSET and random_offset > 0:
+        print(f"🎲 Aplicando offset aleatorio de {random_offset:,} muestras al dataset mezclado...")
+        if "train" in raw_datasets:
+            raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples)
+        if "validation" in raw_datasets and raw_datasets["validation"] is not None:
+            raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
 
 def tokenize_function(examples):
     """Función de tokenización optimizada para C4 streaming masivo"""
