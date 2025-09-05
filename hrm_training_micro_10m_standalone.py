@@ -1533,6 +1533,11 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 # Porcentaje del dataset completo a usar (1-100)
 DATASET_SUBSET_PERCENT = 0.005   # Usar más datos para asegurar suficientes muestras
 
+# --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
+# Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
+USE_RANDOM_OFFSET = True  # Activar offset aleatorio
+MAX_OFFSET_PERCENT = 80   # Máximo offset como % del dataset (deja 20% al final sin usar)
+
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
 CUSTOM_MIX_RATIOS = {
@@ -2627,6 +2632,54 @@ TOTAL_VAL_SAMPLES = DATASET_INFO["val_samples"]
 
 num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 
+# Calcular offset aleatorio para usar diferentes partes del dataset
+if USE_RANDOM_OFFSET:
+    # Usar timestamp para asegurar offset diferente en cada ejecución
+    random.seed(int(time.time()) % 1000000)
+    
+    # Lógica adaptativa basada en el tamaño del subset
+    if DATASET_SUBSET_PERCENT < 0.1:  # Subsets muy pequeños (< 0.1%)
+        # Limitar offset a máximo 1M muestras o 20x el tamaño del subset
+        max_offset_limit = min(1_000_000, num_train_samples * 20)
+        max_offset_samples = min(
+            int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0)),
+            max_offset_limit
+        )
+        offset_strategy = "ultra-conservative"
+    elif DATASET_SUBSET_PERCENT < 1.0:  # Subsets pequeños (0.1% - 1%)
+        # Limitar offset a máximo 10M muestras o 10x el tamaño del subset
+        max_offset_limit = min(10_000_000, num_train_samples * 10)
+        max_offset_samples = min(
+            int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0)),
+            max_offset_limit
+        )
+        offset_strategy = "conservative"
+    else:  # Subsets grandes (> 1%)
+        # Usar lógica original
+        max_offset_samples = int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0))
+        offset_strategy = "original"
+    
+    # Asegurar que el offset permita tomar todas las muestras requeridas
+    max_valid_offset = max_offset_samples - num_train_samples
+    if max_valid_offset > 0:
+        random_offset = random.randint(0, max_valid_offset)
+        # Calcular rango efectivo de datos
+        start_percent = (random_offset / TOTAL_TRAIN_SAMPLES) * 100
+        end_percent = ((random_offset + num_train_samples) / TOTAL_TRAIN_SAMPLES) * 100
+        
+        print(f"🎲 Offset aleatorio ({offset_strategy}): saltando {random_offset:,} muestras")
+        print(f"   📊 Usando datos del {start_percent:.3f}% al {end_percent:.3f}% del dataset total")
+        print(f"   🎯 Rango efectivo: {end_percent - start_percent:.3f}% del dataset C4")
+        
+        # Restablecer semilla para el entrenamiento
+        random.seed(SEED)
+    else:
+        random_offset = 0
+        print(f"⚠️  Dataset muy pequeño para offset aleatorio, usando offset=0")
+else:
+    random_offset = 0
+    print(f"📍 Offset aleatorio desactivado, usando primeras muestras")
+
 # Manejar datasets que no tienen split de validación predefinido
 if TOTAL_VAL_SAMPLES is None:
     # Para datasets sin validación, usar el 1% del entrenamiento como validación
@@ -3002,6 +3055,15 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
                 "train": train_dataset.take(num_train_samples),
                 "validation": train_dataset.take(num_val_samples) 
             }
+
+# Aplicar offset aleatorio si está configurado
+if USE_RANDOM_OFFSET and random_offset > 0:
+    print(f"🎲 Aplicando offset aleatorio de {random_offset:,} muestras al dataset...")
+    if "train" in raw_datasets:
+        raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples)
+    if "validation" in raw_datasets and raw_datasets["validation"] is not None:
+        raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
+
 # Para dataset mezclado, los splits ya están configurados
 
 def tokenize_function(examples):

@@ -23,12 +23,440 @@ from torch.optim import AdamW
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from transformers import T5Tokenizer, PreTrainedModel, PretrainedConfig, GenerationMixin, get_cosine_schedule_with_warmup
+from transformers import PreTrainedModel, PretrainedConfig, GenerationMixin, get_cosine_schedule_with_warmup
 from tqdm.auto import tqdm
 
 from datasets import load_dataset
 
 from huggingface_hub import HfFolder, HfApi
+
+# ==============================================================================
+# --- ADAPTIVE BPE TOKENIZER ---
+# ==============================================================================
+
+import unicodedata
+import json
+from collections import defaultdict, Counter
+from typing import List, Dict, Optional, Tuple, Union, Any
+
+class AdaptiveBPETokenizer:
+    """
+    Tokenizador BPE adaptativo con construcción dinámica de vocabulario
+    y soporte para múltiples idiomas con normalización Unicode NFKC.
+    """
+    
+    def __init__(
+        self,
+        vocab_size: int = 15000,  # Ajustado para modelo nano (25M)
+        max_length: int = 512,
+        min_frequency: int = 2,
+        special_tokens: Optional[List[str]] = None,
+        normalization: str = 'NFKC'
+    ):
+        self.vocab_size = vocab_size
+        self.max_length = max_length
+        self.min_frequency = min_frequency
+        self.normalization = normalization
+        
+        # Tokens especiales por defecto
+        if special_tokens is None:
+            special_tokens = ['<pad>', '<s>', '</s>', '<unk>', '<mask>']
+        
+        self.special_tokens = special_tokens
+        self.special_token_ids = {token: i for i, token in enumerate(special_tokens)}
+        
+        # Vocabularios
+        self.token_to_id = self.special_token_ids.copy()
+        self.id_to_token = {i: token for token, i in self.token_to_id.items()}
+        
+        # Estadísticas de construcción
+        self.merge_rules = []
+        self.word_freqs = Counter()
+        self.is_trained = False
+        
+        print(f"🔧 AdaptiveBPETokenizer inicializado:")
+        print(f"   📊 Vocabulario objetivo: {vocab_size:,}")
+        print(f"   📏 Longitud máxima: {max_length}")
+        print(f"   🔤 Normalización: {normalization}")
+        print(f"   🏷️  Tokens especiales: {len(special_tokens)}")
+
+    def normalize_text(self, text: str) -> str:
+        """Normalización Unicode robusta para múltiples idiomas"""
+        if not text:
+            return ""
+            
+        try:
+            # Normalización NFKC: canonical decomposition + canonical composition + compatibility
+            if self.normalization == 'NFKC':
+                text = unicodedata.normalize('NFKC', text)
+            elif self.normalization == 'NFD':
+                text = unicodedata.normalize('NFD', text)
+            elif self.normalization == 'NFC':
+                text = unicodedata.normalize('NFC', text)
+            
+            # Limpieza adicional
+            text = text.strip()
+            
+            return text
+        except Exception as e:
+            print(f"⚠️ Error en normalización: {e}")
+            return text.strip()
+    
+    def pre_tokenize(self, text: str) -> List[str]:
+        """Pre-tokenización por palabras con manejo de caracteres especiales"""
+        text = self.normalize_text(text)
+        if not text:
+            return []
+        
+        # Separar por espacios y mantener estructura
+        words = text.split()
+        processed_words = []
+        
+        for word in words:
+            if word:
+                # Añadir marcador de fin de palabra como en GPT-2
+                processed_words.append(word + '</w>')
+        
+        return processed_words
+    
+    def get_word_tokens(self, word: str) -> List[str]:
+        """Convertir palabra en tokens de caracteres individuales"""
+        return list(word)
+    
+    def get_pairs(self, word_tokens: List[str]) -> set:
+        """Obtener todos los pares consecutivos en los tokens de una palabra"""
+        pairs = set()
+        prev_char = word_tokens[0]
+        for char in word_tokens[1:]:
+            pairs.add((prev_char, char))
+            prev_char = char
+        return pairs
+    
+    def train(self, texts: List[str], progress_callback=None):
+        """Entrenar el tokenizador con una lista de textos"""
+        print("🏋️ Iniciando entrenamiento del tokenizador BPE...")
+        
+        # Paso 1: Recopilar estadísticas de palabras
+        print("📊 Recopilando estadísticas de palabras...")
+        word_freqs = Counter()
+        
+        for i, text in enumerate(texts):
+            words = self.pre_tokenize(text)
+            for word in words:
+                word_freqs[word] += 1
+            
+            if progress_callback and i % 1000 == 0:
+                progress_callback(i, len(texts), "Procesando textos")
+        
+        # Filtrar palabras por frecuencia mínima
+        word_freqs = {word: freq for word, freq in word_freqs.items() 
+                     if freq >= self.min_frequency}
+        
+        print(f"📈 Palabras únicas (freq >= {self.min_frequency}): {len(word_freqs):,}")
+        self.word_freqs = word_freqs
+        
+        # Paso 2: Inicializar vocabulario con caracteres
+        print("🔤 Inicializando vocabulario base...")
+        splits = {}
+        for word, freq in word_freqs.items():
+            splits[word] = self.get_word_tokens(word)
+        
+        # Obtener caracteres únicos
+        alphabet = set()
+        for word_tokens in splits.values():
+            alphabet.update(word_tokens)
+        
+        # Añadir caracteres al vocabulario (después de tokens especiales)
+        current_id = len(self.special_tokens)
+        for char in sorted(alphabet):
+            if char not in self.token_to_id:
+                self.token_to_id[char] = current_id
+                self.id_to_token[current_id] = char
+                current_id += 1
+        
+        print(f"🔤 Caracteres base añadidos: {len(alphabet)}")
+        
+        # Paso 3: Aprender reglas de merge mediante BPE
+        print("🔀 Aprendiendo reglas de merge BPE...")
+        target_merges = self.vocab_size - len(self.token_to_id)
+        
+        for merge_step in tqdm(range(target_merges), desc="Reglas BPE"):
+            # Contar todos los pares
+            pairs = Counter()
+            for word, word_tokens in splits.items():
+                word_pairs = self.get_pairs(word_tokens)
+                for pair in word_pairs:
+                    pairs[pair] += word_freqs[word]
+            
+            if not pairs:
+                print(f"⚠️ No hay más pares para mergear en paso {merge_step}")
+                break
+            
+            # Encontrar el par más frecuente
+            best_pair = pairs.most_common(1)[0][0]
+            
+            # Mergear el par más frecuente
+            new_token = ''.join(best_pair)
+            self.token_to_id[new_token] = current_id
+            self.id_to_token[current_id] = new_token
+            self.merge_rules.append(best_pair)
+            current_id += 1
+            
+            # Actualizar splits
+            new_splits = {}
+            for word, word_tokens in splits.items():
+                new_word_tokens = self._merge_word(word_tokens, best_pair)
+                new_splits[word] = new_word_tokens
+            splits = new_splits
+            
+            if progress_callback and merge_step % 100 == 0:
+                progress_callback(merge_step, target_merges, f"Regla BPE {merge_step}")
+        
+        self.is_trained = True
+        final_vocab_size = len(self.token_to_id)
+        print(f"✅ Entrenamiento completado!")
+        print(f"   📊 Vocabulario final: {final_vocab_size:,} tokens")
+        print(f"   🔀 Reglas BPE aprendidas: {len(self.merge_rules):,}")
+        
+        return self
+    
+    def _merge_word(self, word_tokens: List[str], pair: Tuple[str, str]) -> List[str]:
+        """Aplicar una regla de merge a los tokens de una palabra"""
+        new_tokens = []
+        i = 0
+        while i < len(word_tokens):
+            if (i < len(word_tokens) - 1 and 
+                word_tokens[i] == pair[0] and 
+                word_tokens[i + 1] == pair[1]):
+                # Mergear par
+                new_tokens.append(''.join(pair))
+                i += 2
+            else:
+                new_tokens.append(word_tokens[i])
+                i += 1
+        return new_tokens
+    
+    def encode_word(self, word: str) -> List[int]:
+        """Codificar una palabra individual usando las reglas BPE aprendidas"""
+        if not self.is_trained:
+            raise ValueError("El tokenizador debe ser entrenado antes de codificar")
+        
+        # Obtener tokens iniciales
+        word_tokens = self.get_word_tokens(word)
+        
+        # Aplicar reglas de merge en orden
+        for pair in self.merge_rules:
+            word_tokens = self._merge_word(word_tokens, pair)
+        
+        # Convertir tokens a IDs
+        token_ids = []
+        for token in word_tokens:
+            if token in self.token_to_id:
+                token_ids.append(self.token_to_id[token])
+            else:
+                # Token desconocido
+                token_ids.append(self.token_to_id['<unk>'])
+        
+        return token_ids
+    
+    def encode(
+        self, 
+        text: str, 
+        add_special_tokens: bool = True,
+        max_length: Optional[int] = None,
+        padding: bool = False,
+        truncation: bool = True
+    ) -> List[int]:
+        """Codificar texto completo"""
+        if not text:
+            return [self.token_to_id['<pad>']] if padding else []
+        
+        # Pre-tokenizar
+        words = self.pre_tokenize(text)
+        
+        # Codificar cada palabra
+        all_token_ids = []
+        if add_special_tokens:
+            all_token_ids.append(self.token_to_id['<s>'])
+        
+        for word in words:
+            word_ids = self.encode_word(word)
+            all_token_ids.extend(word_ids)
+        
+        if add_special_tokens:
+            all_token_ids.append(self.token_to_id['</s>'])
+        
+        # Aplicar longitud máxima
+        max_len = max_length or self.max_length
+        if truncation and len(all_token_ids) > max_len:
+            if add_special_tokens:
+                # Mantener token inicial y añadir token final
+                all_token_ids = all_token_ids[:max_len-1] + [self.token_to_id['</s>']]
+            else:
+                all_token_ids = all_token_ids[:max_len]
+        
+        # Aplicar padding
+        if padding and len(all_token_ids) < max_len:
+            pad_id = self.token_to_id['<pad>']
+            all_token_ids.extend([pad_id] * (max_len - len(all_token_ids)))
+        
+        return all_token_ids
+    
+    def decode(self, token_ids: List[int], skip_special_tokens: bool = True) -> str:
+        """Decodificar lista de IDs de tokens a texto"""
+        tokens = []
+        for token_id in token_ids:
+            if token_id in self.id_to_token:
+                token = self.id_to_token[token_id]
+                if skip_special_tokens and token in self.special_tokens:
+                    continue
+                tokens.append(token)
+            else:
+                if not skip_special_tokens:
+                    tokens.append('<unk>')
+        
+        # Reconstruir texto
+        text = ''.join(tokens)
+        # Remover marcadores de fin de palabra
+        text = text.replace('</w>', ' ')
+        
+        return text.strip()
+    
+    def __len__(self) -> int:
+        """Tamaño del vocabulario"""
+        return len(self.token_to_id)
+    
+    def vocab_size_property(self) -> int:
+        """Propiedad compatible con transformers"""
+        return len(self.token_to_id)
+    
+    @property 
+    def vocab_size_attr(self) -> int:
+        """Atributo de vocabulario"""
+        return len(self.token_to_id)
+    
+    def get_vocab(self) -> Dict[str, int]:
+        """Obtener diccionario de vocabulario"""
+        return self.token_to_id.copy()
+    
+    def save_pretrained(self, save_directory: str):
+        """Guardar tokenizador en directorio"""
+        import os
+        os.makedirs(save_directory, exist_ok=True)
+        
+        # Guardar configuración y vocabulario
+        config = {
+            'vocab_size': self.vocab_size,
+            'max_length': self.max_length,
+            'special_tokens': self.special_tokens,
+            'normalization': self.normalization,
+            'min_frequency': self.min_frequency
+        }
+        
+        with open(os.path.join(save_directory, 'tokenizer_config.json'), 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
+        # Guardar vocabulario
+        with open(os.path.join(save_directory, 'vocab.json'), 'w', encoding='utf-8') as f:
+            json.dump(self.token_to_id, f, indent=2, ensure_ascii=False)
+        
+        # Guardar reglas de merge
+        with open(os.path.join(save_directory, 'merges.json'), 'w', encoding='utf-8') as f:
+            json.dump({
+                'merge_rules': self.merge_rules,
+                'word_freqs': dict(self.word_freqs),
+                'is_trained': self.is_trained
+            }, f, indent=2, ensure_ascii=False)
+        
+        print(f"💾 AdaptiveBPETokenizer guardado en: {save_directory}")
+
+    # Métodos de compatibilidad con transformers
+    @property
+    def pad_token(self):
+        return '<pad>'
+    
+    @property 
+    def pad_token_id(self):
+        return self.token_to_id.get('<pad>', 0)
+    
+    @property
+    def eos_token(self):
+        return '</s>'
+        
+    @property
+    def eos_token_id(self):
+        return self.token_to_id.get('</s>', 2)
+    
+    @property
+    def bos_token(self):
+        return '<s>'
+        
+    @property
+    def bos_token_id(self):
+        return self.token_to_id.get('<s>', 1)
+    
+    @property
+    def unk_token(self):
+        return '<unk>'
+        
+    @property
+    def unk_token_id(self):
+        return self.token_to_id.get('<unk>', 3)
+
+    def __call__(self, text, **kwargs):
+        """Hacer el tokenizador callable como transformers"""
+        # Extraer argumentos relevantes
+        add_special_tokens = kwargs.get('add_special_tokens', True)
+        max_length = kwargs.get('max_length', None)
+        padding = kwargs.get('padding', False)
+        truncation = kwargs.get('truncation', True)
+        return_tensors = kwargs.get('return_tensors', None)
+        
+        # Manejar entrada única o batch
+        if isinstance(text, str):
+            input_ids = self.encode(
+                text, 
+                add_special_tokens=add_special_tokens,
+                max_length=max_length,
+                padding=padding,
+                truncation=truncation
+            )
+            
+            if return_tensors == 'pt':
+                input_ids = torch.tensor([input_ids])
+            else:
+                input_ids = [input_ids]
+        else:
+            # Batch de textos
+            input_ids = []
+            for t in text:
+                encoded = self.encode(
+                    t,
+                    add_special_tokens=add_special_tokens,
+                    max_length=max_length,
+                    padding=padding,
+                    truncation=truncation
+                )
+                input_ids.append(encoded)
+            
+            if return_tensors == 'pt':
+                # Hacer padding manual para batch
+                max_len = max(len(seq) for seq in input_ids)
+                padded = []
+                for seq in input_ids:
+                    padded.append(seq + [self.pad_token_id] * (max_len - len(seq)))
+                input_ids = torch.tensor(padded)
+        
+        # Crear attention mask
+        if return_tensors == 'pt':
+            attention_mask = (input_ids != self.pad_token_id).long()
+            return {'input_ids': input_ids, 'attention_mask': attention_mask}
+        else:
+            attention_masks = []
+            for seq in input_ids:
+                mask = [1 if token_id != self.pad_token_id else 0 for token_id in seq]
+                attention_masks.append(mask)
+            return {'input_ids': input_ids, 'attention_mask': attention_masks}
 
 # Scheduler simple alternativo para casos sin Transformers
 class SimpleCosineScheduler:
@@ -66,6 +494,24 @@ def optimized_memory_cleanup():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+# Función ultra-conservativa de inicialización de pesos
+def conservative_weight_init(model):
+    """Inicialización ultra-conservativa de pesos para evitar explosión de gradientes"""
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            # Xavier/Glorot con ganancia muy reducida
+            nn.init.xavier_uniform_(module.weight, gain=0.1)  # Ganancia ultra-reducida
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0.0)
+        elif isinstance(module, nn.Embedding):
+            # Inicialización normal con std muy pequeña
+            nn.init.normal_(module.weight, mean=0.0, std=0.002)  # std ultra-pequeña
+        elif isinstance(module, (nn.LayerNorm, nn.RMSNorm)):
+            if hasattr(module, 'weight') and module.weight is not None:
+                nn.init.ones_(module.weight)
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
 
 # TensorBoard para monitoreo de entrenamiento
 try:
@@ -881,10 +1327,10 @@ GRAD_ACCUM_STEPS = 4     # Batch efectivo de 128 para entrenamiento eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes  # Reducido para estabilidad numérica (migrado desde Kaggle)
-LEARNING_RATE_MIN = 1e-7  # Mínimo reducido proporcionalmente  # Mínimo más alto para evitar estancamiento
+LEARNING_RATE_MAX = 3e-7  # Ultra-conservativo para evitar explosión de gradientes con AdaptiveBPETokenizer
+LEARNING_RATE_MIN = 1e-8  # Mínimo ultra-conservativo
 WEIGHT_DECAY = 0.1
-WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
+WARMUP_RATIO = 0.25       # 25% de warmup para evitar convergencia prematura
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -1734,8 +2180,14 @@ else:
 # Tokenizer se carga solo cuando se ejecuta el script directamente
 # Verificar si solo se está importando para usar las clases
 if not os.environ.get('HRM_IMPORT_ONLY'):
-    print("Loading tokenizer (T5 slow)...")
-    tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
+    print("Loading AdaptiveBPETokenizer...")
+    tokenizer = AdaptiveBPETokenizer(
+        vocab_size=15000,  # Ajustado para modelo nano (25M)
+        max_length=512,
+        min_frequency=2,
+        special_tokens=['<pad>', '<s>', '</s>', '<unk>', '<mask>'],
+        normalization='NFKC'
+    )
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "<pad>"})
     print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
@@ -2345,6 +2797,11 @@ balance_gpu_memory()
 if not os.environ.get('HRM_IMPORT_ONLY'):
     config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
     model = HRMText1(config).to(device)
+    
+    # Aplicar inicialización ultra-conservativa de pesos
+    print("🔧 Aplicando inicialización ultra-conservativa de pesos...")
+    conservative_weight_init(model)
+    print("✅ Inicialización de pesos completada")
 
 # Envolver modelo para multi-GPU (solo si no es import-only)
 if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
@@ -2451,7 +2908,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 1e-5   # LR reducido urgentemente para evitar explosión de gradientes   # LR reducido para estabilidad (sincronizado con MAX)
+    NEW_LEARNING_RATE = 3e-7   # LR ultra-conservativo sincronizado con LEARNING_RATE_MAX
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
@@ -2507,8 +2964,14 @@ def main_training():
     global best_val_loss, patience_counter, start_epoch, start_step, model, optimizer
     
     # Cargar tokenizer solo cuando se ejecuta entrenamiento
-    print("Loading tokenizer (T5 slow)...")
-    tokenizer = T5Tokenizer.from_pretrained(T5_TOKENIZER_REPO, use_fast=False, legacy=False)
+    print("Loading AdaptiveBPETokenizer...")
+    tokenizer = AdaptiveBPETokenizer(
+        vocab_size=15000,  # Ajustado para modelo nano (25M)
+        max_length=512,
+        min_frequency=2,
+        special_tokens=['<pad>', '<s>', '</s>', '<unk>', '<mask>'],
+        normalization='NFKC'
+    )
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "<pad>"})
     print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}")
@@ -2586,7 +3049,9 @@ def main_training():
                     # Gradient clipping y update
                     scaler.unscale_(optimizer)
                     # Gradient clipping más agresivo para prevenir explosión de gradientes
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+                    if grad_norm > 10000.0:
+                        print(f"⚠️ Gradientes EXTREMOS detectados: {grad_norm:.2f}")
                     if grad_norm > 10.0:
                         print(f"⚠️ Gradientes grandes detectados: {grad_norm:.2f}")
                     scaler.step(optimizer)
