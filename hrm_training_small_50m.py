@@ -881,15 +881,15 @@ CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automát
 BLOCK_SIZE = 1024        # Contexto expandido para mejor calidad de modelo (1024 tokens)
 
 # Configuración de entrenamiento para modelo 50M optimizada para A100/H100
-BATCH_SIZE = 2        # Batch balanceado para modelo 50M (~8GB uso estimado)
-GRAD_ACCUM_STEPS = 2     # Batch efectivo de 8192 para entrenamiento súper eficiente
+BATCH_SIZE = 1        # Batch balanceado para modelo 50M (~8GB uso estimado)
+GRAD_ACCUM_STEPS = 6     # Batch efectivo de 8192 para entrenamiento súper eficiente
 EVAL_STEPS = 500         # Evaluar más frecuentemente para modelo pequeño
 
 # Learning rate schedule optimizado para datasets grandes con decaimiento suave
-LEARNING_RATE_MAX = 1e-5  # Reducido urgentemente para evitar explosión de gradientes
-LEARNING_RATE_MIN = 1e-7  # Mínimo reducido proporcionalmente
-WEIGHT_DECAY = 0.1
-WARMUP_RATIO = 0.15       # 15% de warmup más largo para estabilidad inicial
+LEARNING_RATE_MAX = 1e-6  # Ultra reducido para máxima estabilidad
+LEARNING_RATE_MIN = 1e-9  # Mínimo ultra bajo para convergencia suave
+WEIGHT_DECAY = 0.05       # Weight decay reducido para menos agresividad
+WARMUP_RATIO = 0.25       # 25% de warmup muy gradual para estabilidad máxima
 
 # Optimizaciones
 MIXED_PRECISION = True
@@ -2384,6 +2384,24 @@ balance_gpu_memory()
 if not os.environ.get('HRM_IMPORT_ONLY'):
     config = HRMText1Config(vocab_size=len(tokenizer), block_size=BLOCK_SIZE, **MODEL_PARAMS)
     model = HRMText1(config).to(device)
+    
+    # Inicialización de pesos más conservativa para estabilidad
+    def init_weights_conservative(module):
+        """Inicialización conservativa para prevenir explosión de gradientes"""
+        if isinstance(module, nn.Linear):
+            # Xavier/Glorot initialization con escala reducida
+            nn.init.xavier_uniform_(module.weight, gain=0.5)  # Reducir ganancia
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            # Embedding con varianza reducida
+            nn.init.normal_(module.weight, mean=0.0, std=0.01)  # Reducir std de 0.02 a 0.01
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+    
+    model.apply(init_weights_conservative)
+    print("🎯 Inicialización conservativa de pesos aplicada para mayor estabilidad")
 
 # Envolver modelo para multi-GPU (solo si no es import-only)
 if not os.environ.get('HRM_IMPORT_ONLY') and is_distributed:
@@ -2490,7 +2508,7 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # --- CONFIGURACIÓN PARA MODIFICACIÓN DE LEARNING RATE ---
     # Configuración unificada para entrenamiento continuo
     # NEW_LEARNING_RATE se usa automáticamente cuando CONTINUE_TRAINING=True
-    NEW_LEARNING_RATE = 1e-5   # LR reducido urgentemente para evitar explosión de gradientes
+    NEW_LEARNING_RATE = 5e-7   # LR ultra reducido para estabilidad máxima
 
     # Checkpoint loading (variables ya inicializadas globalmente)
 
@@ -2623,8 +2641,8 @@ def main_training():
                 if (i + 1) % GRAD_ACCUM_STEPS == 0:
                     # Gradient clipping más agresivo para prevenir explosión de gradientes
                     scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-                    if grad_norm > 10.0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    if grad_norm > 5.0:
                         print(f"⚠️ Gradientes grandes detectados: {grad_norm:.2f}")
                     scaler.step(optimizer)
                     scaler.update()
