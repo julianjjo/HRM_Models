@@ -1347,8 +1347,8 @@ DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Models-Small-50M"
 SEED = 42
-NUM_EPOCHS = 12             # Épocas para entrenamiento 50M
-CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
+NUM_EPOCHS = 1600             # Épocas para entrenamiento 50M
+CONTINUE_TRAINING = True    # True: añade épocas extra y modifica LR automáticamente
 BLOCK_SIZE = 1024        # Contexto expandido para mejor calidad de modelo (1024 tokens)
 
 # Configuración de entrenamiento para modelo 50M optimizada para A100/H100
