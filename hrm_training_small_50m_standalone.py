@@ -1934,7 +1934,7 @@ DATASET_CONFIG = DATASET_INFO["config"]
 
 HF_REPO_ID = f"dreamwar/HRM-Models-Small-50M"
 SEED = 42
-NUM_EPOCHS = 12             # Épocas optimizadas para entrenamiento rápido 50M
+NUM_EPOCHS = 1200             # Épocas optimizadas para entrenamiento rápido 50M
 CONTINUE_TRAINING = False    # True: añade épocas extra y modifica LR automáticamente
 # Configuración optimizada para memoria y rendimiento (migrada desde Kaggle)
 BLOCK_SIZE = 768         # Revertido para compatibilidad con checkpoint existente
