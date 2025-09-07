@@ -211,7 +211,11 @@ class SimplePreTrainedModel(nn.Module):
         with torch.no_grad():
             for _ in range(max_new_tokens):
                 outputs = self.forward(input_ids)
-                logits = outputs.logits[:, -1, :] / temperature
+                # El forward devuelve tupla (loss, logits, past_key_values)
+                if isinstance(outputs, tuple):
+                    logits = outputs[1][:, -1, :] / temperature
+                else:
+                    logits = outputs.logits[:, -1, :] / temperature
                 
                 if do_sample:
                     probs = F.softmax(logits, dim=-1)
@@ -245,7 +249,11 @@ class SimpleGenerationMixin:
         with torch.no_grad():
             for _ in range(max_new_tokens):
                 outputs = self.forward(input_ids)
-                logits = outputs.logits[:, -1, :] / temperature
+                # El forward devuelve tupla (loss, logits, past_key_values)
+                if isinstance(outputs, tuple):
+                    logits = outputs[1][:, -1, :] / temperature
+                else:
+                    logits = outputs.logits[:, -1, :] / temperature
                 
                 if do_sample:
                     probs = F.softmax(logits, dim=-1)
@@ -1531,7 +1539,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.01   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 1.0   # 1% del dataset para modelo 10m - suficiente para entrenamiento
 
 # --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
 # Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
@@ -3082,6 +3090,30 @@ else:
 
 # Para dataset mezclado, los splits ya están configurados
 
+# 🔍 VERIFICACIÓN DEL DATASET ANTES DE TOKENIZACIÓN
+print("\n🔍 Verificando dataset después de aplicar offset y antes de tokenización...")
+try:
+    # Verificar que el train dataset tiene datos
+    train_sample = next(iter(raw_datasets["train"]))
+    print(f"✅ Dataset train tiene datos. Primera muestra keys: {list(train_sample.keys())}")
+    
+    # Contar algunas muestras para verificar tamaño
+    sample_count = 0
+    for sample in raw_datasets["train"].take(10):
+        sample_count += 1
+    print(f"   📊 Muestras verificadas: {sample_count}/10")
+    
+    if sample_count == 0:
+        print("❌ ERROR: El dataset train está vacío después del offset!")
+        print(f"   🎯 Configuración actual: subset {DATASET_SUBSET_PERCENT}%, offset {random_offset:,}")
+        print("   💡 Recomendación: reducir offset aleatorio o aumentar subset")
+    else:
+        print(f"✅ Dataset train parece tener datos suficientes")
+        
+except Exception as e:
+    print(f"❌ ERROR verificando dataset: {e}")
+print()
+
 def tokenize_function(examples):
     """Función de tokenización optimizada para C4 streaming masivo"""
     texts = []
@@ -3323,6 +3355,21 @@ if multiprocessing_context is not None:
     train_kwargs["multiprocessing_context"] = multiprocessing_context
 
 train_loader = DataLoader(tokenized_splits["train"], **train_kwargs)
+
+# 🔍 VERIFICACIÓN CRÍTICA DEL TRAIN_LOADER
+print("🔍 Verificando train_loader...")
+try:
+    sample_iter = iter(train_loader)
+    first_batch = next(sample_iter)
+    print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
+    print(f"   📊 Samples en el batch: {first_batch['input_ids'].shape[0]}")
+    print(f"   🔤 Longitud de secuencia: {first_batch['input_ids'].shape[1]}")
+except StopIteration:
+    print("❌ ERROR CRÍTICO: El train_loader está vacío!")
+    print("   🔍 Esto indica que el dataset no tiene datos después de aplicar offset/filtros")
+    print("   💡 Posibles causas: offset aleatorio demasiado grande, subset muy pequeño, o filtros muy restrictivos")
+except Exception as e:
+    print(f"❌ ERROR obteniendo muestra del train_loader: {e}")
 
 # Configurar argumentos del validation DataLoader condicionalmente
 val_kwargs = {
