@@ -1504,6 +1504,43 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 # Porcentaje del dataset completo a usar (1-100)
 DATASET_SUBSET_PERCENT = 100   # Usar más datos para modelo pequeño (más eficiente)
 
+# --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
+# Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
+USE_RANDOM_OFFSET = True  # Activar offset aleatorio
+MAX_OFFSET_PERCENT = 80   # Máximo offset como % del dataset (deja 20% al final sin usar)
+
+def adjust_dataset_config_for_memory(available_ram_gb):
+    """Ajusta configuración del dataset basada en RAM disponible"""
+    global DATASET_SUBSET_PERCENT
+    
+    print(f"🔧 Ajustando configuración de dataset para {available_ram_gb:.1f}GB RAM:")
+    
+    if available_ram_gb < 32:
+        # RAM baja para modelo 1b: usar subset pequeño
+        DATASET_SUBSET_PERCENT = min(DATASET_SUBSET_PERCENT, 0.25)  # 25% máximo
+        recommended_workers = 2
+        recommended_buffer = 16
+        print(f"   💾 RAM baja para 1b: subset reducido a {DATASET_SUBSET_PERCENT*100:.0f}%")
+    elif available_ram_gb < 64:
+        # RAM media para modelo 1b: subset moderado
+        DATASET_SUBSET_PERCENT = min(DATASET_SUBSET_PERCENT, 0.5)  # 50% máximo
+        recommended_workers = 3
+        recommended_buffer = 24
+        print(f"   💾 RAM media para 1b: subset limitado a {DATASET_SUBSET_PERCENT*100:.0f}%")
+    else:
+        # RAM alta: puede usar dataset completo
+        print(f"   💾 RAM suficiente para 1b: mantener subset {DATASET_SUBSET_PERCENT*100:.0f}%")
+        recommended_workers = 4
+        recommended_buffer = 32
+    
+    print(f"   💡 Recomendaciones: workers≤{recommended_workers}, buffer≤{recommended_buffer}")
+    
+    return {
+        'subset_percent': DATASET_SUBSET_PERCENT,
+        'recommended_workers': recommended_workers,
+        'recommended_buffer': recommended_buffer
+    }
+
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
 # Puedes crear tus propias combinaciones aquí o modificar las existentes
 CUSTOM_MIX_RATIOS = {
@@ -2552,6 +2589,48 @@ TOTAL_VAL_SAMPLES = DATASET_INFO["val_samples"]
 
 num_train_samples = int(TOTAL_TRAIN_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
 
+# --- CONFIGURACIÓN AVANZADA DE OFFSET ALEATORIO ---
+if USE_RANDOM_OFFSET:
+    # Usar timestamp para asegurar offset diferente en cada ejecución
+    random.seed(int(time.time()) % 1000000)
+    
+    # Lógica adaptativa basada en el tamaño del subset
+    if DATASET_SUBSET_PERCENT < 0.1:  # Subsets muy pequeños (< 0.1%)
+        # Limitar offset a máximo 1M muestras o 20x el tamaño del subset
+        max_offset_limit = min(1_000_000, num_train_samples * 20)
+        max_offset_samples = min(
+            int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0)),
+            max_offset_limit
+        )
+        offset_strategy = "ultra-conservative"
+    elif DATASET_SUBSET_PERCENT < 1.0:  # Subsets pequeños (0.1% - 1%)
+        # Limitar offset a máximo 10M muestras o 10x el tamaño del subset
+        max_offset_limit = min(10_000_000, num_train_samples * 10)
+        max_offset_samples = min(
+            int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0)),
+            max_offset_limit
+        )
+        offset_strategy = "conservative"
+    else:  # Subsets grandes (> 1%)
+        # Usar lógica original
+        max_offset_samples = min(
+            int(TOTAL_TRAIN_SAMPLES * (MAX_OFFSET_PERCENT / 100.0)),
+            TOTAL_TRAIN_SAMPLES - num_train_samples
+        )
+        offset_strategy = "standard"
+    
+    # Generar offset aleatorio con lógica específica para C4
+    if ACTIVE_DATASET.lower() in ['c4', 'c4_en'] and DATASET_SUBSET_PERCENT < 1.0:
+        # Para C4 con subsets pequeños, usar offset más randomizado
+        random_offset = random.randint(0, max_offset_samples)
+        print(f"🎲 C4 Dataset: Offset aleatorio generado: {random_offset:,} samples ({offset_strategy})")
+    else:
+        random_offset = random.randint(0, max_offset_samples)
+        print(f"🎲 Offset aleatorio generado: {random_offset:,} samples (estrategia: {offset_strategy})")
+else:
+    random_offset = 0
+    print("🚫 Offset aleatorio desactivado - usando inicio del dataset")
+
 # Manejar datasets que no tienen split de validación predefinido
 if TOTAL_VAL_SAMPLES is None:
     # Para datasets sin validación, usar el 1% del entrenamiento como validación
@@ -2559,6 +2638,15 @@ if TOTAL_VAL_SAMPLES is None:
     print(f"Dataset sin split de validación. Usando {num_val_samples:,} ejemplos como validación.")
 else:
     num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
+
+# Ajustar configuración de dataset basado en memoria disponible
+try:
+    import psutil
+    available_ram_gb = psutil.virtual_memory().total / 1e9
+    dataset_config = adjust_dataset_config_for_memory(available_ram_gb)
+except ImportError:
+    print("⚠️ psutil no disponible, usando configuración por defecto")
+    dataset_config = None
 
 print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) in streaming mode.")
 
@@ -2860,13 +2948,24 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
             has_validation = False
         
         if has_validation:
-            raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED)
+            # Aplicar offset aleatorio si está activado
+            if USE_RANDOM_OFFSET and random_offset > 0:
+                raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples).shuffle(seed=SEED)
+                print(f"📊 Aplicado offset de {random_offset:,} samples al dataset de entrenamiento")
+            else:
+                raw_datasets["train"] = raw_datasets["train"].take(num_train_samples).shuffle(seed=SEED)
             raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
         else:
             # Para datasets sin split de validación, dividir el entrenamiento
             print("Dividiendo dataset de entrenamiento para crear validación...")
             total_for_split = num_train_samples + num_val_samples
-            train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED)
+            
+            # Aplicar offset aleatorio si está activado
+            if USE_RANDOM_OFFSET and random_offset > 0:
+                train_dataset = raw_datasets["train"].skip(random_offset).take(total_for_split).shuffle(seed=SEED)
+                print(f"📊 Aplicado offset de {random_offset:,} samples antes de dividir dataset")
+            else:
+                train_dataset = raw_datasets["train"].take(total_for_split).shuffle(seed=SEED)
             
             # Crear splits manualmente
             raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
@@ -2878,13 +2977,28 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
         try:
             # Si raw_datasets es un dict, acceder al train
             if isinstance(raw_datasets, dict) and "train" in raw_datasets:
-                train_dataset = raw_datasets["train"].shuffle(seed=SEED)
+                # Aplicar offset aleatorio si está activado
+                if USE_RANDOM_OFFSET and random_offset > 0:
+                    base_dataset = raw_datasets["train"].skip(random_offset)
+                    print(f"📊 Fallback: Aplicado offset de {random_offset:,} samples")
+                else:
+                    base_dataset = raw_datasets["train"]
+                
+                train_dataset = base_dataset.shuffle(seed=SEED)
                 raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)  
                 raw_datasets["validation"] = train_dataset.take(num_val_samples)
             else:
                 # Si raw_datasets es directamente el SimpleIterableDataset
                 print("📊 Detectado SimpleIterableDataset directo, creando estructura dict...")
-                train_dataset = raw_datasets.shuffle(seed=SEED)
+                
+                # Aplicar offset aleatorio si está activado
+                if USE_RANDOM_OFFSET and random_offset > 0:
+                    base_dataset = raw_datasets.skip(random_offset)
+                    print(f"📊 SimpleDataset: Aplicado offset de {random_offset:,} samples")
+                else:
+                    base_dataset = raw_datasets
+                
+                train_dataset = base_dataset.shuffle(seed=SEED)
                 raw_datasets = {
                     "train": train_dataset.skip(num_val_samples).take(num_train_samples),
                     "validation": train_dataset.take(num_val_samples)
@@ -2893,7 +3007,14 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
             print(f"❌ Error crítico en fallback del dataset: {fallback_error}")
             print("🔄 Intentando configuración mínima...")
             # Última configuración de emergencia
-            train_dataset = raw_datasets.shuffle(seed=SEED) if hasattr(raw_datasets, 'shuffle') else raw_datasets
+            # Aplicar offset aleatorio si está activado
+            if USE_RANDOM_OFFSET and random_offset > 0:
+                base_dataset = raw_datasets.skip(random_offset) if hasattr(raw_datasets, 'skip') else raw_datasets
+                print(f"📊 Emergencia: Aplicado offset de {random_offset:,} samples")
+            else:
+                base_dataset = raw_datasets
+            
+            train_dataset = base_dataset.shuffle(seed=SEED) if hasattr(base_dataset, 'shuffle') else base_dataset
             raw_datasets = {
                 "train": train_dataset.take(num_train_samples),
                 "validation": train_dataset.take(num_val_samples) 

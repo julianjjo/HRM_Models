@@ -4061,7 +4061,7 @@ start_epoch = 0
 start_step = 0
 best_val_loss = float('inf')
 patience_counter = 0
-CHECKPOINT_STEPS = 1000
+CHECKPOINT_STEPS = 500  # Checkpoints balanceados para modelo small (50m)
 global_step = 0
 
 # Variables para tracking de velocidad y throughput
