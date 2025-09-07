@@ -1531,7 +1531,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.005   # Usar más datos para asegurar suficientes muestras
+DATASET_SUBSET_PERCENT = 0.01   # Usar más datos para modelo pequeño (más eficiente)
 
 # --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
 # Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
@@ -3056,13 +3056,29 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
                 "validation": train_dataset.take(num_val_samples) 
             }
 
-# Aplicar offset aleatorio si está configurado
-if USE_RANDOM_OFFSET and random_offset > 0:
-    print(f"🎲 Aplicando offset aleatorio de {random_offset:,} muestras al dataset...")
-    if "train" in raw_datasets:
-        raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples)
-    if "validation" in raw_datasets and raw_datasets["validation"] is not None:
+# Aplicar offset aleatorio - lógica mejorada basada en el tipo de dataset
+if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
+    # Para datasets únicos, aplicar la lógica original con offset al inicio
+    if "validation" in raw_datasets:
+        raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
         raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
+    else:
+        # Para datasets sin split de validación, dividir el entrenamiento
+        print("Dividiendo dataset de entrenamiento para crear validación...")
+        total_for_split = num_train_samples + num_val_samples
+        train_dataset = raw_datasets["train"].skip(random_offset).take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+        
+        # Crear splits manualmente
+        raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
+        raw_datasets["validation"] = train_dataset.take(num_val_samples)
+# Para dataset mezclado, aplicar offset aleatorio si está configurado
+else:
+    if USE_RANDOM_OFFSET and random_offset > 0:
+        print(f"🎲 Aplicando offset aleatorio de {random_offset:,} muestras al dataset mezclado...")
+        if "train" in raw_datasets:
+            raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples)
+        if "validation" in raw_datasets and raw_datasets["validation"] is not None:
+            raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
 
 # Para dataset mezclado, los splits ya están configurados
 
@@ -3329,63 +3345,8 @@ if multiprocessing_context is not None:
 
 val_loader = DataLoader(tokenized_splits["validation"], **val_kwargs)
 
-# Debug: Verificar que el dataset tiene datos
-print("🔍 Verificando que el dataset tiene datos...")
-try:
-    sample_iter = iter(train_loader)
-    first_batch = next(sample_iter)
-    print(f"✅ Primera muestra obtenida. Batch shape: {first_batch['input_ids'].shape}")
-    
-    # Imprimir los primeros 2 textos para verificar aleatoriedad
-    print("\n📝 Primeros 2 textos del dataset (verificación de aleatoriedad):")
-    try:
-        sample_iter = iter(train_loader)
-        for idx in range(2):
-            batch = next(sample_iter)
-            # Decodificar el primer texto del batch
-            if 'input_ids' in batch:
-                input_ids = batch['input_ids'][0]  # Primer elemento del batch
-                decoded_text = tokenizer.decode(input_ids, skip_special_tokens=True)
-                print(f"Texto {idx+1}: {decoded_text[:200]}...")  # Mostrar primeros 200 caracteres
-    except Exception as text_error:
-        print(f"⚠️ No se pudieron decodificar los textos: {text_error}")
-    
-except StopIteration:
-    print("❌ ERROR: El train_loader está vacío!")
-    print("🔄 Usando dataset embebido como fallback...")
-    
-    # Crear dataset de fallback usando el dataset embebido 
-    from torch.utils.data import TensorDataset
-    
-    # Generar datos sintéticos básicos para testing
-    vocab_size = len(tokenizer)
-    seq_len = min(BLOCK_SIZE, 32)  # Usar secuencias cortas para testing
-    num_samples = 1000  # Muestras sintéticas
-    
-    # Crear datos aleatorios pero válidos
-    input_ids = torch.randint(5, vocab_size, (num_samples, seq_len))  # Empezar desde 5 para evitar tokens especiales
-    attention_mask = torch.ones(num_samples, seq_len)
-    
-    fallback_dataset = TensorDataset(input_ids, attention_mask)
-    train_loader = DataLoader(fallback_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(TensorDataset(input_ids[:100], attention_mask[:100]), batch_size=BATCH_SIZE)
-    
-    print(f"✅ Dataset de fallback creado con {num_samples} muestras sintéticas")
-    
-except Exception as e:
-    print(f"❌ ERROR obteniendo muestra: {e}")
-    print("🔄 Creando dataset mínimo de emergencia...")
-    
-    # Dataset de emergencia ultra-básico
-    vocab_size = max(100, len(tokenizer)) if 'tokenizer' in locals() else 100
-    input_ids = torch.randint(5, vocab_size, (100, 16))
-    attention_mask = torch.ones(100, 16)
-    
-    emergency_dataset = TensorDataset(input_ids, attention_mask)
-    train_loader = DataLoader(emergency_dataset, batch_size=BATCH_SIZE)
-    val_loader = DataLoader(emergency_dataset, batch_size=BATCH_SIZE)
-    
-    print(f"✅ Dataset de emergencia creado")
+# Dataset verification removed - causes issues with streaming datasets
+print("✅ DataLoaders created successfully")
 
 
 # Sistema de buffer inteligente para C4 streaming
