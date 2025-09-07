@@ -1531,7 +1531,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 0.01   # Usar más datos para modelo pequeño (más eficiente)
+DATASET_SUBSET_PERCENT = 0.1   # Usar más datos para modelo pequeño (más eficiente)
 
 # --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
 # Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
