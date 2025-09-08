@@ -167,13 +167,19 @@ class SimpleIterableDataset:
         # For now, just return self as we're keeping it simple
         return self
 
-def load_dataset(name, config=None, streaming=True, split="train"):
+def load_dataset(name, config=None, streaming=True, split="train", dataset_info=None):
     """Load datasets from Hugging Face only - no synthetic fallbacks"""
     print(f"🔄 Loading dataset: {name}")
     
+    # Si se proporciona dataset_info, verificar configuración de streaming
+    if dataset_info and 'use_streaming' in dataset_info:
+        streaming = dataset_info['use_streaming']
+        stream_status = "streaming" if streaming else "no streaming"
+        print(f"📡 Configuración detectada: {stream_status}")
+    
     try:
         from datasets import load_dataset as hf_load_dataset
-        print(f"📡 Cargando dataset real: {name}")
+        print(f"📡 Cargando dataset real: {name} ({'streaming' if streaming else 'no streaming'})")
         real_dataset = hf_load_dataset(name, config, streaming=streaming, split=split)
         print(f"✅ Dataset cargado: {name}")
         return real_dataset
@@ -285,7 +291,7 @@ class AdaptiveBPETokenizer:
         self.vocab_size = vocab_size
         self.min_frequency = min_frequency
         
-        # Tokens especiales mejorados
+        # Tokens especiales mejorados con mejor manejo de espacios
         self.special_tokens = {
             '<pad>': 0,
             '<unk>': 1, 
@@ -296,9 +302,11 @@ class AdaptiveBPETokenizer:
             '<sep>': 6,
             '<newline>': 7,
             '<tab>': 8,
-            '<url>': 9,
-            '<email>': 10,
-            '<number>': 11
+            '<space>': 9,
+            '<spaces>': 10,
+            '<url>': 11,
+            '<email>': 12,
+            '<number>': 13
         }
         
         # Mapeos de vocabulario
@@ -323,6 +331,10 @@ class AdaptiveBPETokenizer:
         self.mask_token = '<mask>'
         self.cls_token = '<cls>'
         self.sep_token = '<sep>'
+        self.space_token = '<space>'      # Para 2 espacios
+        self.spaces_token = '<spaces>'    # Para 3+ espacios
+        self.newline_token = '<newline>'  # Para \n
+        self.tab_token = '<tab>'          # Para \t
         
         self.pad_token_id = self.special_tokens['<pad>']
         self.unk_token_id = self.special_tokens['<unk>']
@@ -331,39 +343,63 @@ class AdaptiveBPETokenizer:
         self.mask_token_id = self.special_tokens['<mask>']
         self.cls_token_id = self.special_tokens['<cls>']
         self.sep_token_id = self.special_tokens['<sep>']
+        self.newline_token_id = self.special_tokens['<newline>']
+        self.tab_token_id = self.special_tokens['<tab>']
+        self.space_token_id = self.special_tokens['<space>']
+        self.spaces_token_id = self.special_tokens['<spaces>']
+        self.url_token_id = self.special_tokens['<url>']
+        self.email_token_id = self.special_tokens['<email>']
+        self.number_token_id = self.special_tokens['<number>']
+        self.cls_token_id = self.special_tokens['<cls>']
+        self.sep_token_id = self.special_tokens['<sep>']
         
         # Cache y estadísticas
         self.encoding_cache = {}
         self.token_frequencies = Counter()
         self._built = False
         
-        # Regex mejorados para preprocessing
+        # Regex mejorados para preprocessing con mejor manejo de espacios
         self.patterns = {
             'url': re.compile(r'https?://\S+|www\.\S+', re.IGNORECASE),
             'email': re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
             'number': re.compile(r'\b\d+(?:\.\d+)?\b'),
-            'whitespace': re.compile(r'\s+'),
+            'multiple_spaces': re.compile(r'  +'),  # Para espacios múltiples
             'punctuation': re.compile(r'[^\w\s]')
         }
         
         print(f"🔧 Inicializado AdaptiveBPETokenizer con vocabulario de {vocab_size:,} tokens")
     
     def _normalize_text(self, text: str) -> str:
-        """Normalización avanzada de texto"""
+        """Normalización avanzada de texto con mejor preservación de espacios"""
+        if not text:
+            return ""
+            
         # Normalizar Unicode
         text = unicodedata.normalize('NFKC', text)
         
-        # Reemplazar patrones especiales
+        # Reemplazar patrones especiales ANTES de procesar espacios
         text = self.patterns['url'].sub('<url>', text)
-        text = self.patterns['email'].sub('<email>', text)
+        text = self.patterns['email'].sub('<email>', text) 
         text = self.patterns['number'].sub('<number>', text)
         
-        # Normalizar espacios en blanco
+        # MEJORADO: Procesar espacios de manera más granular
+        # 1. Preservar newlines y tabs específicamente
         text = text.replace('\n', '<newline>')
         text = text.replace('\t', '<tab>')
-        text = self.patterns['whitespace'].sub(' ', text)
         
-        return text.strip()
+        # 2. Manejar espacios múltiples de manera inteligente
+        # Reemplazar exactamente 2 espacios con <space> 
+        text = text.replace('  ', '<space>')
+        # Reemplazar 3+ espacios consecutivos con <spaces>
+        text = re.sub(r'   +', '<spaces>', text)  # 3 o más espacios -> <spaces>
+        # Un solo espacio permanece como ' '
+        
+        # 3. Preservar espacios al inicio y final si son significativos
+        # Solo hacer strip si el texto original no tenía espacios significativos
+        if not (text.startswith(' ') or text.endswith(' ')):
+            text = text.strip()
+        
+        return text
     
     def _get_byte_pairs(self, word: str) -> List[Tuple[str, str]]:
         """Obtener todos los pares de bytes consecutivos en una palabra"""
@@ -375,11 +411,30 @@ class AdaptiveBPETokenizer:
         return pairs
     
     def _get_word_tokens(self, text: str) -> List[str]:
-        """Tokenización inicial por palabras con manejo de caracteres especiales"""
-        # Pre-tokenizar manteniendo espacios y puntuación
-        tokens = re.findall(r'\w+|[^\w\s]|\s+', text)
-        # Filtrar tokens vacíos
-        return [token for token in tokens if token.strip()]
+        """Tokenización inicial por palabras con mejor preservación de espacios"""
+        if not text:
+            return []
+            
+        # Pre-tokenizar manteniendo espacios, puntuación y tokens especiales
+        # Primero separar tokens especiales
+        special_pattern = r'(<newline>|<tab>|<space>|<spaces>|<url>|<email>|<number>|<pad>|<unk>|<s>|</s>|<mask>|<cls>|<sep>)'
+        tokens = []
+        
+        # Dividir por tokens especiales
+        parts = re.split(special_pattern, text)
+        
+        for part in parts:
+            if not part:
+                continue
+            elif part in self.special_tokens:
+                # Es un token especial, mantenerlo como está
+                tokens.append(part)
+            else:
+                # Tokenizar parte normal manteniendo espacios simples
+                part_tokens = re.findall(r'\w+|[^\w\s]| ', part)
+                tokens.extend([t for t in part_tokens if t])  # Mantener espacios simples
+        
+        return tokens
     
     def _intelligent_word_filtering(self, word_freq: Counter) -> Dict[str, int]:
         """Filtrado inteligente con múltiples criterios de calidad"""
@@ -710,7 +765,7 @@ class AdaptiveBPETokenizer:
     def decode(self, token_ids: Union[List[int], torch.Tensor], 
                skip_special_tokens: bool = True, 
                clean_up_tokenization_spaces: bool = True) -> str:
-        """Decodificar tokens a texto"""
+        """Decodificar tokens a texto con mejor preservación de espacios"""
         if hasattr(token_ids, 'tolist'):  # Es un tensor
             if len(token_ids.shape) > 1:
                 token_ids = token_ids.squeeze()
@@ -720,19 +775,26 @@ class AdaptiveBPETokenizer:
         for token_id in token_ids:
             if token_id in self.inverse_vocab:
                 token = self.inverse_vocab[token_id]
-                if skip_special_tokens and token in self.special_tokens:
-                    continue
+                if skip_special_tokens and token in ['<pad>', '<s>', '</s>', '<unk>', '<mask>', '<cls>', '<sep>']:
+                    continue  # Solo saltar tokens de control, no tokens de espacios
                 tokens.append(token)
         
         # Reconstruir texto
         text = "".join(tokens)
         
         if clean_up_tokenization_spaces:
-            # Restaurar espacios normalizados
+            # MEJORADO: Restaurar espacios de manera más precisa
+            # 1. Restaurar tokens especiales de espaciado en orden correcto
             text = text.replace('<newline>', '\n')
             text = text.replace('<tab>', '\t')
-            text = re.sub(r'\s+', ' ', text)
-            text = text.strip()
+            text = text.replace('<spaces>', '   ')  # 3 espacios para <spaces>
+            text = text.replace('<space>', '  ')    # 2 espacios para <space>
+            # Los espacios simples ' ' ya están en el texto
+            
+            # 2. NO colapsar espacios múltiples después de restaurar
+            # Solo limpiar espacios extremos si no son significativos
+            if not (text.startswith(' ') or text.endswith(' ')):
+                text = text.strip()
         
         return text
     
@@ -1031,6 +1093,7 @@ class HRMText1Config(SimpleConfig):
                  n_layers=24,               # NUEVO: múltiples capas HRM
                  d_ff=6144,                 # 4 * n_embd
                  dropout=0.1,
+                 pad_token_id=0,            # AGREGADO: ID del token de padding
                  halt_max_steps=12,         # Más pasos para secuencias largas
                  ponder_loss_weight=1e-2,
                  halt_bias_init=-0.5,
@@ -1048,6 +1111,7 @@ class HRMText1Config(SimpleConfig):
         self.n_layers = n_layers
         self.d_ff = d_ff
         self.dropout = dropout
+        self.pad_token_id = pad_token_id  # AGREGADO: Almacenar pad_token_id en config
         self.halt_max_steps = halt_max_steps
         self.ponder_loss_weight = ponder_loss_weight
         self.halt_bias_init = halt_bias_init
@@ -1543,7 +1607,8 @@ DATASET_SUBSET_PERCENT = 5.0   # 5% del dataset para modelo 10m - suficiente par
 
 # --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
 # Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
-USE_RANDOM_OFFSET = True  # Activar offset aleatorio
+# Se configurará después de definir ACTIVE_DATASET
+USE_RANDOM_OFFSET = True  # Valor por defecto, se ajustará más adelante
 MAX_OFFSET_PERCENT = 80   # Máximo offset como % del dataset (deja 20% al final sin usar)
 
 # CONFIGURACIÓN PERSONALIZADA DE MEZCLAS
@@ -1580,7 +1645,7 @@ CUSTOM_MIX_RATIOS = {
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "c4-english"  # Dataset ultra-reducido para testing
+ACTIVE_DATASET = "light_novels"  # Dataset ultra-reducido para testing
 
 DATASETS_CONFIG = {
     "c4": {
@@ -1589,7 +1654,8 @@ DATASETS_CONFIG = {
         "train_samples": 364_868_892,
         "val_samples": 364_608,
         "repo_suffix": "C4",
-        "description": "Common Crawl multilingüe"
+        "description": "Common Crawl multilingüe",
+        "use_streaming": True  # Mantener streaming para datasets grandes
     },
     "openwebtext": {
         "name": "openwebtext",
@@ -1597,7 +1663,8 @@ DATASETS_CONFIG = {
         "train_samples": 8_013_769,
         "val_samples": None,  # Se usará split automático
         "repo_suffix": "OpenWebText",
-        "description": "Dataset de texto web en inglés"
+        "description": "Dataset de texto web en inglés",
+        "use_streaming": True  # Mantener streaming para datasets grandes
     },
     "pile": {
         "name": "EleutherAI/pile",
@@ -1605,7 +1672,8 @@ DATASETS_CONFIG = {
         "train_samples": 210_607_728,
         "val_samples": 214_670,
         "repo_suffix": "Pile",
-        "description": "Dataset diverso de EleutherAI"
+        "description": "Dataset diverso de EleutherAI",
+        "use_streaming": True  # Mantener streaming para datasets grandes
     },
     "spanish": {
         "name": "allenai/c4",
@@ -1672,15 +1740,18 @@ DATASETS_CONFIG = {
         "repo_suffix": "Checkpoint",
         "description": "Dataset local desde checkpoint_dataset/ (JSONL)",
         "type": "local",  # Identificador para datasets locales
-        "path": "./checkpoint_dataset"  # Ruta local a los archivos JSONL
+        "path": "./checkpoint_dataset",  # Ruta local a los archivos JSONL
+        "use_streaming": False  # Desactivar streaming para datasets locales
     },
     "light_novels": {
         "name": "alpindale/light-novels",
         "config": None,
-        "train_samples": None,  # Se detectará automáticamente
-        "val_samples": None,  # Se creará automáticamente del split train
+        "train_samples": 9240994,  # Valor real detectado: 9.2M ejemplos
+        "val_samples": 92410,  # 1% del train para validación
         "repo_suffix": "LightNovels",
-        "description": "Dataset de novelas ligeras japonesas en inglés"
+        "description": "Dataset de novelas ligeras japonesas en inglés",
+        "use_streaming": False,  # Desactivar streaming para mejor manejo
+        "quality_filter": True  # Activar filtro de calidad para ejemplos vacíos
     }}
 
 # Añadir las mezclas personalizadas a la configuración principal
@@ -1706,6 +1777,13 @@ print("=" * 40)
 DATASET_INFO = DATASETS_CONFIG[ACTIVE_DATASET]
 DATASET_NAME = DATASET_INFO["name"]
 DATASET_CONFIG = DATASET_INFO["config"]
+
+# Ajustar USE_RANDOM_OFFSET para datasets pequeños después de conocer ACTIVE_DATASET
+if ACTIVE_DATASET in ["light_novels", "checkpoint_dataset"]:
+    USE_RANDOM_OFFSET = False
+    print(f"🔧 Offset aleatorio desactivado para dataset pequeño: {ACTIVE_DATASET}")
+else:
+    print(f"🔧 Offset aleatorio activo para dataset: {ACTIVE_DATASET}")
 
 HF_REPO_ID = f"dreamwar/HRM-Models-Micro-10M"
 # Generar seed aleatorio basado en tiempo para garantizar aleatoriedad entre ejecuciones
@@ -2305,10 +2383,90 @@ def setup_distributed():
             print("📱 CPU training mode (sin GPU detectada)")
         return False, 0, 1, 0
 
+def evaluate_model_with_correct_spaces(model, val_dataloader, tokenizer, device, max_eval_batches=50):
+    """
+    Evalúa el modelo con manejo correcto de espacios y tokens especiales
+    """
+    model.eval()
+    total_loss = 0.0
+    total_batches = 0
+    
+    print(f"🔍 Evaluando modelo con {max_eval_batches} batches...")
+    
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(val_dataloader):
+            if batch_idx >= max_eval_batches:
+                break
+                
+            try:
+                input_ids = batch['input_ids'].to(device)
+                labels = input_ids.clone()
+                
+                # Forward pass
+                outputs = model(input_ids=input_ids, labels=labels)
+                loss = outputs.loss
+                
+                total_loss += loss.item()
+                total_batches += 1
+                
+                if batch_idx % 10 == 0:
+                    print(f"  📊 Batch {batch_idx}/{max_eval_batches}: loss = {loss.item():.4f}")
+                    
+            except Exception as e:
+                print(f"  ⚠️  Error en batch {batch_idx}: {e}")
+                continue
+    
+    if total_batches > 0:
+        avg_loss = total_loss / total_batches
+        perplexity = torch.exp(torch.tensor(avg_loss)).item()
+        print(f"📈 Evaluación completada:")
+        print(f"   📊 Pérdida promedio: {avg_loss:.4f}")
+        print(f"   🔢 Perplejidad: {perplexity:.2f}")
+        
+        # Test de generación con espacios
+        print(f"\n🧪 Probando generación con espacios:")
+        test_prompts = [
+            "El    gato    camina",  # Espacios múltiples
+            "Hola\nmundo",           # Salto de línea
+            "Una\tpausa\ttab"         # Tabs
+        ]
+        
+        model.eval()
+        for prompt in test_prompts:
+            try:
+                # Tokenizar manteniendo espacios
+                input_ids = tokenizer.encode(prompt, add_special_tokens=True, return_tensors='pt').to(device)
+                
+                # Generar
+                with torch.no_grad():
+                    generated = model.generate(
+                        input_ids, 
+                        max_new_tokens=20,
+                        do_sample=True,
+                        temperature=0.7,
+                        pad_token_id=tokenizer.pad_token_id
+                    )
+                
+                # Decodificar preservando espacios
+                generated_text = tokenizer.decode(generated[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
+                print(f"   Entrada: '{prompt}'")
+                print(f"   Salida:  '{generated_text}'")
+                print()
+                
+            except Exception as e:
+                print(f"   ⚠️  Error generando para '{prompt}': {e}")
+        
+        model.train()  # Volver a modo entrenamiento
+        return avg_loss
+    else:
+        print("❌ No se pudo evaluar ningún batch")
+        return float('inf')
+
 def save_complete_model_for_inference(model, tokenizer, output_dir):
     """
     Guarda el modelo completo en formato compatible con hrm_llm_inference.py
     Crea config.json, pytorch_model.bin y archivos del tokenizer
+    MEJORADO: Incluye información sobre manejo de espacios
     """
     try:
         # Obtener el modelo sin wrapper DDP/DataParallel
@@ -2410,13 +2568,18 @@ def save_checkpoint_distributed(model, optimizer, scheduler, scaler, epoch, glob
             # Datos adicionales para inferencia
             'model_config': model_to_save.config.to_dict() if hasattr(model_to_save.config, 'to_dict') else vars(model_to_save.config),
             'tokenizer_info': {
-                'tokenizer_class': 'SimpleTokenizer',
-                'pretrained_model_name': T5_TOKENIZER_REPO,
+                'tokenizer_class': 'AdaptiveBPETokenizer',
                 'vocab_size': model_to_save.config.vocab_size,
-                'pad_token_id': getattr(tokenizer, 'pad_token_id', None) if 'tokenizer' in globals() else None,
-                'eos_token_id': getattr(tokenizer, 'eos_token_id', None) if 'tokenizer' in globals() else None,
-                'bos_token_id': getattr(tokenizer, 'bos_token_id', None) if 'tokenizer' in globals() else None,
-                'unk_token_id': getattr(tokenizer, 'unk_token_id', None) if 'tokenizer' in globals() else None,
+                'pad_token_id': getattr(tokenizer, 'pad_token_id', None) if tokenizer else None,
+                'eos_token_id': getattr(tokenizer, 'eos_token_id', None) if tokenizer else None,
+                'bos_token_id': getattr(tokenizer, 'bos_token_id', None) if tokenizer else None,
+                'unk_token_id': getattr(tokenizer, 'unk_token_id', None) if tokenizer else None,
+                # MEJORADO: Información sobre tokens de espaciado
+                'space_token_id': getattr(tokenizer, 'space_token_id', None) if tokenizer else None,
+                'spaces_token_id': getattr(tokenizer, 'spaces_token_id', None) if tokenizer else None,
+                'newline_token_id': getattr(tokenizer, 'newline_token_id', None) if tokenizer else None,
+                'tab_token_id': getattr(tokenizer, 'tab_token_id', None) if tokenizer else None,
+                'special_tokens_handling': 'preserve_whitespace'
             },
             'generation_config': {
                 'max_length': model_to_save.config.block_size,
@@ -2623,9 +2786,9 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     # Crear dataset temporal para construir vocabulario
     print("🔧 Cargando muestras de texto para construir vocabulario...")
     if DATASET_CONFIG:
-        temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train")
+        temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train", dataset_info=DATASET_INFO)
     else:
-        temp_dataset = load_dataset(DATASET_NAME, streaming=True, split="train")
+        temp_dataset = load_dataset(DATASET_NAME, streaming=True, split="train", dataset_info=DATASET_INFO)
     
     # Recolectar textos para vocabulario (máximo 5000 muestras)
     vocab_texts = []
@@ -2706,6 +2869,18 @@ if TOTAL_VAL_SAMPLES is None:
     print(f"Dataset sin split de validación. Usando {num_val_samples:,} ejemplos como validación.")
 else:
     num_val_samples = int(TOTAL_VAL_SAMPLES * (DATASET_SUBSET_PERCENT / 100.0))
+
+# Función helper para shuffle que funciona tanto con streaming como no-streaming
+def safe_shuffle(dataset, seed=None, buffer_size=10000):
+    """Shuffle function que funciona tanto con datasets streaming como no-streaming"""
+    from datasets import IterableDataset
+    
+    if isinstance(dataset, IterableDataset):
+        # Para IterableDataset (streaming), usar buffer_size
+        return dataset.shuffle(seed=seed, buffer_size=buffer_size)
+    else:
+        # Para Dataset normal (no streaming), no usar buffer_size
+        return dataset.shuffle(seed=seed)
 
 print(f"Loading dataset '{DATASET_NAME}' ({DATASET_INFO['description']}) in streaming mode.")
 
@@ -2990,9 +3165,9 @@ else:
         else:
             # Carga normal para otros datasets
             if DATASET_CONFIG:
-                raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True)
+                raw_datasets = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, dataset_info=DATASET_INFO)
             else:
-                raw_datasets = load_dataset(DATASET_NAME, streaming=True)
+                raw_datasets = load_dataset(DATASET_NAME, streaming=True, dataset_info=DATASET_INFO)
     
     # Aplicar filtro de idioma si está especificado
     language_filter = DATASET_INFO.get("language_filter")
@@ -3079,13 +3254,13 @@ if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS a
 if ACTIVE_DATASET not in ["mixed"] and ACTIVE_DATASET not in CUSTOM_MIX_RATIOS and "mix_ratios" not in DATASET_INFO:
     # Para datasets únicos, aplicar la lógica original con offset al inicio
     if "validation" in raw_datasets:
-        raw_datasets["train"] = raw_datasets["train"].skip(random_offset).take(num_train_samples).shuffle(seed=SEED, buffer_size=10_000)
+        raw_datasets["train"] = safe_shuffle(raw_datasets["train"].skip(random_offset).take(num_train_samples), seed=SEED, buffer_size=10_000)
         raw_datasets["validation"] = raw_datasets["validation"].take(num_val_samples)
     else:
         # Para datasets sin split de validación, dividir el entrenamiento
         print("Dividiendo dataset de entrenamiento para crear validación...")
         total_for_split = num_train_samples + num_val_samples
-        train_dataset = raw_datasets["train"].skip(random_offset).take(total_for_split).shuffle(seed=SEED, buffer_size=10_000)
+        train_dataset = safe_shuffle(raw_datasets["train"].skip(random_offset).take(total_for_split), seed=SEED, buffer_size=10_000)
         
         # Crear splits manualmente
         raw_datasets["train"] = train_dataset.skip(num_val_samples).take(num_train_samples)
@@ -3127,27 +3302,23 @@ print()
 
 def tokenize_function(examples):
     """Función de tokenización optimizada para C4 streaming masivo"""
+    global text_field_found  # Usar la variable global detectada
     texts = []
     
-    # Manejar diferentes campos de texto según el dataset
-    if "text" in examples:
-        # Formato estándar (C4, OpenWebText, Pile)
-        text_field = examples["text"]
-    elif "content" in examples:
-        # Algunos datasets usan 'content'
-        text_field = examples["content"]
-    elif "document" in examples:
-        # Algunos datasets usan 'document'
-        text_field = examples["document"]
+    # Usar el campo de texto detectado globalmente
+    if text_field_found in examples:
+        text_field = examples[text_field_found]
     else:
-        # Intentar encontrar el primer campo que parezca texto
+        # Fallback: buscar automáticamente
+        text_field = None
         for key in examples.keys():
             if isinstance(examples[key][0], str) and len(examples[key][0]) > 50:
                 text_field = examples[key]
-                print(f"Usando campo '{key}' como texto")
+                print(f"⚠️ Fallback: usando campo '{key}' como texto")
                 break
-        else:
-            raise ValueError(f"No se encontró campo de texto válido en el dataset. Campos disponibles: {list(examples.keys())}")
+        
+        if text_field is None:
+            raise ValueError(f"❌ No se encontró campo de texto válido. Campos disponibles: {list(examples.keys())}")
     
     # Optimización para C4: procesar textos con filtro eficiente
     for text in text_field:
@@ -3183,8 +3354,106 @@ print(f"   🔄 Tokenization workers: {tokenization_workers} (basado en CPU core
 def is_iterable_dataset(dataset):
     return isinstance(dataset, IterableDataset)
 
-# Usar configuración estándar de columnas como en el modelo 50M
-columns_to_remove = ["text"]  # Columna típica de datasets de texto
+# Detectar automáticamente las columnas del dataset antes de tokenizar
+columns_to_remove = []
+text_field_found = None
+
+# Intentar obtener una muestra del dataset para detectar columnas disponibles
+try:
+    sample_iter = iter(raw_datasets["train"])
+    sample_data = None
+    samples_checked = 0
+    max_samples_to_check = 50  # Verificar hasta 50 muestras para encontrar texto válido
+    
+    # Buscar una muestra con texto válido
+    while sample_data is None and samples_checked < max_samples_to_check:
+        try:
+            candidate_sample = next(sample_iter)
+            samples_checked += 1
+            
+            # Verificar si algún campo tiene texto válido (no vacío y mayor a 10 caracteres)
+            has_valid_text = False
+            for field_name, field_value in candidate_sample.items():
+                if isinstance(field_value, str) and len(field_value.strip()) > 10:
+                    has_valid_text = True
+                    break
+            
+            if has_valid_text:
+                sample_data = candidate_sample
+                if samples_checked > 1:
+                    print(f"✅ Encontrado texto válido después de revisar {samples_checked} muestras")
+                break
+                
+        except StopIteration:
+            break
+    
+    if sample_data is None:
+        raise ValueError(f"No se encontró texto válido después de revisar {samples_checked} muestras")
+    
+    available_columns = list(sample_data.keys())
+    print(f"📊 Columnas disponibles en el dataset: {available_columns}")
+
+    # Detectar el campo de texto principal (actualizada lista con 'story')
+    for field in ['text', 'content', 'document', 'story', 'body', 'paragraph']:
+        if field in available_columns:
+            # Verificar que el campo realmente contenga texto válido
+            if isinstance(sample_data[field], str) and len(sample_data[field].strip()) > 10:
+                text_field_found = field
+                break
+
+    if text_field_found is None:
+        # Buscar cualquier campo que contenga texto largo
+        for field in available_columns:
+            if isinstance(sample_data[field], str) and len(sample_data[field].strip()) > 50:
+                text_field_found = field
+                print(f"⚠️ Usando '{field}' como campo de texto (detectado automáticamente)")
+                break
+
+    if text_field_found is None:
+        raise ValueError(f"❌ No se encontró campo de texto válido. Campos disponibles: {available_columns}")
+    else:
+        print(f"✅ Campo de texto detectado: '{text_field_found}'")
+        # Preview del contenido encontrado
+        preview = sample_data[text_field_found][:150] + "..." if len(sample_data[text_field_found]) > 150 else sample_data[text_field_found]
+        print(f"   Preview: '{preview}'")
+        # Solo remover el campo de texto después de la tokenización
+        columns_to_remove = [text_field_found]
+
+except StopIteration:
+    print("⚠️ Dataset vacío después de revisar todas las muestras disponibles")
+    text_field_found = 'text'  # Valor por defecto
+    columns_to_remove = ['text']
+except Exception as e:
+    print(f"⚠️ Error detectando columnas del dataset: {e}")
+    print("Usando configuración por defecto...")
+    text_field_found = 'text'  # Valor por defecto
+    columns_to_remove = ['text']
+
+# Aplicar filtro de calidad si está configurado para el dataset
+def quality_filter_function(example):
+    """Filtro de calidad para eliminar ejemplos vacíos o muy cortos"""
+    global text_field_found
+    if text_field_found in example:
+        text = example[text_field_found]
+        if isinstance(text, str):
+            text_clean = text.strip()
+            # Filtrar textos muy cortos, vacíos o que solo contengan espacios
+            return len(text_clean) >= 20 and len(text_clean.split()) >= 3
+    return False
+
+# Aplicar filtro de calidad si está configurado
+if DATASET_INFO.get('quality_filter', False):
+    print(f"🔧 Aplicando filtro de calidad al dataset {ACTIVE_DATASET}...")
+    
+    # Aplicar filtro a ambos splits si existen
+    filtered_splits = {}
+    for split_key in ["train", "validation"]:
+        if split_key in raw_datasets:
+            print(f"   Filtrando split '{split_key}'...")
+            filtered_splits[split_key] = raw_datasets[split_key].filter(quality_filter_function)
+    
+    raw_datasets = filtered_splits
+    print(f"✅ Filtro de calidad aplicado")
 
 for split_name in ["train", "validation"]:
     # Optimización para C4 streaming: batch size más grande y configuración eficiente
@@ -3622,9 +3891,9 @@ def main_training():
     # Crear dataset temporal para construir vocabulario
     print("🔧 Cargando muestras de texto para construir vocabulario...")
     if DATASET_CONFIG:
-        temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train")
+        temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train", dataset_info=DATASET_INFO)
     else:
-        temp_dataset = load_dataset(DATASET_NAME, streaming=True, split="train")
+        temp_dataset = load_dataset(DATASET_NAME, streaming=True, split="train", dataset_info=DATASET_INFO)
     
     # Recolectar textos para vocabulario (máximo 5000 muestras)
     vocab_texts = []
