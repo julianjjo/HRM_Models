@@ -1539,7 +1539,7 @@ class HRMText1(SimplePreTrainedModel, SimpleGenerationMixin):
 
 # --- CONFIGURACIÓN DE PORCENTAJES DE DATASETS ---
 # Porcentaje del dataset completo a usar (1-100)
-DATASET_SUBSET_PERCENT = 1.0   # 1% del dataset para modelo 10m - suficiente para entrenamiento
+DATASET_SUBSET_PERCENT = 50.0   # 50% del dataset para modelo 10m - suficiente para entrenamiento
 
 # --- CONFIGURACIÓN DE OFFSET ALEATORIO PARA DATASETS ---
 # Usar offset aleatorio para evitar entrenar siempre con la misma parte del dataset
@@ -1580,7 +1580,7 @@ CUSTOM_MIX_RATIOS = {
 
 # --- CONFIGURACIÓN DE DATASETS MÚLTIPLES ---
 # Selecciona el dataset a usar cambiando ACTIVE_DATASET
-ACTIVE_DATASET = "c4-english"  # Dataset ultra-reducido para testing
+ACTIVE_DATASET = "light_novels"  # Dataset ultra-reducido para testing
 
 DATASETS_CONFIG = {
     "c4": {
@@ -1673,6 +1673,14 @@ DATASETS_CONFIG = {
         "description": "Dataset local desde checkpoint_dataset/ (JSONL)",
         "type": "local",  # Identificador para datasets locales
         "path": "./checkpoint_dataset"  # Ruta local a los archivos JSONL
+    },
+    "light_novels": {
+        "name": "alpindale/light-novels",
+        "config": None,
+        "train_samples": None,  # Se detectará automáticamente
+        "val_samples": None,  # Se creará automáticamente del split train
+        "repo_suffix": "LightNovels",
+        "description": "Dataset de novelas ligeras japonesas en inglés"
     }}
 
 # Añadir las mezclas personalizadas a la configuración principal
@@ -2614,7 +2622,10 @@ if not os.environ.get('HRM_IMPORT_ONLY'):
     
     # Crear dataset temporal para construir vocabulario
     print("🔧 Cargando muestras de texto para construir vocabulario...")
-    temp_dataset = load_dataset("allenai/c4", "en", streaming=True, split="train")
+    if DATASET_CONFIG:
+        temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train")
+    else:
+        temp_dataset = load_dataset(DATASET_NAME, streaming=True, split="train")
     
     # Recolectar textos para vocabulario (máximo 5000 muestras)
     vocab_texts = []
@@ -3610,7 +3621,10 @@ def main_training():
     
     # Crear dataset temporal para construir vocabulario
     print("🔧 Cargando muestras de texto para construir vocabulario...")
-    temp_dataset = load_dataset("allenai/c4", "en", streaming=True, split="train")
+    if DATASET_CONFIG:
+        temp_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, streaming=True, split="train")
+    else:
+        temp_dataset = load_dataset(DATASET_NAME, streaming=True, split="train")
     
     # Recolectar textos para vocabulario (máximo 5000 muestras)
     vocab_texts = []
