@@ -402,65 +402,211 @@ except ImportError:
 # --- Dataset Handling ---
 # ==============================================================================
 
-class TextDataset(IterableDataset):
-    """Dataset para texto usando tokenizador HF"""
+class OptimizedTextDataset(IterableDataset):
+    """Dataset optimizado para texto usando tokenizador HF con GPU y paralelización"""
     
-    def __init__(self, tokenizer, texts: List[str], block_size: int = 128, split_type: str = "train"):
+    def __init__(self, tokenizer, texts: List[str], block_size: int = 128, split_type: str = "train", 
+                 device=None, batch_tokenize: bool = True, num_proc: int = None, max_length: int = 1024,
+                 min_text_length: int = 10, cache_tokens: bool = False):
         self.tokenizer = tokenizer
         self.texts = texts
         self.block_size = block_size
         self.split_type = split_type
+        self.device = device if device is not None else (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+        self.batch_tokenize = batch_tokenize
+        self.num_proc = num_proc if num_proc is not None else min(4, mp.cpu_count())
+        self.max_length = max_length
+        self.min_text_length = min_text_length
+        self.cache_tokens = cache_tokens
+        
+        # Pre-procesar y tokenizar si está habilitado el cache
+        if self.cache_tokens:
+            print(f"🔄 Pre-tokenizando {len(texts)} textos para cache...")
+            self.tokenized_chunks = self._preprocess_and_tokenize()
+        else:
+            self.tokenized_chunks = None
         
         print(f"📚 Dataset {split_type}: {len(texts)} textos, block_size={block_size}")
+        print(f"   🚀 GPU tokenization: {self.device.type == 'cuda'}")
+        print(f"   ⚡ Batch tokenization: {batch_tokenize}")
+        print(f"   🔧 Num processes: {self.num_proc}")
+        print(f"   💾 Cache tokens: {cache_tokens}")
+    
+    def _preprocess_and_tokenize(self):
+        """Pre-procesar y tokenizar todos los textos en paralelo"""
+        # Filtrar textos válidos
+        valid_texts = [text.strip()[:self.max_length] for text in self.texts 
+                      if text and len(text.strip()) >= self.min_text_length]
+        
+        if not valid_texts:
+            return []
+        
+        all_chunks = []
+        
+        if self.batch_tokenize and len(valid_texts) > 1:
+            # Tokenización en batch para mejor rendimiento
+            try:
+                print(f"   🔄 Tokenizando en batches de 32...")
+                batch_size = 32
+                
+                for i in range(0, len(valid_texts), batch_size):
+                    batch_texts = valid_texts[i:i + batch_size]
+                    
+                    # Tokenizar batch completo
+                    batch_tokens = self.tokenizer(
+                        batch_texts,
+                        add_special_tokens=True,
+                        max_length=self.max_length,
+                        truncation=True,
+                        padding=False,
+                        return_tensors=None
+                    )
+                    
+                    # Procesar cada secuencia tokenizada
+                    for tokens in batch_tokens['input_ids']:
+                        chunks = self._create_chunks(tokens)
+                        all_chunks.extend(chunks)
+                        
+            except Exception as e:
+                print(f"⚠️ Error en batch tokenization, usando secuencial: {e}")
+                # Fallback a tokenización secuencial
+                for text in valid_texts:
+                    try:
+                        tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                                                     max_length=self.max_length, truncation=True)
+                        chunks = self._create_chunks(tokens)
+                        all_chunks.extend(chunks)
+                    except:
+                        continue
+        else:
+            # Tokenización secuencial tradicional
+            for text in valid_texts:
+                try:
+                    tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                                                 max_length=self.max_length, truncation=True)
+                    chunks = self._create_chunks(tokens)
+                    all_chunks.extend(chunks)
+                except:
+                    continue
+        
+        print(f"   ✅ Generados {len(all_chunks)} chunks tokenizados")
+        return all_chunks
+    
+    def _create_chunks(self, tokens):
+        """Crear chunks de tokens del tamaño especificado"""
+        chunks = []
+        for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
+            chunk = tokens[i:i + self.block_size]
+            if len(chunk) == self.block_size:
+                chunks.append({
+                    'input_ids': torch.tensor(chunk[:-1], dtype=torch.long),
+                    'labels': torch.tensor(chunk[1:], dtype=torch.long)
+                })
+        return chunks
     
     def __iter__(self):
-        for text in self.texts:
-            if not text or len(text.strip()) < 10:
-                continue
-            
-            try:
-                # Tokenizar con HF - limitar longitud máxima para evitar errores
-                tokens = self.tokenizer.encode(text, add_special_tokens=True, max_length=1024, truncation=True)
+        if self.tokenized_chunks is not None:
+            # Usar chunks pre-tokenizados
+            for chunk in self.tokenized_chunks:
+                yield chunk
+        else:
+            # Tokenización on-the-fly
+            for text in self.texts:
+                if not text or len(text.strip()) < self.min_text_length:
+                    continue
                 
-                # Dividir en chunks del tamaño del bloque
-                for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
-                    chunk = tokens[i:i + self.block_size]
-                    if len(chunk) == self.block_size:
-                        input_ids = torch.tensor(chunk[:-1], dtype=torch.long)
-                        labels = torch.tensor(chunk[1:], dtype=torch.long)
-                        yield {
-                            'input_ids': input_ids,
-                            'labels': labels
-                        }
-            except Exception as e:
-                print(f"⚠️ Error tokenizando texto: {e}")
-                continue
+                try:
+                    # Tokenizar con HF
+                    tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                                                 max_length=self.max_length, truncation=True)
+                    
+                    # Crear chunks
+                    for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
+                        chunk = tokens[i:i + self.block_size]
+                        if len(chunk) == self.block_size:
+                            input_ids = torch.tensor(chunk[:-1], dtype=torch.long)
+                            labels = torch.tensor(chunk[1:], dtype=torch.long)
+                            yield {
+                                'input_ids': input_ids,
+                                'labels': labels
+                            }
+                except Exception as e:
+                    print(f"⚠️ Error tokenizando texto: {e}")
+                    continue
 
-def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000):
-    """Cargar dataset usando datasets de HuggingFace"""
+# Mantener compatibilidad hacia atrás
+TextDataset = OptimizedTextDataset
+
+def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000, 
+                   dataset_name: str = "allenai/c4", dataset_config: str = "en",
+                   text_column: str = "text", min_text_length: int = 50, 
+                   max_text_length: int = 2000, num_proc: int = None,
+                   use_streaming: bool = True):
+    """Cargar dataset usando datasets de HuggingFace de forma parametrizable"""
     try:
         from datasets import load_dataset
         
-        print(f"📥 Cargando dataset '{split}' con {num_samples} samples...")
+        print(f"📥 Cargando dataset '{dataset_name}' ({dataset_config}) split '{split}' con {num_samples} samples...")
+        print(f"   📋 Configuración:")
+        print(f"   - Dataset: {dataset_name}")
+        print(f"   - Config: {dataset_config}")  
+        print(f"   - Columna texto: {text_column}")
+        print(f"   - Min length: {min_text_length} chars")
+        print(f"   - Max length: {max_text_length} chars")
+        print(f"   - Streaming: {use_streaming}")
         
-        # Usar C4 en inglés como dataset principal
-        dataset = load_dataset("allenai/c4", "en", split=split, streaming=True)
+        # Cargar dataset
+        if use_streaming:
+            dataset = load_dataset(dataset_name, dataset_config, split=split, streaming=True)
+        else:
+            dataset = load_dataset(dataset_name, dataset_config, split=split)
+            if num_samples < len(dataset):
+                dataset = dataset.select(range(num_samples))
         
         texts = []
-        for i, item in enumerate(dataset):
-            if i >= num_samples:
-                break
-            text = item.get('text', '')
-            if len(text.strip()) > 50:  # Filtrar textos muy cortos
-                # Limitar longitud del texto para evitar secuencias muy largas
-                text = text.strip()[:2000]  # Máximo 2000 caracteres
-                texts.append(text)
+        processed_count = 0
         
-        print(f"✅ Cargados {len(texts)} textos válidos")
+        if TQDM_AVAILABLE:
+            progress_desc = f"Procesando {dataset_name}"
+            progress = tqdm(enumerate(dataset), desc=progress_desc, total=num_samples if use_streaming else len(dataset))
+        else:
+            progress = enumerate(dataset)
+        
+        for i, item in progress:
+            if use_streaming and i >= num_samples:
+                break
+            
+            text = item.get(text_column, '')
+            if isinstance(text, list):
+                text = ' '.join(text)  # Para datasets con texto en listas
+            
+            if text and len(text.strip()) >= min_text_length:
+                # Procesar y limpiar texto
+                text = text.strip()[:max_text_length]
+                texts.append(text)
+                processed_count += 1
+                
+                if TQDM_AVAILABLE and isinstance(progress, tqdm):
+                    progress.set_postfix({
+                        'válidos': processed_count,
+                        'ratio': f'{processed_count/(i+1)*100:.1f}%'
+                    })
+        
+        if TQDM_AVAILABLE and isinstance(progress, tqdm):
+            progress.close()
+        
+        print(f"✅ Procesados {processed_count} textos válidos de {i+1} samples totales")
+        print(f"   📊 Ratio de aprovechamiento: {processed_count/(i+1)*100:.1f}%")
+        
+        if not texts:
+            print("⚠️ No se encontraron textos válidos, usando dataset sintético")
+            return create_synthetic_dataset(num_samples)
+            
         return texts
         
     except Exception as e:
         print(f"⚠️ Error cargando dataset HF: {e}")
+        print(f"   Intentando dataset sintético como fallback...")
         return create_synthetic_dataset(num_samples)
 
 def create_synthetic_dataset(num_samples: int = 1000):
@@ -542,6 +688,14 @@ def train_hrm_hf(
     eval_steps: int = 200,
     max_grad_norm: float = 1.0,
     warmup_steps: int = 100,
+    # Parámetros de tokenización optimizada
+    dataset_name: str = "allenai/c4",
+    dataset_config: str = "en",
+    batch_tokenize: bool = True,
+    cache_tokens: bool = False,
+    max_text_length: int = 2000,
+    min_text_length: int = 50,
+    num_workers: int = 0,
 ):
     """Entrenar modelo HRM con tokenizador HuggingFace"""
     
@@ -619,28 +773,68 @@ def train_hrm_hf(
     else:
         scaler = None
     
-    # Cargar datasets
+    # Cargar datasets con parámetros optimizados
     print("📚 Cargando datasets...")
-    train_texts = load_dataset_hf(tokenizer, "train", num_train_samples)
-    val_texts = load_dataset_hf(tokenizer, "validation", num_val_samples)
+    train_texts = load_dataset_hf(
+        tokenizer, "train", num_train_samples,
+        dataset_name=dataset_name, dataset_config=dataset_config,
+        min_text_length=min_text_length, max_text_length=max_text_length
+    )
+    val_texts = load_dataset_hf(
+        tokenizer, "validation", num_val_samples,
+        dataset_name=dataset_name, dataset_config=dataset_config,
+        min_text_length=min_text_length, max_text_length=max_text_length
+    )
     
-    train_dataset = TextDataset(tokenizer, train_texts, config.block_size, "train")
-    val_dataset = TextDataset(tokenizer, val_texts, config.block_size, "validation")
+    train_dataset = OptimizedTextDataset(
+        tokenizer, train_texts, config.block_size, "train",
+        device=device, batch_tokenize=batch_tokenize, cache_tokens=cache_tokens,
+        max_length=max_text_length, min_text_length=min_text_length
+    )
+    val_dataset = OptimizedTextDataset(
+        tokenizer, val_texts, config.block_size, "validation", 
+        device=device, batch_tokenize=batch_tokenize, cache_tokens=False,  # No cache para validación
+        max_length=max_text_length, min_text_length=min_text_length
+    )
     
-    # Crear dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    # Crear dataloaders con múltiples workers para mejor rendimiento
+    print(f"🔧 Configurando dataloaders con {num_workers} workers...")
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == 'cuda',  # Pin memory para GPU
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        num_workers=min(2, num_workers),  # Menos workers para validación
+        pin_memory=device.type == 'cuda',
+        persistent_workers=min(2, num_workers) > 0,
+        prefetch_factor=2 if num_workers > 0 else None
+    )
     
     # Crear optimizador
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     
-    # Scheduler con warmup
-    total_steps = len(train_texts) // batch_size * num_epochs
+    # Calcular steps totales más precisos basado en chunks reales
+    # Para datasets con tokenización, el número real de batches puede ser mayor
+    estimated_batches_per_epoch = max(len(train_texts) // batch_size, 1)
+    total_steps = estimated_batches_per_epoch * num_epochs
+    
+    # Asegurar que pct_start esté entre 0 y 1 y que warmup steps sean razonables
+    effective_warmup_steps = min(warmup_steps, total_steps // 2)
+    pct_start = min(0.3, effective_warmup_steps / max(total_steps, effective_warmup_steps))
+    
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=learning_rate,
         total_steps=total_steps,
-        pct_start=warmup_steps/total_steps
+        pct_start=pct_start
     )
     
     print(f"🎯 Entrenamiento configurado:")
@@ -691,7 +885,7 @@ def train_hrm_hf(
             
             # Forward pass con mixed precision si está disponible
             if use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                     loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
             else:
@@ -832,7 +1026,7 @@ def train_hrm_hf(
     print(f"   Modelo final: {final_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Entrenar HRM con tokenizador HuggingFace")
+    parser = argparse.ArgumentParser(description="Entrenar HRM Micro 10M con tokenizador HuggingFace optimizado")
     parser.add_argument("--tokenizer", type=str, default="openai-community/gpt2",
                        help="Nombre del tokenizador HF")
     parser.add_argument("--output_dir", type=str, default="./hrm-micro-10m-hf",
@@ -851,6 +1045,24 @@ def main():
                        help="Frecuencia de guardado")
     parser.add_argument("--eval_steps", type=int, default=200,
                        help="Frecuencia de evaluación")
+    
+    # Parámetros de tokenización optimizada
+    parser.add_argument("--dataset_name", type=str, default="allenai/c4",
+                       help="Nombre del dataset HF (ej: allenai/c4, wikitext)")
+    parser.add_argument("--dataset_config", type=str, default="en",
+                       help="Configuración del dataset (ej: en, es)")
+    parser.add_argument("--batch_tokenize", action="store_true", default=True,
+                       help="Usar tokenización en batch para mejor rendimiento")
+    parser.add_argument("--no_batch_tokenize", action="store_false", dest="batch_tokenize",
+                       help="Desactivar tokenización en batch")
+    parser.add_argument("--cache_tokens", action="store_true", default=False,
+                       help="Pre-tokenizar y cachear todos los tokens en memoria")
+    parser.add_argument("--max_text_length", type=int, default=2000,
+                       help="Longitud máxima de texto en caracteres")
+    parser.add_argument("--min_text_length", type=int, default=50,
+                       help="Longitud mínima de texto en caracteres")
+    parser.add_argument("--num_workers", type=int, default=2,
+                       help="Número de workers para DataLoader")
     
     if len(os.sys.argv) == 1:
         print("🚀 HRM Training con Tokenizador HuggingFace")
@@ -884,6 +1096,14 @@ def main():
         num_epochs=args.epochs,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
+        # Parámetros de tokenización optimizada
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        batch_tokenize=args.batch_tokenize,
+        cache_tokens=args.cache_tokens,
+        max_text_length=args.max_text_length,
+        min_text_length=args.min_text_length,
+        num_workers=args.num_workers,
     )
 
 if __name__ == "__main__":
