@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Models Training Script con Tokenizador HuggingFace - MODELO MICRO ~10M PARÁMETROS  
+HRM-Models Training Script con Tokenizador HuggingFace - MODELO SMALL ~50M PARÁMETROS  
 VERSIÓN MEJORADA: Usando tokenizadores profesionales de HuggingFace
 
 🖥️  CARACTERÍSTICAS:
 - Tokenizador HuggingFace (GPT2, GPT2-Spanish, etc.)
 - Vocabulario profesional (50K+ tokens)
 - Mejor soporte multilingüe (español/inglés)
-- Arquitectura HRM optimizada
+- Arquitectura HRM optimizada para 50M parámetros
+- GPU RTX 5090 optimizado con Mixed Precision
 - Sin dependencias de transformers para el modelo (solo tokenizer)
 """
 
@@ -62,21 +63,21 @@ class HRMText1Config(SimpleConfig):
     
     def __init__(self, 
                  vocab_size=50257,          # HF tokenizer default
-                 block_size=128,            # Micro model context
-                 n_embd=256,                # Micro model embeddings
-                 n_head=8,                  # Micro model heads
-                 n_layers=6,                # Micro model layers
-                 d_ff=1024,                 # Micro model FFN
+                 block_size=512,            # Small model context (4x más que micro)
+                 n_embd=768,                # Small model embeddings (3x más)
+                 n_head=12,                 # Small model heads (1.5x más)
+                 n_layers=12,               # Small model layers (2x más)
+                 d_ff=3072,                 # Small model FFN (4 * n_embd)
                  dropout=0.1,
                  pad_token_id=0,            
-                 halt_max_steps=4,          # HRM halt steps
+                 halt_max_steps=6,          # Más pasos HRM para modelo mayor
                  ponder_loss_weight=1e-2,
                  halt_bias_init=-0.5,
                  use_rotary_embeddings=True,
                  rotary_embedding_base=10000,
                  use_flash_attention=True,
-                 gradient_checkpointing=False,
-                 h_update_period=2,         # H-module update period
+                 gradient_checkpointing=True,  # Activar para modelo más grande
+                 h_update_period=3,         # H-module update period optimizado
                  **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -532,16 +533,16 @@ def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step
 
 def train_hrm_hf(
     tokenizer_name: str = "openai-community/gpt2",
-    output_dir: str = "./hrm-micro-10m-hf",
-    num_train_samples: int = 10000,
-    num_val_samples: int = 1000,
-    batch_size: int = 8,
-    learning_rate: float = 5e-4,
-    num_epochs: int = 3,
-    save_steps: int = 500,
-    eval_steps: int = 200,
+    output_dir: str = "./hrm-small-50m-hf",
+    num_train_samples: int = 50000,     # 5x más datos para modelo mayor
+    num_val_samples: int = 5000,       # 5x más datos de validación
+    batch_size: int = 4,               # Batch size menor para modelo grande
+    learning_rate: float = 3e-4,       # LR menor para modelo más grande
+    num_epochs: int = 2,               # Menos épocas, más datos
+    save_steps: int = 1000,            # Checkpoints menos frecuentes
+    eval_steps: int = 500,             # Evaluación menos frecuente
     max_grad_norm: float = 1.0,
-    warmup_steps: int = 100,
+    warmup_steps: int = 500,           # Warmup más largo
 ):
     """Entrenar modelo HRM con tokenizador HuggingFace"""
     
@@ -558,25 +559,25 @@ def train_hrm_hf(
     print(f"🔧 Cargando tokenizador: {tokenizer_name}")
     tokenizer = create_tokenizer(tokenizer_name)
     
-    # Crear configuración del modelo
+    # Crear configuración del modelo (usa valores optimizados para 50M por defecto)
     config = HRMText1Config(
         vocab_size=len(tokenizer),
-        block_size=128,
-        n_embd=256,
-        n_head=8,
-        n_layers=6,
-        d_ff=1024,
-        dropout=0.1,
+        # Los demás parámetros usan los valores por defecto optimizados para 50M
         tokenizer_type='huggingface',
         hf_tokenizer_name=tokenizer_name,
         pad_token_id=tokenizer.pad_token_id,
     )
     
-    print(f"📐 Configuración del modelo:")
+    print(f"📐 Configuración del modelo Small 50M:")
     print(f"   Vocabulario: {config.vocab_size:,} tokens")
     print(f"   Embeddings: {config.n_embd}")
     print(f"   Capas: {config.n_layers}")
     print(f"   Cabezas atención: {config.n_head}")
+    print(f"   Contexto: {config.block_size} tokens")
+    print(f"   FFN dim: {config.d_ff}")
+    print(f"   HRM halt steps: {config.halt_max_steps}")
+    print(f"   H-update period: {config.h_update_period}")
+    print(f"   Gradient checkpointing: {config.gradient_checkpointing}")
     
     # Crear modelo
     model = HRMText1(config)
@@ -636,16 +637,19 @@ def train_hrm_hf(
     
     # Scheduler con warmup
     total_steps = len(train_texts) // batch_size * num_epochs
+    # Asegurar que pct_start esté entre 0 y 1
+    pct_start = min(0.3, warmup_steps / max(total_steps, warmup_steps))
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=learning_rate,
         total_steps=total_steps,
-        pct_start=warmup_steps/total_steps
+        pct_start=pct_start
     )
     
     print(f"🎯 Entrenamiento configurado:")
     print(f"   Steps totales estimados: {total_steps:,}")
     print(f"   Warmup steps: {warmup_steps}")
+    print(f"   Warmup pct_start: {pct_start:.3f}")
     
     # Training loop
     model.train()
@@ -832,25 +836,25 @@ def train_hrm_hf(
     print(f"   Modelo final: {final_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Entrenar HRM con tokenizador HuggingFace")
+    parser = argparse.ArgumentParser(description="Entrenar HRM Small 50M con tokenizador HuggingFace")
     parser.add_argument("--tokenizer", type=str, default="openai-community/gpt2",
                        help="Nombre del tokenizador HF")
-    parser.add_argument("--output_dir", type=str, default="./hrm-micro-10m-hf",
+    parser.add_argument("--output_dir", type=str, default="./hrm-small-50m-hf",
                        help="Directorio de salida")
-    parser.add_argument("--train_samples", type=int, default=10000,
-                       help="Número de samples de entrenamiento")
-    parser.add_argument("--val_samples", type=int, default=1000,
-                       help="Número de samples de validación")
-    parser.add_argument("--batch_size", type=int, default=8,
-                       help="Tamaño del batch")
-    parser.add_argument("--learning_rate", type=float, default=5e-4,
-                       help="Learning rate")
-    parser.add_argument("--epochs", type=int, default=3,
-                       help="Número de épocas")
-    parser.add_argument("--save_steps", type=int, default=500,
-                       help="Frecuencia de guardado")
-    parser.add_argument("--eval_steps", type=int, default=200,
-                       help="Frecuencia de evaluación")
+    parser.add_argument("--train_samples", type=int, default=50000,
+                       help="Número de samples de entrenamiento (50K para 50M)")
+    parser.add_argument("--val_samples", type=int, default=5000,
+                       help="Número de samples de validación (5K para 50M)")
+    parser.add_argument("--batch_size", type=int, default=4,
+                       help="Tamaño del batch (menor para modelo grande)")
+    parser.add_argument("--learning_rate", type=float, default=3e-4,
+                       help="Learning rate (menor para modelo grande)")
+    parser.add_argument("--epochs", type=int, default=2,
+                       help="Número de épocas (menos épocas, más datos)")
+    parser.add_argument("--save_steps", type=int, default=1000,
+                       help="Frecuencia de guardado (menos frecuente)")
+    parser.add_argument("--eval_steps", type=int, default=500,
+                       help="Frecuencia de evaluación (menos frecuente)")
     
     if len(os.sys.argv) == 1:
         print("🚀 HRM Training con Tokenizador HuggingFace")
