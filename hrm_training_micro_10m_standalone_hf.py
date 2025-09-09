@@ -36,16 +36,351 @@ except ImportError:
     print("💡 Ejecute: pip install transformers tokenizers")
     exit(1)
 
-# Importar configuración y modelo HRM completo desde archivo standalone HF
-try:
-    # Configurar variable de entorno para importar solo clases, no ejecutar entrenamiento
-    os.environ['HRM_IMPORT_ONLY'] = '1'
-    from hrm_training_micro_10m_standalone import HRMText1Config, HRMText1
-    print("✅ Configuración HRM completa importada desde standalone")
-except ImportError:
-    print("❌ No se pudo importar configuración HRM completa desde standalone")
-    print("💡 Asegúrese de que hrm_training_micro_10m_standalone.py esté disponible")
-    exit(1)
+# Definir clases HRM directamente (extraídas del archivo standalone para evitar dependencias)
+print("✅ Configuración HRM integrada directamente en el script HF")
+
+# ==============================================================================
+# --- HRM CORE CLASSES (Extracted from standalone) ---
+# ==============================================================================
+
+class SimpleConfig:
+    """Base configuration class"""
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+class HRMText1Config(SimpleConfig):
+    model_type = "hrm_text1"
+    
+    def __init__(self, 
+                 vocab_size=50257,          # HF tokenizer default
+                 block_size=128,            # Micro model context
+                 n_embd=256,                # Micro model embeddings
+                 n_head=8,                  # Micro model heads
+                 n_layers=6,                # Micro model layers
+                 d_ff=1024,                 # Micro model FFN
+                 dropout=0.1,
+                 pad_token_id=0,            
+                 halt_max_steps=4,          # HRM halt steps
+                 ponder_loss_weight=1e-2,
+                 halt_bias_init=-0.5,
+                 use_rotary_embeddings=True,
+                 rotary_embedding_base=10000,
+                 use_flash_attention=True,
+                 gradient_checkpointing=False,
+                 h_update_period=2,         # H-module update period
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.n_layers = n_layers
+        self.d_ff = d_ff
+        self.dropout = dropout
+        self.pad_token_id = pad_token_id
+        self.halt_max_steps = halt_max_steps
+        self.ponder_loss_weight = ponder_loss_weight
+        self.halt_bias_init = halt_bias_init
+        self.use_rotary_embeddings = use_rotary_embeddings
+        self.rotary_embedding_base = rotary_embedding_base
+        self.use_flash_attention = use_flash_attention
+        self.gradient_checkpointing = gradient_checkpointing
+        self.h_update_period = h_update_period
+
+class RMSNorm(nn.Module):
+    def __init__(self, n_embd, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(n_embd))
+    
+    def forward(self, x):
+        device = x.device
+        norm = x.norm(dim=-1, keepdim=True, dtype=torch.float32).clamp(min=self.eps)
+        return (x / norm.to(device)) * self.weight
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, base=10000):
+        super().__init__()
+        self.dim = dim
+        self.base = base
+        self.register_buffer('inv_freq', 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim)))
+    
+    def forward(self, x, seq_len):
+        device = x.device
+        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb.cos()[None, None, :, :], emb.sin()[None, None, :, :]
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+def rotate_half(x):
+    x1, x2 = x[..., :x.shape[-1]//2], x[..., x.shape[-1]//2:]
+    return torch.cat((-x2, x1), dim=-1)
+
+class SwiGLUMuchPelu(nn.Module):
+    def __init__(self, n_embd, d_ff, dropout):
+        super().__init__()
+        self.w1 = nn.Linear(n_embd, d_ff, bias=False)
+        self.w2 = nn.Linear(n_embd, d_ff, bias=False)
+        self.w3 = nn.Linear(d_ff, n_embd, bias=False)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+
+class OptimizedMultiHeadAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = config.n_embd // config.n_head
+        self.use_flash_attention = config.use_flash_attention
+        self.use_rotary_embeddings = config.use_rotary_embeddings
+        
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
+        
+        if self.use_rotary_embeddings:
+            self.rotary_emb = RotaryEmbedding(self.head_dim, config.rotary_embedding_base)
+    
+    def forward(self, x, attn_mask=None, key_padding_mask=None):
+        batch_size, seq_len, _ = x.shape
+        
+        q = self.q_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        
+        if self.use_rotary_embeddings:
+            cos, sin = self.rotary_emb(x, seq_len)
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        
+        attn_output = self._standard_attention(q, k, v, attn_mask, key_padding_mask)
+        attn_output = attn_output.contiguous().view(batch_size, seq_len, self.n_embd)
+        return self.out_proj(attn_output)
+    
+    def _standard_attention(self, q, k, v, attn_mask=None, key_padding_mask=None):
+        scale = 1.0 / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+        
+        if attn_mask is not None:
+            attn_weights = attn_weights.masked_fill(attn_mask, float('-inf'))
+        
+        if key_padding_mask is not None:
+            # Convertir a bool si es necesario
+            mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
+            if mask.dtype != torch.bool:
+                mask = mask == 0  # Convertir padding mask (0 = padded, 1 = valid) a bool
+            attn_weights = attn_weights.masked_fill(mask, float('-inf'))
+        
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        return torch.matmul(attn_weights, v)
+
+class HRMBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.norm1 = RMSNorm(config.n_embd)
+        self.attn = OptimizedMultiHeadAttention(config)
+        self.norm2 = RMSNorm(config.n_embd)
+        self.mlp = SwiGLUMuchPelu(config.n_embd, config.d_ff, config.dropout)
+        self.dropout = nn.Dropout(config.dropout)
+    
+    def forward(self, x, attn_mask=None, key_padding_mask=None):
+        x_norm = self.norm1(x)
+        attn_out = self.attn(x_norm, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        x = x + self.dropout(attn_out)
+        
+        x = x + self.dropout(self.mlp(self.norm2(x)))
+        return x
+
+class HRMInner(nn.Module):
+    """True HRM implementation with hierarchical temporal separation"""
+    def __init__(self, config):
+        super().__init__()
+        self.H_module = HRMBlock(config)
+        self.L_module = HRMBlock(config)
+        self.config = config
+        
+        # Q-learning components for adaptive computation
+        self.q_network = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 4),
+            nn.ReLU(),
+            nn.Linear(config.n_embd // 4, 2)  # [continue, halt]
+        )
+        
+        self.convergence_threshold = 1e-3
+        self.max_l_steps = config.halt_max_steps
+        self.h_update_period = getattr(config, 'h_update_period', 4)
+    
+    def forward(self, z_H, z_L, step_count=0, attn_mask=None, key_padding_mask=None, training=True):
+        """Forward pass with proper HRM hierarchical reasoning"""
+        batch_size, seq_len, d_model = z_H.shape
+        device = z_H.device
+        
+        # Determine if this is an H-module update step
+        is_h_update_step = (step_count % self.h_update_period) == 0
+        
+        if is_h_update_step:
+            # H-module update: Run L-module to convergence, then update H-module
+            z_L_converged, l_steps, q_values = self._run_l_module_to_convergence(
+                z_H, z_L, attn_mask, key_padding_mask, training
+            )
+            
+            # Update H-module with converged L-module output
+            z_H_input = z_H + z_L_converged
+            z_H_new = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            
+            # Reset L-module (start fresh for next cycle)
+            z_L_new = torch.zeros_like(z_L)
+            
+            return z_H_new, z_L_new, {
+                'h_updated': True,
+                'l_steps': l_steps,
+                'q_values': q_values,
+                'convergence_achieved': True
+            }
+        else:
+            # L-module only step: Continue L-module processing
+            z_L_input = z_L + z_H.detach()  # Detach H to prevent gradients
+            z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            
+            return z_H, z_L_new, {
+                'h_updated': False,
+                'l_steps': 1,
+                'q_values': None,
+                'convergence_achieved': False
+            }
+    
+    def _run_l_module_to_convergence(self, z_H, z_L, attn_mask, key_padding_mask, training):
+        """Run L-module until convergence or max steps reached"""
+        z_L_current = z_L
+        z_L_prev = z_L
+        all_q_values = []
+        
+        for l_step in range(self.max_l_steps):
+            # L-module forward pass
+            z_L_input = z_L_current + z_H.detach()
+            z_L_next = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            
+            # Q-learning decision: should we continue or halt?
+            if training and l_step < self.max_l_steps - 1:
+                q_values = self.q_network(z_L_next)
+                all_q_values.append(q_values)
+                
+                # Epsilon-greedy exploration during training
+                epsilon = max(0.1, 1.0 - l_step * 0.1)
+                if torch.rand(1).item() < epsilon:
+                    action = torch.randint(0, 2, (1,)).item()
+                else:
+                    # Average Q-values across batch and sequence dimensions, then select action
+                    avg_q_values = q_values.mean(dim=[0, 1])  # Shape: [2]
+                    action = torch.argmax(avg_q_values).item()
+                
+                # If action is halt (1), break
+                if action == 1:
+                    break
+            
+            # Check convergence
+            diff = torch.norm(z_L_next - z_L_current, p=2, dim=-1).mean()
+            if diff < self.convergence_threshold:
+                break
+            
+            z_L_prev = z_L_current
+            z_L_current = z_L_next
+        
+        return z_L_current, l_step + 1, all_q_values
+
+class HRMText1(nn.Module):
+    """HRM Model with full hierarchical temporal separation"""
+    
+    def __init__(self, config: HRMText1Config):
+        super().__init__()
+        self.config = config
+        
+        self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
+        
+        # Usar RoPE en lugar de embeddings posicionales aprendidos
+        if not config.use_rotary_embeddings:
+            self.pos_embeddings = nn.Embedding(config.block_size, config.n_embd)
+            self.register_buffer("pos_ids", torch.arange(config.block_size).unsqueeze(0))
+        else:
+            self.pos_embeddings = None
+            self.pos_ids = None
+        
+        # Apilar múltiples capas HRM
+        self.layers = nn.ModuleList([
+            HRMInner(config) for _ in range(config.n_layers)
+        ])
+        
+        self.final_norm = RMSNorm(config.n_embd)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        # Compartir pesos entre token embeddings y lm_head
+        self.lm_head.weight = self.token_embeddings.weight
+        
+        # Inicialización
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+        
+        # Token embeddings
+        x = self.token_embeddings(input_ids)
+        
+        # Positional embeddings (si no usa RoPE)
+        if not self.config.use_rotary_embeddings:
+            pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+            pos_embs = self.pos_embeddings(pos_ids)
+            x = x + pos_embs
+        
+        # Crear máscara causal
+        if attention_mask is None:
+            causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+        else:
+            causal_mask = None
+        
+        # Inicializar estados H y L para HRM
+        z_H = x
+        z_L = torch.zeros_like(x)
+        
+        # HRM layers con estados separados
+        for step_count, layer in enumerate(self.layers):
+            z_H, z_L, hrm_info = layer(z_H, z_L, step_count, attn_mask=causal_mask, key_padding_mask=attention_mask)
+        
+        # Final norm y lm_head
+        output = self.final_norm(z_H)
+        logits = self.lm_head(output)
+        
+        # Si se proporcionan labels, calcular loss
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=self.config.pad_token_id
+            )
+            return (loss, logits)
+        
+        return logits
 
 # Hugging Face Hub imports
 try:
