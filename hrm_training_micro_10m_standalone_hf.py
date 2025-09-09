@@ -414,7 +414,13 @@ class OptimizedTextDataset(IterableDataset):
         self.split_type = split_type
         self.device = device if device is not None else (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
         self.batch_tokenize = batch_tokenize
-        self.num_proc = num_proc if num_proc is not None else min(4, mp.cpu_count())
+        # Configuración inteligente de workers
+        if num_proc is not None:
+            self.num_proc = num_proc
+        else:
+            # Auto-detectar basado en cores disponibles
+            cpu_cores = mp.cpu_count()
+            self.num_proc = min(cpu_cores, 16)
         self.max_length = max_length
         self.min_text_length = min_text_length
         self.cache_tokens = cache_tokens
@@ -695,12 +701,49 @@ def train_hrm_hf(
     cache_tokens: bool = False,
     max_text_length: int = 2000,
     min_text_length: int = 50,
+    # Parámetros de paralelización configurable
     num_workers: int = 0,
+    tokenizer_workers: int = 0,
+    prefetch_factor: int = 2,
+    cpu_intensive: bool = False,
+    max_workers: int = 0,
+    batch_size_multiplier: int = 1,
 ):
     """Entrenar modelo HRM con tokenizador HuggingFace"""
     
+    # Configuración inteligente de paralelización
+    cpu_count = mp.cpu_count()
+    
+    # Auto-detectar configuración óptima
+    if num_workers == 0:
+        if cpu_intensive:
+            # Modo CPU intensivo: usar la mayoría de cores disponibles
+            num_workers = min(cpu_count - 1, 16) if max_workers == 0 else min(max_workers, cpu_count - 1)
+        else:
+            # Modo balanceado
+            num_workers = min(cpu_count // 2, 8) if max_workers == 0 else min(max_workers, cpu_count // 2)
+    
+    if tokenizer_workers == 0:
+        tokenizer_workers = min(cpu_count, 16) if cpu_intensive else min(cpu_count // 2, 8)
+        if max_workers > 0:
+            tokenizer_workers = min(tokenizer_workers, max_workers)
+    
+    # Ajustar batch size para CPU intensivo
+    effective_batch_size = batch_size * batch_size_multiplier
+    
     print(f"🚀 Iniciando entrenamiento HRM con tokenizador HF")
     print(f"📊 Configuración:")
+    print(f"🖥️  Hardware detectado:")
+    print(f"   CPU cores: {cpu_count}")
+    print(f"   Modo CPU intensivo: {'✅' if cpu_intensive else '❌'}")
+    print(f"⚙️  Paralelización configurada:")
+    print(f"   DataLoader workers: {num_workers}")
+    print(f"   Tokenizer workers: {tokenizer_workers}")
+    print(f"   Prefetch factor: {prefetch_factor}")
+    print(f"   Batch size efectivo: {effective_batch_size} (original: {batch_size})")
+    if max_workers > 0:
+        print(f"   Límite máximo workers: {max_workers}")
+    print(f"📋 Entrenamiento:")
     print(f"   Tokenizador: {tokenizer_name}")
     print(f"   Directorio salida: {output_dir}")
     print(f"   Samples entrenamiento: {num_train_samples}")
@@ -789,33 +832,46 @@ def train_hrm_hf(
     train_dataset = OptimizedTextDataset(
         tokenizer, train_texts, config.block_size, "train",
         device=device, batch_tokenize=batch_tokenize, cache_tokens=cache_tokens,
-        max_length=max_text_length, min_text_length=min_text_length
+        max_length=max_text_length, min_text_length=min_text_length,
+        num_proc=tokenizer_workers
     )
     val_dataset = OptimizedTextDataset(
         tokenizer, val_texts, config.block_size, "validation", 
         device=device, batch_tokenize=batch_tokenize, cache_tokens=False,  # No cache para validación
-        max_length=max_text_length, min_text_length=min_text_length
+        max_length=max_text_length, min_text_length=min_text_length,
+        num_proc=min(tokenizer_workers, 4)  # Menos workers para validación
     )
     
-    # Crear dataloaders con múltiples workers para mejor rendimiento
-    print(f"🔧 Configurando dataloaders con {num_workers} workers...")
+    # Crear dataloaders con configuración optimizada
+    print(f"🔧 Configurando dataloaders optimizados...")
+    print(f"   Train workers: {num_workers}, prefetch: {prefetch_factor}")
+    
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=batch_size, 
+        batch_size=effective_batch_size, 
         shuffle=False,
         num_workers=num_workers,
         pin_memory=device.type == 'cuda',  # Pin memory para GPU
         persistent_workers=num_workers > 0,
-        prefetch_factor=2 if num_workers > 0 else None
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        drop_last=True,  # Evitar batches incompletos
+        multiprocessing_context='spawn' if num_workers > 0 else None  # Mejor para muchos workers
     )
+    
+    # Configurar validation loader con menos recursos
+    val_workers = min(max(num_workers // 2, 1), 4) if num_workers > 0 else 0
+    print(f"   Val workers: {val_workers}, prefetch: {min(prefetch_factor, 2)}")
+    
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=batch_size, 
+        batch_size=effective_batch_size, 
         shuffle=False,
-        num_workers=min(2, num_workers),  # Menos workers para validación
+        num_workers=val_workers,
         pin_memory=device.type == 'cuda',
-        persistent_workers=min(2, num_workers) > 0,
-        prefetch_factor=2 if num_workers > 0 else None
+        persistent_workers=val_workers > 0,
+        prefetch_factor=min(prefetch_factor, 2) if val_workers > 0 else None,
+        drop_last=False,
+        multiprocessing_context='spawn' if val_workers > 0 else None
     )
     
     # Crear optimizador
@@ -1061,20 +1117,41 @@ def main():
                        help="Longitud máxima de texto en caracteres")
     parser.add_argument("--min_text_length", type=int, default=50,
                        help="Longitud mínima de texto en caracteres")
-    parser.add_argument("--num_workers", type=int, default=2,
-                       help="Número de workers para DataLoader")
+    parser.add_argument("--num_workers", type=int, default=0,
+                       help="Número de workers para DataLoader (0=auto-detect, recomendado: 4-16)")
+    parser.add_argument("--tokenizer_workers", type=int, default=0,
+                       help="Workers para tokenización paralela (0=auto-detect)")
+    parser.add_argument("--prefetch_factor", type=int, default=2,
+                       help="Factor de prefetch para DataLoader (recomendado: 2-8)")
+    parser.add_argument("--cpu_intensive", action="store_true", default=False,
+                       help="Modo CPU intensivo: maximiza uso de cores para CPU sin GPU")
+    parser.add_argument("--max_workers", type=int, default=0,
+                       help="Máximo workers permitidos (0=sin límite, útil para limitar uso)")
+    parser.add_argument("--batch_size_multiplier", type=int, default=1,
+                       help="Multiplicador de batch size para CPU intensivo (1-4)")
     
     if len(os.sys.argv) == 1:
         print("🚀 HRM Training con Tokenizador HuggingFace")
         print("\nUso:")
         print("  python hrm_training_micro_10m_hf.py [opciones]")
         print("\nEjemplos:")
-        print("  # Entrenar con GPT2 inglés")
+        print("  # Entrenar con GPT2 inglés (configuración automática)")
         print("  python hrm_training_micro_10m_hf.py --tokenizer openai-community/gpt2")
-        print("  # Entrenar con GPT2 español")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer DeepESP/gpt2-spanish")
-        print("  # Configuración personalizada")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer openai-community/gpt2 --batch_size 16 --epochs 5")
+        print("  ")
+        print("  # Modo CPU INTENSIVO para máximo rendimiento (tu caso con RTX 5090 + muchos cores)")
+        print("  python hrm_training_micro_10m_hf.py --cpu_intensive --num_workers 12 --batch_size_multiplier 2")
+        print("  ")
+        print("  # Configuración manual de workers")  
+        print("  python hrm_training_micro_10m_hf.py --num_workers 8 --tokenizer_workers 16 --prefetch_factor 4")
+        print("  ")
+        print("  # Limitar uso de recursos")
+        print("  python hrm_training_micro_10m_hf.py --max_workers 6 --batch_size 4")
+        print("  ")
+        print("  # Cache tokens para datasets pequeños repetidos")
+        print("  python hrm_training_micro_10m_hf.py --cache_tokens --train_samples 1000")
+        print("  ")
+        print("  # Dataset diferente en español")
+        print("  python hrm_training_micro_10m_hf.py --tokenizer DeepESP/gpt2-spanish --dataset_name oscar --dataset_config unshuffled_deduplicated_es")
         return
     
     args = parser.parse_args()
@@ -1103,7 +1180,13 @@ def main():
         cache_tokens=args.cache_tokens,
         max_text_length=args.max_text_length,
         min_text_length=args.min_text_length,
+        # Parámetros de paralelización configurable
         num_workers=args.num_workers,
+        tokenizer_workers=args.tokenizer_workers,
+        prefetch_factor=args.prefetch_factor,
+        cpu_intensive=args.cpu_intensive,
+        max_workers=args.max_workers,
+        batch_size_multiplier=args.batch_size_multiplier,
     )
 
 if __name__ == "__main__":
