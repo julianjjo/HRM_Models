@@ -38,12 +38,13 @@ except ImportError:
 
 # Importar configuración y modelo HRM completo desde archivo standalone HF
 try:
-    # Usar la versión standalone específica para HF que no ejecuta código de entrenamiento
-    from hrm_training_micro_10m_hf_standalone import HRMText1Config, HRMText1
-    print("✅ Configuración HRM completa importada desde standalone HF")
+    # Configurar variable de entorno para importar solo clases, no ejecutar entrenamiento
+    os.environ['HRM_IMPORT_ONLY'] = '1'
+    from hrm_training_micro_10m_standalone import HRMText1Config, HRMText1
+    print("✅ Configuración HRM completa importada desde standalone")
 except ImportError:
-    print("❌ No se pudo importar configuración HRM completa desde standalone HF")
-    print("💡 Asegúrese de que hrm_training_micro_10m_hf_standalone.py esté disponible")
+    print("❌ No se pudo importar configuración HRM completa desde standalone")
+    print("💡 Asegúrese de que hrm_training_micro_10m_standalone.py esté disponible")
     exit(1)
 
 # Hugging Face Hub imports
