@@ -693,11 +693,18 @@ class AdaptiveBPETokenizer:
         text = "".join(tokens)
         
         if clean_up_tokenization_spaces:
-            # Restaurar espacios normalizados
+            # MEJORADO: Restaurar espacios de manera más precisa
+            # 1. Restaurar tokens especiales de espaciado en orden correcto
             text = text.replace('<newline>', '\n')
             text = text.replace('<tab>', '\t')
-            text = re.sub(r'\s+', ' ', text)
-            text = text.strip()
+            text = text.replace('<spaces>', '   ')  # 3 espacios para <spaces>
+            text = text.replace('<space>', '  ')    # 2 espacios para <space>
+            # Los espacios simples ' ' ya están en el texto
+            
+            # 2. NO colapsar espacios múltiples después de restaurar
+            # Solo limpiar espacios extremos si no son significativos
+            if not (text.startswith(' ') or text.endswith(' ')):
+                text = text.strip()
         
         return text
     

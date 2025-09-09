@@ -18,11 +18,21 @@ import unicodedata
 from collections import Counter, defaultdict
 from typing import Optional, Tuple, Dict, Any, List, Union, Set
 
+# Import HF tokenizer wrapper
+try:
+    from hf_tokenizer_wrapper_simple import HuggingFaceTokenizerWrapper, create_tokenizer
+    HF_TOKENIZER_AVAILABLE = True
+    print("✅ HuggingFace tokenizer wrapper disponible")
+except ImportError:
+    HF_TOKENIZER_AVAILABLE = False
+    print("⚠️ HuggingFace tokenizer wrapper no disponible, usando tokenizador legacy")
+
 class HRMText1Config:
     """Configuración para el modelo HRM"""
     def __init__(self, **kwargs):
         # Configuración por defecto para modelo micro 10M
-        self.vocab_size = kwargs.get('vocab_size', 5000)
+        # Actualizado para soportar tokenizadores de HF
+        self.vocab_size = kwargs.get('vocab_size', 50257)  # GPT2 default
         self.block_size = kwargs.get('block_size', 128)
         self.n_embd = kwargs.get('n_embd', 256)
         self.n_head = kwargs.get('n_head', 8)
@@ -37,6 +47,11 @@ class HRMText1Config:
         self.use_flash_attention = kwargs.get('use_flash_attention', True)
         self.gradient_checkpointing = kwargs.get('gradient_checkpointing', False)
         self.h_update_period = kwargs.get('h_update_period', 2)
+        
+        # Configuración específica del tokenizador
+        self.tokenizer_type = kwargs.get('tokenizer_type', 'huggingface')  # 'huggingface' o 'legacy'
+        self.hf_tokenizer_name = kwargs.get('hf_tokenizer_name', 'openai-community/gpt2')
+        self.pad_token_id = kwargs.get('pad_token_id', 0)
 
 class AdaptiveBPETokenizer:
     """Tokenizador BPE avanzado con vocabulario dinámico y optimizaciones"""
@@ -45,7 +60,7 @@ class AdaptiveBPETokenizer:
         self.vocab_size = vocab_size
         self.min_frequency = min_frequency
         
-        # Tokens especiales mejorados
+        # Tokens especiales optimizados para modelo 10M (solo tokens existentes)
         self.special_tokens = {
             '<pad>': 0,
             '<unk>': 1, 
@@ -54,11 +69,13 @@ class AdaptiveBPETokenizer:
             '<mask>': 4,
             '<cls>': 5,
             '<sep>': 6,
-            '<newline>': 7,
-            '<tab>': 8,
-            '<url>': 9,
-            '<email>': 10,
-            '<number>': 11
+            '<newline>': 7,      # ✅ Disponible en modelo
+            '<tab>': 8,          # ✅ Disponible en modelo
+            '<space>': 9,        # ✅ Disponible - Para exactamente 2 espacios
+            '<spaces>': 10,      # ✅ Disponible - Para 3+ espacios
+            '<url>': 11,
+            '<email>': 12,
+            '<number>': 13
         }
         
         # Mapeos de vocabulario
@@ -83,6 +100,10 @@ class AdaptiveBPETokenizer:
         self.mask_token = '<mask>'
         self.cls_token = '<cls>'
         self.sep_token = '<sep>'
+        self.space_token = '<space>'      # Para 2 espacios
+        self.spaces_token = '<spaces>'    # Para 3+ espacios
+        self.newline_token = '<newline>'  # Para \n
+        self.tab_token = '<tab>'          # Para \t
         
         self.pad_token_id = self.special_tokens['<pad>']
         self.unk_token_id = self.special_tokens['<unk>']
@@ -91,17 +112,25 @@ class AdaptiveBPETokenizer:
         self.mask_token_id = self.special_tokens['<mask>']
         self.cls_token_id = self.special_tokens['<cls>']
         self.sep_token_id = self.special_tokens['<sep>']
+        self.newline_token_id = self.special_tokens['<newline>']
+        self.tab_token_id = self.special_tokens['<tab>']
+        self.space_token_id = self.special_tokens['<space>']
+        self.spaces_token_id = self.special_tokens['<spaces>']
+        self.url_token_id = self.special_tokens['<url>']
+        self.email_token_id = self.special_tokens['<email>']
+        self.number_token_id = self.special_tokens['<number>']
         
         # Cache y estadísticas
         self.encoding_cache = {}
         self.token_frequencies = Counter()
         self._built = False
         
-        # Regex mejorados para preprocessing
+        # Regex mejorados para preprocessing con mejor manejo de espacios
         self.patterns = {
             'url': re.compile(r'https?://\S+|www\.\S+', re.IGNORECASE),
             'email': re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
             'number': re.compile(r'\b\d+(?:\.\d+)?\b'),
+            'multiple_spaces': re.compile(r'  +'),  # Para espacios múltiples
             'whitespace': re.compile(r'\s+'),
             'punctuation': re.compile(r'[^\w\s]')
         }
@@ -109,21 +138,67 @@ class AdaptiveBPETokenizer:
         print(f"🔧 Inicializado AdaptiveBPETokenizer con vocabulario de {vocab_size:,} tokens")
     
     def _normalize_text(self, text: str) -> str:
-        """Normalización avanzada de texto"""
+        """Normalización avanzada de texto con mejor preservación de espacios en blanco"""
+        if not text:
+            return ""
+            
         # Normalizar Unicode
         text = unicodedata.normalize('NFKC', text)
         
-        # Reemplazar patrones especiales
+        # Reemplazar patrones especiales ANTES de procesar espacios
         text = self.patterns['url'].sub('<url>', text)
-        text = self.patterns['email'].sub('<email>', text)
+        text = self.patterns['email'].sub('<email>', text) 
         text = self.patterns['number'].sub('<number>', text)
         
-        # Normalizar espacios en blanco
+        return self._advanced_space_processing(text)
+    
+    def _advanced_space_processing(self, text: str) -> str:
+        """Procesamiento optimizado de espacios para modelo 10M (usando solo tokens disponibles)"""
+        if not text:
+            return ""
+        
+        # Procesar newlines y tabs primero
         text = text.replace('\n', '<newline>')
         text = text.replace('\t', '<tab>')
-        text = self.patterns['whitespace'].sub(' ', text)
         
-        return text.strip()
+        # Procesar espacios múltiples (optimizado para tokens disponibles)
+        # 4+ espacios consecutivos -> <spaces> (se normaliza a 3)
+        text = re.sub(r'    +', '<spaces>', text)
+        # Exactamente 3 espacios -> <spaces>
+        text = text.replace('   ', '<spaces>')
+        # Exactamente 2 espacios -> <space>
+        text = text.replace('  ', '<space>')
+        # Un solo espacio permanece como ' '
+        
+        # Manejar líneas vacías (simular <blank> con <newline>)
+        # Reemplazar secuencias de newlines múltiples
+        text = re.sub(r'<newline><newline><newline>+', '<newline><newline>', text)
+        
+        # Procesar indentación al inicio (usando tokens disponibles)
+        lines = text.split('<newline>')
+        processed_lines = []
+        
+        for line in lines:
+            # Detectar indentación al inicio
+            if line.startswith('<spaces>'):
+                # 3+ espacios al inicio -> mantener <spaces> (simula indentación)
+                processed_lines.append(line)
+            elif line.startswith('<space>'):
+                # 2 espacios al inicio -> mantener <space>
+                processed_lines.append(line)
+            else:
+                processed_lines.append(line)
+        
+        result = '<newline>'.join(processed_lines)
+        
+        # Limpiar espacios extremos solo si no son significativos
+        original_starts_with_space = text.startswith((' ', '\n', '\t'))
+        original_ends_with_space = text.endswith((' ', '\n', '\t'))
+        
+        if not (original_starts_with_space or original_ends_with_space):
+            result = result.strip()
+        
+        return result
     
     def _get_byte_pairs(self, word: str) -> List[Tuple[str, str]]:
         """Obtener todos los pares de bytes consecutivos en una palabra"""
@@ -135,11 +210,30 @@ class AdaptiveBPETokenizer:
         return pairs
     
     def _get_word_tokens(self, text: str) -> List[str]:
-        """Tokenización inicial por palabras con manejo de caracteres especiales"""
-        # Pre-tokenizar manteniendo espacios y puntuación
-        tokens = re.findall(r'\w+|[^\w\s]|\s+', text)
-        # Filtrar tokens vacíos
-        return [token for token in tokens if token.strip()]
+        """Tokenización inicial por palabras con mejor preservación de espacios"""
+        if not text:
+            return []
+            
+        # Pre-tokenizar manteniendo espacios, puntuación y tokens especiales
+        # Separar tokens especiales (solo tokens disponibles en modelo 10M)
+        special_pattern = r'(<newline>|<tab>|<space>|<spaces>|<url>|<email>|<number>|<pad>|<unk>|<s>|</s>|<mask>|<cls>|<sep>)'
+        tokens = []
+        
+        # Dividir por tokens especiales
+        parts = re.split(special_pattern, text)
+        
+        for part in parts:
+            if not part:
+                continue
+            elif part in self.special_tokens:
+                # Es un token especial, mantenerlo como está
+                tokens.append(part)
+            else:
+                # Tokenizar parte normal manteniendo espacios simples
+                part_tokens = re.findall(r'\w+|[^\w\s]| ', part)
+                tokens.extend([t for t in part_tokens if t])  # Mantener espacios simples
+        
+        return tokens
     
     def _intelligent_word_filtering(self, word_freq: Counter) -> Dict[str, int]:
         """Filtrado inteligente con múltiples criterios de calidad"""
@@ -400,8 +494,23 @@ class AdaptiveBPETokenizer:
                return_attention_mask: bool = True) -> Union[List[int], Dict]:
         """Codificar texto usando BPE"""
         if not self._built:
-            print("⚠️ Vocabulario no construido. Usando vocabulario básico.")
-            self.build_vocab([text])
+            print("⚠️ Vocabulario no construido. Usando tokenización básica.")
+            # Fallback simple tokenization
+            tokens = []
+            if add_special_tokens:
+                tokens.append(self.bos_token_id)
+            
+            # Tokenización básica por caracteres
+            for char in text:
+                if char in self.vocab:
+                    tokens.append(self.vocab[char])
+                else:
+                    tokens.append(self.unk_token_id)
+            
+            if add_special_tokens:
+                tokens.append(self.eos_token_id)
+            
+            return tokens
         
         # Normalizar texto
         normalized_text = self._normalize_text(text)
@@ -488,10 +597,35 @@ class AdaptiveBPETokenizer:
         text = "".join(tokens)
         
         if clean_up_tokenization_spaces:
-            # Restaurar espacios normalizados
-            text = text.replace('<newline>', '\n')
-            text = text.replace('<tab>', '\t')
-            text = re.sub(r'\s+', ' ', text)
+            # MEJORADO: Restaurar espacios en blanco de manera más precisa
+            text = self._restore_blank_spaces(text)
+        
+        return text
+    
+    def _restore_blank_spaces(self, text: str) -> str:
+        """Restaurar espacios desde tokens especiales (optimizado para modelo 10M)"""
+        if not text:
+            return text
+        
+        # Restaurar en orden específico para evitar conflictos
+        
+        # 1. Restaurar newlines
+        text = text.replace('<newline>', '\n')
+        
+        # 2. Restaurar tabs
+        text = text.replace('<tab>', '\t')
+        
+        # 3. Restaurar espacios múltiples (disponibles en modelo 10M)
+        text = text.replace('<spaces>', '   ')  # 3 espacios (normalización)
+        
+        # 4. Restaurar espacios dobles
+        text = text.replace('<space>', '  ')    # 2 espacios
+        
+        # 5. Limpiar múltiples newlines consecutivos (máximo 2)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # 6. Solo hacer strip si no hay espacios/newlines significativos
+        if not (text.startswith((' ', '\n', '\t')) or text.endswith((' ', '\n', '\t'))):
             text = text.strip()
         
         return text
@@ -595,32 +729,236 @@ class AdaptiveBPETokenizer:
         
         return self
 
-# Versión simplificada del modelo para chat
-class SimpleChatModel(nn.Module):
-    """Modelo simplificado para chat que puede cargar pesos del HRM"""
+# ==============================================================================
+# --- ARQUITECTURA HRM PARA CHAT ---
+# ==============================================================================
+
+try:
+    from flash_attn import flash_attn_func
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
+    print("⚠️ Flash Attention no disponible, usando atención estándar")
+
+class RotaryEmbedding(nn.Module):
+    """Rotary Position Embedding optimizado para multi-GPU y mejor extrapolación"""
+    def __init__(self, dim, max_position_embeddings=4096, base=10000):
+        super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        
+        inv_freq = 1. / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
+        self.register_buffer("inv_freq", inv_freq)
+        
+        # Pre-compute para evitar problemas multi-GPU
+        self._precompute_cos_sin_cache(max_position_embeddings)
+    
+    def _precompute_cos_sin_cache(self, max_seq_len):
+        """Pre-computar cos/sin para evitar problemas de device en multi-GPU"""
+        t = torch.arange(max_seq_len).type_as(self.inv_freq)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos_cached = emb.cos()[None, :, None, :] 
+        sin_cached = emb.sin()[None, :, None, :]
+        
+        # Registrar como buffers para multi-GPU
+        self.register_buffer("cos_cached", cos_cached)
+        self.register_buffer("sin_cached", sin_cached)
+    
+    def forward(self, x, seq_len):
+        # Usar cache pre-computado
+        seq_len = min(seq_len, self.cos_cached.size(1))
+        return (
+            self.cos_cached[:, :seq_len, :, :].to(x.device),
+            self.sin_cached[:, :seq_len, :, :].to(x.device)
+        )
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1, x2 = x[..., :x.shape[-1]//2], x[..., x.shape[-1]//2:]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    """Apply rotary position embedding to query and key tensors."""
+    # q, k shape: (batch, n_head, seq_len, head_dim)
+    # cos, sin shape: (1, seq_len, 1, head_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+class RMSNorm(nn.Module):
+    def __init__(self, n_embd, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(n_embd))
+    
+    def forward(self, x):
+        # Fix para estabilidad numérica y compatibilidad multi-GPU
+        device = x.device
+        
+        # Calcular RMS norm con tensors en el device correcto
+        mean_square = torch.mean(x**2, dim=-1, keepdim=True)
+        eps_tensor = torch.tensor(self.eps, device=device, dtype=x.dtype)
+        rms = torch.rsqrt(mean_square + eps_tensor)
+        
+        # Asegurar que weight esté en el device correcto
+        weight = self.weight.to(device)
+        
+        return weight * (x * rms)
+
+class SwiGLUMuchPelu(nn.Module):
+    def __init__(self, n_embd, d_ff, dropout=0.1):
+        super().__init__()
+        self.w1 = nn.Linear(n_embd, d_ff, bias=False)
+        self.w2 = nn.Linear(n_embd, d_ff, bias=False)
+        self.w3 = nn.Linear(d_ff, n_embd, bias=False)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+
+class OptimizedMultiHeadAttention(nn.Module):
+    """Atención multi-cabeza optimizada con RoPE y Flash Attention opcional"""
+    
+    def __init__(self, config):
+        super().__init__()
+        self.n_embd = config.n_embd
+        self.n_head = config.n_head
+        self.head_dim = self.n_embd // self.n_head
+        self.use_flash_attention = config.use_flash_attention and HAS_FLASH_ATTN
+        
+        assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"
+        
+        self.q_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.k_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.v_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.out_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        
+        self.dropout = nn.Dropout(config.dropout)
+        
+        if config.use_rotary_embeddings:
+            self.rotary_emb = RotaryEmbedding(
+                self.head_dim, 
+                max_position_embeddings=config.block_size,
+                base=config.rotary_embedding_base
+            )
+        else:
+            self.rotary_emb = None
+    
+    def forward(self, x, attn_mask=None, key_padding_mask=None):
+        batch_size, seq_len, _ = x.shape
+        
+        # Proyecciones lineales
+        q = self.q_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        
+        # Aplicar RoPE si está habilitado
+        if self.rotary_emb is not None:
+            cos, sin = self.rotary_emb(x, seq_len)
+            # Ajustar las dimensiones de cos y sin para que coincidan con q y k
+            cos = cos.expand(q.shape[0], -1, q.shape[1], -1)  # (batch, seq_len, n_head, head_dim)
+            sin = sin.expand(q.shape[0], -1, q.shape[1], -1)  # (batch, seq_len, n_head, head_dim)
+            # Transponer para que coincidan con q, k: (batch, n_head, seq_len, head_dim)
+            cos = cos.transpose(1, 2)
+            sin = sin.transpose(1, 2)
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        
+        # Usar Flash Attention si está disponible
+        if self.use_flash_attention and x.device.type == 'cuda':
+            # Para Flash Attention necesitamos reorganizar las dimensiones
+            q = q.transpose(1, 2).contiguous()  # (batch, seq_len, n_head, head_dim)
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
+            
+            try:
+                attn_output = flash_attn_func(q, k, v, dropout_p=self.dropout.p if self.training else 0.0, causal=True)
+            except:
+                # Fallback a atención estándar
+                attn_output = self._standard_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask, key_padding_mask)
+                attn_output = attn_output.transpose(1, 2)
+        else:
+            attn_output = self._standard_attention(q, k, v, attn_mask, key_padding_mask)
+            attn_output = attn_output.transpose(1, 2)  # (batch, seq_len, n_head, head_dim)
+        
+        # Reshape y proyección de salida
+        attn_output = attn_output.contiguous().view(batch_size, seq_len, self.n_embd)
+        return self.out_proj(attn_output)
+    
+    def _standard_attention(self, q, k, v, attn_mask=None, key_padding_mask=None):
+        """Atención estándar escalada por productos punto"""
+        scale = 1.0 / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+        
+        if attn_mask is not None:
+            attn_weights = attn_weights.masked_fill(attn_mask, float('-inf'))
+        
+        if key_padding_mask is not None:
+            attn_weights = attn_weights.masked_fill(key_padding_mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+        
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        return torch.matmul(attn_weights, v)
+
+class HRMBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.norm1 = RMSNorm(config.n_embd)
+        self.attn = OptimizedMultiHeadAttention(config)
+        self.norm2 = RMSNorm(config.n_embd)
+        self.mlp = SwiGLUMuchPelu(config.n_embd, config.d_ff, config.dropout)
+        self.dropout = nn.Dropout(config.dropout)
+    
+    def forward(self, x, attn_mask=None, key_padding_mask=None):
+        # Pre-norm architecture
+        x_norm = self.norm1(x)
+        attn_out = self.attn(x_norm, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        x = x + self.dropout(attn_out)
+        
+        # MLP block
+        x = x + self.dropout(self.mlp(self.norm2(x)))
+        return x
+
+class HRMInner(nn.Module):
+    """Simplified HRM implementation for chat"""
+    def __init__(self, config):
+        super().__init__()
+        self.block = HRMBlock(config)
+        self.config = config
+    
+    def forward(self, x, attn_mask=None, key_padding_mask=None):
+        """Simplified forward pass for chat inference"""
+        return self.block(x, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+
+class HRMText1(nn.Module):
+    """HRM Model for Chat - Simplified from training version"""
     
     def __init__(self, config: HRMText1Config):
         super().__init__()
         self.config = config
         
-        # Componentes básicos
-        self.embedding = nn.Embedding(config.vocab_size, config.n_embd)
-        self.pos_encoding = nn.Embedding(config.block_size, config.n_embd)
+        self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         
-        # Capas del transformer
+        # Usar RoPE en lugar de embeddings posicionales aprendidos
+        if not config.use_rotary_embeddings:
+            self.pos_embeddings = nn.Embedding(config.block_size, config.n_embd)
+            self.register_buffer("pos_ids", torch.arange(config.block_size).unsqueeze(0))
+        else:
+            self.pos_embeddings = None
+            self.pos_ids = None
+        
+        # Apilar múltiples capas HRM
         self.layers = nn.ModuleList([
-            nn.TransformerDecoderLayer(
-                d_model=config.n_embd,
-                nhead=config.n_head,
-                dim_feedforward=config.d_ff,
-                dropout=config.dropout,
-                batch_first=True
-            )
-            for _ in range(config.n_layers)
+            HRMInner(config) for _ in range(config.n_layers)
         ])
         
-        self.layer_norm = nn.LayerNorm(config.n_embd)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
+        self.final_norm = RMSNorm(config.n_embd)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        # Compartir pesos entre token embeddings y lm_head
+        self.lm_head.weight = self.token_embeddings.weight
         
         # Inicialización
         self.apply(self._init_weights)
@@ -633,33 +971,43 @@ class SimpleChatModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
-    def forward(self, input_ids):
+    def forward(self, input_ids, attention_mask=None):
         batch_size, seq_len = input_ids.shape
+        device = input_ids.device
         
-        # Embeddings
-        token_embeddings = self.embedding(input_ids)
-        position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-        position_embeddings = self.pos_encoding(position_ids)
+        # Token embeddings
+        x = self.token_embeddings(input_ids)
         
-        x = token_embeddings + position_embeddings
+        # Positional embeddings (si no usa RoPE)
+        if not self.config.use_rotary_embeddings:
+            pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+            pos_embs = self.pos_embeddings(pos_ids)
+            x = x + pos_embs
         
-        # Transformer layers (simplified)
+        # Crear máscara causal
+        if attention_mask is None:
+            causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+        else:
+            causal_mask = None
+        
+        # HRM layers
         for layer in self.layers:
-            # Para decoder, necesitamos máscara causal
-            causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
-            x = layer(x, x, tgt_mask=causal_mask.to(input_ids.device))
+            x = layer(x, attn_mask=causal_mask, key_padding_mask=attention_mask)
         
-        x = self.layer_norm(x)
+        # Final norm y lm_head
+        x = self.final_norm(x)
         logits = self.lm_head(x)
         
         return logits
     
     def generate(self, input_ids, max_new_tokens=50, temperature=0.8, top_k=50, top_p=0.9):
-        """Generación simple de texto"""
+        """Generación de texto con HRM"""
         self.eval()
         
         with torch.no_grad():
-            for _ in range(max_new_tokens):
+            generated_tokens = []
+            
+            for step in range(max_new_tokens):
                 # Tomar solo los últimos tokens si excede block_size
                 current_input = input_ids[:, -self.config.block_size:]
                 
@@ -669,8 +1017,10 @@ class SimpleChatModel(nn.Module):
                 
                 # Top-k filtering
                 if top_k > 0:
-                    indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-                    logits[indices_to_remove] = float('-inf')
+                    values, indices = torch.topk(logits, top_k)
+                    logits_filtered = torch.full_like(logits, float('-inf'))
+                    logits_filtered.scatter_(-1, indices, values)
+                    logits = logits_filtered
                 
                 # Top-p filtering
                 if top_p < 1.0:
@@ -680,8 +1030,10 @@ class SimpleChatModel(nn.Module):
                     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                     sorted_indices_to_remove[..., 0] = 0
                     
-                    indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                    logits[:, indices_to_remove] = float('-inf')
+                    # Create a mask for indices to remove
+                    indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
+                    indices_to_remove.scatter_(-1, sorted_indices, sorted_indices_to_remove)
+                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
                 
                 # Samplear
                 probs = F.softmax(logits, dim=-1)
@@ -689,31 +1041,30 @@ class SimpleChatModel(nn.Module):
                 
                 # Concatenar
                 input_ids = torch.cat([input_ids, next_token], dim=1)
+                generated_tokens.append(next_token.item())
                 
-                # Parar si token de fin
-                if next_token.item() == 3:  # </s>
+                # Parar si token de fin, pero solo después de generar al menos algunos tokens
+                if next_token.item() == 3 and step > 2:  # </s>, allow some generation first
                     break
+                
+                # También parar si se encuentra un token de parada natural
+                if next_token.item() in [0, 1]:  # <pad> o <unk> también pueden indicar fin
+                    if step > 5:  # Solo si ya hemos generado algo
+                        break
         
         return input_ids
 
-def load_model_and_tokenizer(model_path: str):
-    """Cargar modelo y tokenizer desde directorio"""
+def load_model_and_tokenizer(model_path: str, use_hf_tokenizer: bool = None, hf_model_name: str = None):
+    """
+    Cargar modelo y tokenizer desde directorio
     
-    # Cargar tokenizer
-    tokenizer = AdaptiveBPETokenizer()
+    Args:
+        model_path: Ruta al modelo guardado
+        use_hf_tokenizer: Si usar tokenizador HF (None = auto-detectar)
+        hf_model_name: Nombre del modelo HF a usar (None = usar de config)
+    """
     
-    if os.path.exists(model_path):
-        try:
-            tokenizer.load_pretrained(model_path)
-        except Exception as e:
-            print(f"⚠️ Error cargando tokenizer: {e}")
-            print("💡 Usando tokenizer básico")
-            tokenizer._built = True
-    else:
-        print("⚠️ No se encontró directorio del modelo, usando tokenizer básico")
-        tokenizer._built = True
-    
-    # Cargar configuración
+    # Cargar configuración primero
     config_path = os.path.join(model_path, "config.json")
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
@@ -723,8 +1074,51 @@ def load_model_and_tokenizer(model_path: str):
         print("⚠️ Usando configuración por defecto")
         config = HRMText1Config()
     
+    # Determinar qué tokenizador usar
+    if use_hf_tokenizer is None:
+        use_hf_tokenizer = (
+            HF_TOKENIZER_AVAILABLE and 
+            getattr(config, 'tokenizer_type', 'huggingface') == 'huggingface'
+        )
+    
+    # Cargar tokenizer
+    if use_hf_tokenizer and HF_TOKENIZER_AVAILABLE:
+        try:
+            tokenizer_name = hf_model_name or getattr(config, 'hf_tokenizer_name', 'openai-community/gpt2')
+            print(f"🔧 Cargando tokenizador HuggingFace: {tokenizer_name}")
+            tokenizer = create_tokenizer(tokenizer_name)
+            
+            # Actualizar config con el tamaño real del vocabulario
+            config.vocab_size = len(tokenizer)
+            config.pad_token_id = tokenizer.pad_token_id
+            
+            print(f"✅ Tokenizador HF cargado: {len(tokenizer):,} tokens")
+            
+        except Exception as e:
+            print(f"⚠️ Error cargando tokenizador HF: {e}")
+            print("🔄 Fallback a tokenizador legacy...")
+            use_hf_tokenizer = False
+    
+    if not use_hf_tokenizer:
+        # Usar tokenizador legacy
+        tokenizer = AdaptiveBPETokenizer()
+        
+        if os.path.exists(model_path):
+            try:
+                tokenizer.load_pretrained(model_path)
+            except Exception as e:
+                print(f"⚠️ Error cargando tokenizer legacy: {e}")
+                print("💡 Usando tokenizer básico")
+                tokenizer._built = True
+        else:
+            print("⚠️ No se encontró directorio del modelo, usando tokenizer básico")
+            tokenizer._built = True
+        
+        # Ajustar configuración para tokenizador legacy
+        config.vocab_size = len(tokenizer)
+    
     # Crear modelo
-    model = SimpleChatModel(config)
+    model = HRMText1(config)
     
     # Intentar cargar pesos
     checkpoint_path = os.path.join(model_path, "pytorch_model.bin")
@@ -740,23 +1134,56 @@ def load_model_and_tokenizer(model_path: str):
             if 'model_state_dict' in state_dict:
                 state_dict = state_dict['model_state_dict']
             
-            # Intentar cargar pesos compatibles
+            # Intentar cargar pesos compatibles con mapeo de claves
             model_state = model.state_dict()
             loaded_keys = []
+            vocab_size_mismatch = False
             
-            for key in model_state.keys():
-                if key in state_dict and model_state[key].shape == state_dict[key].shape:
-                    model_state[key] = state_dict[key]
-                    loaded_keys.append(key)
+            # Crear mapeo de claves del modelo original al chat
+            key_mapping = {}
+            
+            for model_key in model_state.keys():
+                # Verificar compatibilidad de tamaño de vocabulario
+                if 'token_embeddings.weight' in model_key or 'lm_head.weight' in model_key:
+                    if model_key in state_dict:
+                        if model_state[model_key].shape != state_dict[model_key].shape:
+                            print(f"⚠️ Incompatibilidad en vocabulario: {model_state[model_key].shape} vs {state_dict[model_key].shape}")
+                            vocab_size_mismatch = True
+                            continue
+                
+                # Intentar mapeos comunes
+                mapped_keys = [
+                    model_key,  # Exact match first
+                    model_key.replace('block.', 'H_module.'),  # Training to chat mapping
+                    model_key.replace('H_module.', 'block.'),  # Chat to training mapping
+                ]
+                
+                for mapped_key in mapped_keys:
+                    if mapped_key in state_dict and model_state[model_key].shape == state_dict[mapped_key].shape:
+                        key_mapping[model_key] = mapped_key
+                        break
+            
+            # Cargar los pesos usando el mapeo
+            for model_key in model_state.keys():
+                if model_key in key_mapping:
+                    checkpoint_key = key_mapping[model_key]
+                    model_state[model_key] = state_dict[checkpoint_key]
+                    loaded_keys.append(model_key)
             
             model.load_state_dict(model_state, strict=False)
-            print(f"✅ Cargados {len(loaded_keys)}/{len(model_state)} tensores")
+            
+            if vocab_size_mismatch:
+                print(f"⚠️ Cargados {len(loaded_keys)}/{len(model_state)} tensores (embeddings omitidos por incompatibilidad)")
+                print("💡 El modelo necesita entrenamiento desde cero para el nuevo vocabulario")
+            else:
+                print(f"✅ Cargados {len(loaded_keys)}/{len(model_state)} tensores")
             
         except Exception as e:
             print(f"⚠️ Error cargando pesos: {e}")
             print("💡 Usando modelo con pesos aleatorios")
     else:
         print("⚠️ No se encontraron pesos, usando modelo aleatorio")
+        print("💡 Perfecto para entrenamiento desde cero")
     
     return model, tokenizer
 
@@ -765,20 +1192,44 @@ def main():
     parser.add_argument("--model", type=str, required=True, help="Directorio del modelo")
     parser.add_argument("--temperature", type=float, default=0.8, help="Temperatura de generación")
     parser.add_argument("--max_tokens", type=int, default=50, help="Tokens máximos a generar")
+    parser.add_argument("--tokenizer", type=str, default="auto", 
+                       choices=["auto", "hf", "legacy"], 
+                       help="Tipo de tokenizador: auto, hf (Hugging Face), legacy")
+    parser.add_argument("--hf_model", type=str, default=None,
+                       help="Modelo de HF para el tokenizador (ej: openai-community/gpt2, DeepESP/gpt2-spanish)")
     
     if len(sys.argv) == 1:
         print("Uso:")
-        print("  python chat_standalone_fixed.py --model /path/to/model")
+        print("  python chat_standalone_fixed.py --model /path/to/model [--tokenizer hf] [--hf_model openai-community/gpt2]")
+        print("\nEjemplos:")
+        print("  # Usar tokenizador HF automático")
+        print("  python chat_standalone_fixed.py --model ./model --tokenizer hf")
+        print("  # Usar GPT2 específico")  
+        print("  python chat_standalone_fixed.py --model ./model --tokenizer hf --hf_model openai-community/gpt2")
+        print("  # Usar GPT2 español")
+        print("  python chat_standalone_fixed.py --model ./model --tokenizer hf --hf_model DeepESP/gpt2-spanish")
         return
     
     args = parser.parse_args()
     
-    print("🚀 HRM Chat Standalone Mejorado")
-    print("=" * 50)
+    print("🚀 HRM Chat Standalone con Tokenizador HuggingFace")
+    print("=" * 60)
+    
+    # Determinar configuración del tokenizador
+    use_hf = None
+    if args.tokenizer == "hf":
+        use_hf = True
+    elif args.tokenizer == "legacy":
+        use_hf = False
+    # Si es "auto", dejar que load_model_and_tokenizer decida
     
     # Cargar modelo y tokenizer
     model_path = os.path.expanduser(args.model)
-    model, tokenizer = load_model_and_tokenizer(model_path)
+    model, tokenizer = load_model_and_tokenizer(
+        model_path, 
+        use_hf_tokenizer=use_hf,
+        hf_model_name=args.hf_model
+    )
     
     print(f"📊 Modelo: {sum(p.numel() for p in model.parameters()):,} parámetros")
     print(f"🔤 Vocabulario: {len(tokenizer)} tokens")
@@ -805,6 +1256,10 @@ def main():
                 print("⚠️ No se pudo tokenizar la entrada")
                 continue
             
+            # Agregar BOS token si no está presente
+            if input_tokens[0] != tokenizer.bos_token_id:
+                input_tokens = [tokenizer.bos_token_id] + input_tokens
+            
             input_tensor = torch.tensor([input_tokens], dtype=torch.long)
             print(f"🔢 Tokens: {len(input_tokens)}")
             
@@ -815,14 +1270,19 @@ def main():
                 output = model.generate(
                     input_tensor,
                     max_new_tokens=args.max_tokens,
-                    temperature=args.temperature
+                    temperature=args.temperature,
+                    top_k=50,
+                    top_p=0.9
                 )
                 
                 # Extraer solo los tokens nuevos
                 new_tokens = output[0, len(input_tokens):].tolist()
-                response = tokenizer.decode(new_tokens)
                 
-                print(response)
+                if new_tokens:
+                    response = tokenizer.decode(new_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+                    print(response if response.strip() else "[Sin respuesta generada]")
+                else:
+                    print("[No se generaron tokens nuevos]")
         
         except KeyboardInterrupt:
             print("\\n👋 Chat interrumpido. ¡Hasta luego!")
