@@ -26,6 +26,9 @@ except ImportError:
 # Configurar método de multiprocessing antes de cualquier uso
 if __name__ == '__main__':
     mp.set_start_method('fork', force=True)
+    # Marcar PID principal para evitar spam en multiprocessing
+    import os
+    os._main_pid = os.getpid()
 
 import torch
 import torch.nn as nn
@@ -876,14 +879,12 @@ def train_hrm_hf(
     # Crear optimizador
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     
-    # Calcular steps totales más precisos basado en chunks reales
-    # Para datasets con tokenización, el número real de batches puede ser mayor
-    estimated_batches_per_epoch = max(len(train_texts) // batch_size, 1)
-    total_steps = estimated_batches_per_epoch * num_epochs
-    
-    # Asegurar que pct_start esté entre 0 y 1 y que warmup steps sean razonables
-    effective_warmup_steps = min(warmup_steps, total_steps // 2)
-    pct_start = min(0.3, effective_warmup_steps / max(total_steps, effective_warmup_steps))
+    # Scheduler con warmup - estimación conservadora de steps
+    # El dataset crea múltiples chunks por texto, así que estimamos generosamente
+    estimated_chunks_per_text = 2  # Estimación conservadora
+    total_steps = len(train_texts) * estimated_chunks_per_text * num_epochs
+    # Asegurar que pct_start esté entre 0 y 1
+    pct_start = min(0.3, warmup_steps / max(total_steps, warmup_steps))
     
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
@@ -961,7 +962,9 @@ def train_hrm_hf(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
                 
-            scheduler.step()
+            # Solo hacer step del scheduler si no hemos excedido total_steps
+            if step <= total_steps:
+                scheduler.step()
             
             epoch_loss += loss.item()
             num_batches += 1

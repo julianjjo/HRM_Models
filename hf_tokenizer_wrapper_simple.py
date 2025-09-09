@@ -25,7 +25,10 @@ class HuggingFaceTokenizerWrapper:
         self.model_name = model_name
         
         # Cargar tokenizador de HF
-        print(f"🔧 Cargando tokenizador HuggingFace: {model_name}")
+        # Solo imprimir en proceso principal para evitar spam en multiprocessing
+        import os
+        if os.getpid() == getattr(os, '_main_pid', os.getpid()):
+            print(f"🔧 Cargando tokenizador HuggingFace: {model_name}")
         try:
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
@@ -46,10 +49,12 @@ class HuggingFaceTokenizerWrapper:
         # Crear mapeos de compatibilidad
         self._create_compatibility_mappings()
         
-        print(f"✅ Tokenizador inicializado:")
-        print(f"   📊 Vocabulario: {len(self.hf_tokenizer):,} tokens")
-        print(f"   🔤 Modelo: {self.model_name}")
-        print(f"   🔧 Versión rápida: {hasattr(self.hf_tokenizer, 'is_fast') and self.hf_tokenizer.is_fast}")
+        # Solo imprimir en proceso principal
+        if os.getpid() == getattr(os, '_main_pid', os.getpid()):
+            print(f"✅ Tokenizador inicializado:")
+            print(f"   📊 Vocabulario: {len(self.hf_tokenizer):,} tokens")
+            print(f"   🔤 Modelo: {self.model_name}")
+            print(f"   🔧 Versión rápida: {hasattr(self.hf_tokenizer, 'is_fast') and self.hf_tokenizer.is_fast}")
     
     def _create_compatibility_mappings(self):
         """Crear mapeos para compatibilidad con interfaz anterior"""
