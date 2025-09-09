@@ -547,7 +547,7 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
                    dataset_name: str = "allenai/c4", dataset_config: str = "en",
                    text_column: str = "text", min_text_length: int = 50, 
                    max_text_length: int = 2000, num_proc: int = None,
-                   use_streaming: bool = True):
+                   use_streaming: bool = True, fast_mode: bool = False):
     """Cargar dataset usando datasets de HuggingFace de forma parametrizable"""
     try:
         from datasets import load_dataset
@@ -560,14 +560,25 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
         print(f"   - Min length: {min_text_length} chars")
         print(f"   - Max length: {max_text_length} chars")
         print(f"   - Streaming: {use_streaming}")
+        print(f"   - Fast mode: {fast_mode}")
+        
+        # OPTIMIZACIÓN: Para datasets grandes, usar modo no-streaming es más rápido
+        if fast_mode and num_samples > 50000:
+            print("⚡ Fast mode: Usando dataset no-streaming para mejor rendimiento...")
+            use_streaming = False
         
         # Cargar dataset
         if use_streaming:
             dataset = load_dataset(dataset_name, dataset_config, split=split, streaming=True)
         else:
+            print("📦 Descargando dataset completo (más rápido para lotes grandes)...")
             dataset = load_dataset(dataset_name, dataset_config, split=split)
             if num_samples < len(dataset):
-                dataset = dataset.select(range(num_samples))
+                # Usar sampling aleatorio en lugar de secuencial
+                import random
+                indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
+                dataset = dataset.select(indices)
+                print(f"   🎲 Seleccionados {len(indices)} samples aleatorios de {len(dataset)}")
         
         texts = []
         processed_count = 0
@@ -708,6 +719,10 @@ def train_hrm_hf(
     cpu_intensive: bool = False,
     max_workers: int = 0,
     batch_size_multiplier: int = 1,
+    # Parámetros para acelerar carga de datos
+    fast_mode: bool = False,
+    use_synthetic: bool = False,
+    no_streaming: bool = False,
 ):
     """Entrenar modelo HRM con tokenizador HuggingFace"""
     
@@ -818,16 +833,27 @@ def train_hrm_hf(
     
     # Cargar datasets con parámetros optimizados
     print("📚 Cargando datasets...")
-    train_texts = load_dataset_hf(
-        tokenizer, "train", num_train_samples,
-        dataset_name=dataset_name, dataset_config=dataset_config,
-        min_text_length=min_text_length, max_text_length=max_text_length
-    )
-    val_texts = load_dataset_hf(
-        tokenizer, "validation", num_val_samples,
-        dataset_name=dataset_name, dataset_config=dataset_config,
-        min_text_length=min_text_length, max_text_length=max_text_length
-    )
+    
+    if use_synthetic:
+        print("⚡ Usando dataset sintético (instantáneo)")
+        train_texts = create_synthetic_dataset(num_train_samples)
+        val_texts = create_synthetic_dataset(num_val_samples)
+    else:
+        # Configurar streaming basado en parámetros
+        use_streaming_mode = not no_streaming and not fast_mode
+        
+        train_texts = load_dataset_hf(
+            tokenizer, "train", num_train_samples,
+            dataset_name=dataset_name, dataset_config=dataset_config,
+            min_text_length=min_text_length, max_text_length=max_text_length,
+            use_streaming=use_streaming_mode, fast_mode=fast_mode
+        )
+        val_texts = load_dataset_hf(
+            tokenizer, "validation", num_val_samples,
+            dataset_name=dataset_name, dataset_config=dataset_config,
+            min_text_length=min_text_length, max_text_length=max_text_length,
+            use_streaming=use_streaming_mode, fast_mode=fast_mode
+        )
     
     train_dataset = OptimizedTextDataset(
         tokenizer, train_texts, config.block_size, "train",
@@ -1130,6 +1156,14 @@ def main():
     parser.add_argument("--batch_size_multiplier", type=int, default=1,
                        help="Multiplicador de batch size para CPU intensivo (1-4)")
     
+    # Parámetros para solucionar lentitud de descarga
+    parser.add_argument("--fast_mode", action="store_true", default=False,
+                       help="Modo rápido: descarga dataset completo en lugar de streaming")
+    parser.add_argument("--use_synthetic", action="store_true", default=False,
+                       help="Usar dataset sintético (instantáneo, para testing)")
+    parser.add_argument("--no_streaming", action="store_true", default=False,
+                       help="Forzar descarga completa del dataset (más rápido para lotes grandes)")
+    
     if len(os.sys.argv) == 1:
         print("🚀 HRM Training con Tokenizador HuggingFace")
         print("\nUso:")
@@ -1138,20 +1172,20 @@ def main():
         print("  # Entrenar con GPT2 inglés (configuración automática)")
         print("  python hrm_training_micro_10m_hf.py --tokenizer openai-community/gpt2")
         print("  ")
-        print("  # Modo CPU INTENSIVO para máximo rendimiento (tu caso con RTX 5090 + muchos cores)")
-        print("  python hrm_training_micro_10m_hf.py --cpu_intensive --num_workers 12 --batch_size_multiplier 2")
+        print("  # DATASET SINTÉTICO (instantáneo, para testing rápido)")
+        print("  python hrm_training_micro_10m_hf.py --use_synthetic --train_samples 100000")
         print("  ")
-        print("  # Configuración manual de workers")  
-        print("  python hrm_training_micro_10m_hf.py --num_workers 8 --tokenizer_workers 16 --prefetch_factor 4")
+        print("  # NO STREAMING (rápido pero usa disco, recomendado para entrenamientos serios)")
+        print("  python hrm_training_micro_10m_hf.py --no_streaming --train_samples 1000000")
         print("  ")
-        print("  # Limitar uso de recursos")
-        print("  python hrm_training_micro_10m_hf.py --max_workers 6 --batch_size 4")
+        print("  # Modo CPU INTENSIVO + dataset rápido")
+        print("  python hrm_training_micro_10m_hf.py --cpu_intensive --use_synthetic --batch_size_multiplier 2")
         print("  ")
-        print("  # Cache tokens para datasets pequeños repetidos")
-        print("  python hrm_training_micro_10m_hf.py --cache_tokens --train_samples 1000")
+        print("  # Configuración manual de workers + no streaming")  
+        print("  python hrm_training_micro_10m_hf.py --num_workers 8 --no_streaming --fast_mode")
         print("  ")
-        print("  # Dataset diferente en español")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer DeepESP/gpt2-spanish --dataset_name oscar --dataset_config unshuffled_deduplicated_es")
+        print("  # Dataset diferente en español (modo rápido)")
+        print("  python hrm_training_micro_10m_hf.py --tokenizer DeepESP/gpt2-spanish --no_streaming")
         return
     
     args = parser.parse_args()
@@ -1187,6 +1221,10 @@ def main():
         cpu_intensive=args.cpu_intensive,
         max_workers=args.max_workers,
         batch_size_multiplier=args.batch_size_multiplier,
+        # Parámetros para acelerar carga de datos
+        fast_mode=args.fast_mode,
+        use_synthetic=args.use_synthetic,
+        no_streaming=args.no_streaming,
     )
 
 if __name__ == "__main__":
