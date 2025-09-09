@@ -15,6 +15,14 @@ import os, random, multiprocessing as mp, atexit, math, time
 from typing import List, Dict, Optional, Tuple
 import argparse
 
+# Progress bar
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("⚠️ tqdm no disponible, usando progreso básico")
+
 # Configurar método de multiprocessing antes de cualquier uso
 if __name__ == '__main__':
     mp.set_start_method('fork', force=True)
@@ -579,6 +587,38 @@ def train_hrm_hf(
     print(f"   Total parámetros: {total_params:,}")
     print(f"   Parámetros entrenables: {trainable_params:,}")
     
+    # Configurar dispositivo (GPU/CPU)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        gpu_count = torch.cuda.device_count()
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        
+        print(f"🚀 GPU disponible:")
+        print(f"   📱 Dispositivo: {gpu_name}")
+        print(f"   💾 Memoria: {gpu_memory:.1f} GB")
+        print(f"   🔢 GPUs: {gpu_count}")
+        
+        model = model.to(device)
+        
+        # Configurar para entrenamiento multi-GPU si hay múltiples GPUs
+        if gpu_count > 1:
+            print(f"🔗 Configurando entrenamiento multi-GPU ({gpu_count} GPUs)")
+            model = torch.nn.DataParallel(model)
+    else:
+        device = torch.device("cpu")
+        print(f"💻 Usando CPU (no hay GPU disponible)")
+    
+    print(f"🎯 Modelo movido a dispositivo: {device}")
+    
+    # Configurar mixed precision para GPU moderna
+    use_amp = device.type == 'cuda'
+    if use_amp:
+        print("⚡ Activando Mixed Precision (AMP) para mejor rendimiento en GPU")
+        scaler = torch.cuda.amp.GradScaler()
+    else:
+        scaler = None
+    
     # Cargar datasets
     print("📚 Cargando datasets...")
     train_texts = load_dataset_hf(tokenizer, "train", num_train_samples)
@@ -619,12 +659,29 @@ def train_hrm_hf(
         print(f"\n📅 Época {epoch + 1}/{num_epochs}")
         epoch_loss = 0
         num_batches = 0
+        epoch_start_time = time.time()
         
-        for batch_idx, batch in enumerate(train_loader):
+        # Crear barra de progreso si tqdm está disponible
+        if TQDM_AVAILABLE:
+            # Estimamos el número de batches basado en los samples
+            estimated_batches = len(train_texts) // batch_size
+            progress_bar = tqdm(
+                enumerate(train_loader),
+                desc=f"Época {epoch + 1}/{num_epochs}",
+                total=estimated_batches,
+                leave=True,
+                dynamic_ncols=True,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}"
+            )
+        else:
+            progress_bar = enumerate(train_loader)
+        
+        for batch_idx, batch in progress_bar:
             step += 1
+            step_start_time = time.time()
             
-            input_ids = batch['input_ids']
-            labels = batch['labels']
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['labels'].to(device)
             
             # Forward pass usando interfaz HRM completa
             # Crear attention mask si no existe
@@ -632,24 +689,56 @@ def train_hrm_hf(
             if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
                 attention_mask = (input_ids != tokenizer.pad_token_id).long()
             
-            # El modelo HRM devuelve (loss, logits, ...) cuando se pasan labels
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
+            # Forward pass con mixed precision si está disponible
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
+            else:
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
             
             # Backward pass
             optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.step()
+            
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+                
             scheduler.step()
             
             epoch_loss += loss.item()
             num_batches += 1
+            step_time = time.time() - step_start_time
             
-            # Logging
-            if step % 50 == 0:
-                current_lr = scheduler.get_last_lr()[0]
-                print(f"Step {step:4d} | Loss: {loss.item():.4f} | LR: {current_lr:.2e}")
+            # Actualizar barra de progreso
+            current_lr = scheduler.get_last_lr()[0]
+            if TQDM_AVAILABLE:
+                postfix = {
+                    'loss': f'{loss.item():.4f}',
+                    'lr': f'{current_lr:.2e}',
+                    's/step': f'{step_time:.2f}',
+                    'step': step
+                }
+                
+                # Añadir información de GPU si está disponible
+                if device.type == 'cuda':
+                    gpu_mem_used = torch.cuda.memory_allocated(0) / 1024**3
+                    gpu_mem_cached = torch.cuda.memory_reserved(0) / 1024**3
+                    postfix['GPU'] = f'{gpu_mem_used:.1f}GB'
+                
+                progress_bar.set_postfix(postfix)
+            
+            # Logging detallado cada 50 steps
+            if step % 50 == 0 and not TQDM_AVAILABLE:
+                print(f"Step {step:4d} | Loss: {loss.item():.4f} | LR: {current_lr:.2e} | Time: {step_time:.2f}s")
             
             # Evaluación
             if step % eval_steps == 0:
@@ -657,14 +746,28 @@ def train_hrm_hf(
                 val_loss = 0
                 val_batches = 0
                 
-                print("🔍 Evaluando...")
+                eval_desc = "🔍 Evaluando..."
+                if TQDM_AVAILABLE:
+                    print(f"\n{eval_desc}")
+                    estimated_val_batches = min(50, len(val_texts) // batch_size)
+                    eval_progress = tqdm(
+                        val_loader, 
+                        desc="Validación", 
+                        total=estimated_val_batches,
+                        leave=False,
+                        dynamic_ncols=True
+                    )
+                else:
+                    print(eval_desc)
+                    eval_progress = val_loader
+                
                 with torch.no_grad():
-                    for val_batch in val_loader:
+                    for val_batch in eval_progress:
                         if val_batches >= 50:  # Evaluar solo 50 batches
                             break
                         
-                        val_input_ids = val_batch['input_ids']
-                        val_labels = val_batch['labels']
+                        val_input_ids = val_batch['input_ids'].to(device)
+                        val_labels = val_batch['labels'].to(device)
                         
                         # Crear attention mask para validación
                         val_attention_mask = torch.ones_like(val_input_ids)
@@ -673,11 +776,17 @@ def train_hrm_hf(
                         
                         # Usar interfaz HRM completa
                         val_outputs = model(input_ids=val_input_ids, attention_mask=val_attention_mask, labels=val_labels)
-                        val_loss += (val_outputs[0] if isinstance(val_outputs, tuple) else val_outputs.loss).item()
+                        batch_val_loss = (val_outputs[0] if isinstance(val_outputs, tuple) else val_outputs.loss).item()
+                        val_loss += batch_val_loss
                         val_batches += 1
+                        
+                        if TQDM_AVAILABLE:
+                            eval_progress.set_postfix({'val_loss': f'{batch_val_loss:.4f}'})
                 
                 avg_val_loss = val_loss / max(val_batches, 1)
-                print(f"📊 Step {step} | Val Loss: {avg_val_loss:.4f}")
+                perplexity = math.exp(avg_val_loss) if avg_val_loss < 10 else float('inf')
+                
+                print(f"📊 Step {step} | Val Loss: {avg_val_loss:.4f} | Perplexity: {perplexity:.2f}")
                 
                 # Guardar mejor modelo
                 if avg_val_loss < best_val_loss:
@@ -699,8 +808,17 @@ def train_hrm_hf(
                 print("🎯 Loss muy bajo, finalizando entrenamiento temprano")
                 break
         
+        # Estadísticas de época
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
-        print(f"📊 Época {epoch + 1} completada | Loss promedio: {avg_epoch_loss:.4f}")
+        epoch_time = time.time() - epoch_start_time
+        samples_per_sec = num_batches * batch_size / epoch_time if epoch_time > 0 else 0
+        
+        print(f"\n📊 Época {epoch + 1}/{num_epochs} completada:")
+        print(f"   📈 Loss promedio: {avg_epoch_loss:.4f}")
+        print(f"   ⏱️  Tiempo: {epoch_time:.1f}s")
+        print(f"   🚀 Samples/sec: {samples_per_sec:.1f}")
+        print(f"   🎯 Mejor val loss: {best_val_loss:.4f}")
+        print("-" * 50)
     
     # Guardar modelo final
     final_path = os.path.join(output_dir, "final_model")
