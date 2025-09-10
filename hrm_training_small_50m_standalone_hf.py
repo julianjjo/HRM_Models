@@ -27,6 +27,9 @@ except ImportError:
 # Configurar método de multiprocessing antes de cualquier uso
 if __name__ == '__main__':
     mp.set_start_method('fork', force=True)
+    # Marcar PID principal para evitar spam en multiprocessing
+    import os
+    os._main_pid = os.getpid()
 
 import torch
 import torch.nn as nn
@@ -403,66 +406,235 @@ except ImportError:
 # --- Dataset Handling ---
 # ==============================================================================
 
-class TextDataset(IterableDataset):
-    """Dataset para texto usando tokenizador HF"""
+class OptimizedTextDataset(IterableDataset):
+    """Dataset optimizado para texto usando tokenizador HF con GPU y paralelización"""
     
-    def __init__(self, tokenizer, texts: List[str], block_size: int = 128, split_type: str = "train"):
+    def __init__(self, tokenizer, texts: List[str], block_size: int = 128, split_type: str = "train", 
+                 device=None, batch_tokenize: bool = True, num_proc: int = None, max_length: int = 1024,
+                 min_text_length: int = 10, cache_tokens: bool = False):
         self.tokenizer = tokenizer
         self.texts = texts
         self.block_size = block_size
         self.split_type = split_type
+        self.device = device if device is not None else (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+        self.batch_tokenize = batch_tokenize
+        # Configuración inteligente de workers
+        if num_proc is not None:
+            self.num_proc = num_proc
+        else:
+            # Auto-detectar basado en cores disponibles
+            cpu_cores = mp.cpu_count()
+            self.num_proc = min(cpu_cores, 16)
+        self.max_length = max_length
+        self.min_text_length = min_text_length
+        self.cache_tokens = cache_tokens
+        
+        # Pre-procesar y tokenizar si está habilitado el cache
+        if self.cache_tokens:
+            print(f"🔄 Pre-tokenizando {len(texts)} textos para cache...")
+            self.tokenized_chunks = self._preprocess_and_tokenize()
+        else:
+            self.tokenized_chunks = None
         
         print(f"📚 Dataset {split_type}: {len(texts)} textos, block_size={block_size}")
+        print(f"   🚀 GPU tokenization: {self.device.type == 'cuda'}")
+        print(f"   ⚡ Batch tokenization: {batch_tokenize}")
+        print(f"   🔧 Num processes: {self.num_proc}")
+        print(f"   💾 Cache tokens: {cache_tokens}")
+    
+    def _preprocess_and_tokenize(self):
+        """Pre-procesar y tokenizar todos los textos en paralelo"""
+        # Filtrar textos válidos
+        valid_texts = [text.strip()[:self.max_length] for text in self.texts 
+                      if text and len(text.strip()) >= self.min_text_length]
+        
+        if not valid_texts:
+            return []
+        
+        all_chunks = []
+        
+        if self.batch_tokenize and len(valid_texts) > 1:
+            # Tokenización en batch para mejor rendimiento
+            try:
+                print(f"   🔄 Tokenizando en batches de 32...")
+                batch_size = 32
+                
+                for i in range(0, len(valid_texts), batch_size):
+                    batch_texts = valid_texts[i:i + batch_size]
+                    
+                    # Tokenizar batch completo
+                    batch_tokens = self.tokenizer(
+                        batch_texts,
+                        add_special_tokens=True,
+                        max_length=self.max_length,
+                        truncation=True,
+                        padding=False,
+                        return_tensors=None
+                    )
+                    
+                    # Procesar cada secuencia tokenizada
+                    for tokens in batch_tokens['input_ids']:
+                        chunks = self._create_chunks(tokens)
+                        all_chunks.extend(chunks)
+                        
+            except Exception as e:
+                print(f"⚠️ Error en batch tokenization, usando secuencial: {e}")
+                # Fallback a tokenización secuencial
+                for text in valid_texts:
+                    try:
+                        tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                                                     max_length=self.max_length, truncation=True)
+                        chunks = self._create_chunks(tokens)
+                        all_chunks.extend(chunks)
+                    except:
+                        continue
+        else:
+            # Tokenización secuencial tradicional
+            for text in valid_texts:
+                try:
+                    tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                                                 max_length=self.max_length, truncation=True)
+                    chunks = self._create_chunks(tokens)
+                    all_chunks.extend(chunks)
+                except:
+                    continue
+        
+        print(f"   ✅ Generados {len(all_chunks)} chunks tokenizados")
+        return all_chunks
+    
+    def _create_chunks(self, tokens):
+        """Crear chunks de tokens del tamaño especificado"""
+        chunks = []
+        for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
+            chunk = tokens[i:i + self.block_size]
+            if len(chunk) == self.block_size:
+                chunks.append({
+                    'input_ids': torch.tensor(chunk[:-1], dtype=torch.long),
+                    'labels': torch.tensor(chunk[1:], dtype=torch.long)
+                })
+        return chunks
     
     def __iter__(self):
-        for text in self.texts:
-            if not text or len(text.strip()) < 10:
-                continue
-            
-            try:
-                # Tokenizar con HF - limitar longitud máxima para evitar errores
-                tokens = self.tokenizer.encode(text, add_special_tokens=True, max_length=1024, truncation=True)
+        if self.tokenized_chunks is not None:
+            # Usar chunks pre-tokenizados
+            for chunk in self.tokenized_chunks:
+                yield chunk
+        else:
+            # Tokenización on-the-fly
+            for text in self.texts:
+                if not text or len(text.strip()) < self.min_text_length:
+                    continue
                 
-                # Dividir en chunks del tamaño del bloque
-                for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
-                    chunk = tokens[i:i + self.block_size]
-                    if len(chunk) == self.block_size:
-                        input_ids = torch.tensor(chunk[:-1], dtype=torch.long)
-                        labels = torch.tensor(chunk[1:], dtype=torch.long)
-                        yield {
-                            'input_ids': input_ids,
-                            'labels': labels
-                        }
-            except Exception as e:
-                print(f"⚠️ Error tokenizando texto: {e}")
-                continue
+                try:
+                    # Tokenizar con HF
+                    tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                                                 max_length=self.max_length, truncation=True)
+                    
+                    # Crear chunks
+                    for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
+                        chunk = tokens[i:i + self.block_size]
+                        if len(chunk) == self.block_size:
+                            input_ids = torch.tensor(chunk[:-1], dtype=torch.long)
+                            labels = torch.tensor(chunk[1:], dtype=torch.long)
+                            yield {
+                                'input_ids': input_ids,
+                                'labels': labels
+                            }
+                except Exception as e:
+                    print(f"⚠️ Error tokenizando texto: {e}")
+                    continue
 
-def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000):
-    """Cargar dataset usando datasets de HuggingFace"""
+# Mantener compatibilidad hacia atrás
+TextDataset = OptimizedTextDataset
+
+def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000, 
+                   dataset_name: str = "allenai/c4", dataset_config: str = "en",
+                   text_column: str = "text", min_text_length: int = 50, 
+                   max_text_length: int = 2000, num_proc: int = None,
+                   use_streaming: bool = True, fast_mode: bool = False):
+    """Cargar dataset usando datasets de HuggingFace de forma parametrizable"""
     try:
         from datasets import load_dataset
         
-        print(f"📥 Cargando dataset '{split}' con {num_samples} samples...")
+        print(f"📥 Cargando dataset '{dataset_name}' ({dataset_config}) split '{split}' con {num_samples} samples...")
+        print(f"   📋 Configuración:")
+        print(f"   - Dataset: {dataset_name}")
+        print(f"   - Config: {dataset_config}")  
+        print(f"   - Columna texto: {text_column}")
+        print(f"   - Min length: {min_text_length} chars")
+        print(f"   - Max length: {max_text_length} chars")
+        print(f"   - Streaming: {use_streaming}")
+        print(f"   - Fast mode: {fast_mode}")
         
-        # Usar C4 en inglés como dataset principal
-        dataset = load_dataset("allenai/c4", "en", split=split, streaming=True)
+        # OPTIMIZACIÓN: Para datasets grandes, usar modo no-streaming es más rápido
+        if fast_mode and num_samples > 50000:
+            print("⚡ Fast mode: Usando dataset no-streaming para mejor rendimiento...")
+            use_streaming = False
+        
+        # Cargar dataset
+        if use_streaming:
+            dataset = load_dataset(dataset_name, dataset_config, split=split, streaming=True)
+        else:
+            print("📦 Descargando dataset completo (más rápido para lotes grandes)...")
+            dataset = load_dataset(dataset_name, dataset_config, split=split)
+            if num_samples < len(dataset):
+                # Usar sampling aleatorio en lugar de secuencial
+                import random
+                indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
+                dataset = dataset.select(indices)
+                print(f"   🎲 Seleccionados {len(indices)} samples aleatorios de {len(dataset)}")
         
         texts = []
-        for i, item in enumerate(dataset):
-            if i >= num_samples:
-                break
-            text = item.get('text', '')
-            if len(text.strip()) > 50:  # Filtrar textos muy cortos
-                # Limitar longitud del texto para evitar secuencias muy largas
-                text = text.strip()[:2000]  # Máximo 2000 caracteres
-                texts.append(text)
+        processed_count = 0
         
-        print(f"✅ Cargados {len(texts)} textos válidos")
+        if TQDM_AVAILABLE:
+            progress_desc = f"Procesando {dataset_name}"
+            progress = tqdm(enumerate(dataset), desc=progress_desc, total=num_samples if use_streaming else len(dataset))
+        else:
+            progress = enumerate(dataset)
+        
+        for i, item in progress:
+            if use_streaming and i >= num_samples:
+                break
+            
+            text = item.get(text_column, '')
+            if isinstance(text, list):
+                text = ' '.join(text)  # Para datasets con texto en listas
+            
+            if text and len(text.strip()) >= min_text_length:
+                # Procesar y limpiar texto
+                text = text.strip()[:max_text_length]
+                texts.append(text)
+                processed_count += 1
+                
+                if TQDM_AVAILABLE and isinstance(progress, tqdm):
+                    progress.set_postfix({
+                        'válidos': processed_count,
+                        'ratio': f'{processed_count/(i+1)*100:.1f}%'
+                    })
+        
+        if TQDM_AVAILABLE and isinstance(progress, tqdm):
+            progress.close()
+        
+        print(f"✅ Procesados {processed_count} textos válidos de {i+1} samples totales")
+        print(f"   📊 Ratio de aprovechamiento: {processed_count/(i+1)*100:.1f}%")
+        
+        if not texts:
+            print("❌ No se encontraron textos válidos en el dataset")
+            print("💡 Sugerencias:")
+            print("   - Use --no_streaming para mejor compatibilidad")
+            print("   - Reduzca --train_samples")
+            raise ValueError(f"No se pudieron cargar textos válidos de {dataset_name}")
+            
         return texts
         
     except Exception as e:
-        print(f"⚠️ Error cargando dataset HF: {e}")
-        return create_synthetic_dataset(num_samples)
+        print(f"❌ Error cargando dataset HF: {e}")
+        print("💡 Sugerencias:")
+        print("   - Use --no_streaming para mejor compatibilidad con datasets grandes") 
+        print("   - Verifique conectividad de red")
+        print("   - Reduzca el número de samples")
+        raise RuntimeError(f"Falló carga de dataset {dataset_name}: {e}") from e
 
 def create_synthetic_dataset(num_samples: int = 1000):
     """Crear dataset sintético para testing"""
@@ -543,11 +715,59 @@ def train_hrm_hf(
     eval_steps: int = 500,             # Evaluación menos frecuente
     max_grad_norm: float = 1.0,
     warmup_steps: int = 500,           # Warmup más largo
+    # Parámetros de tokenización optimizada
+    dataset_name: str = "allenai/c4",
+    dataset_config: str = "en",
+    batch_tokenize: bool = True,
+    cache_tokens: bool = False,
+    max_text_length: int = 2000,
+    min_text_length: int = 50,
+    # Parámetros de paralelización configurable
+    num_workers: int = 0,
+    tokenizer_workers: int = 0,
+    prefetch_factor: int = 2,
+    cpu_intensive: bool = False,
+    max_workers: int = 0,
+    batch_size_multiplier: int = 1,
+    # Parámetros para acelerar carga de datos
+    fast_mode: bool = False,
+    no_streaming: bool = False,
 ):
     """Entrenar modelo HRM con tokenizador HuggingFace"""
     
+    # Configuración inteligente de paralelización
+    cpu_count = mp.cpu_count()
+    
+    # Auto-detectar configuración óptima
+    if num_workers == 0:
+        if cpu_intensive:
+            # Modo CPU intensivo: usar la mayoría de cores disponibles
+            num_workers = min(cpu_count - 1, 16) if max_workers == 0 else min(max_workers, cpu_count - 1)
+        else:
+            # Modo balanceado
+            num_workers = min(cpu_count // 2, 8) if max_workers == 0 else min(max_workers, cpu_count // 2)
+    
+    if tokenizer_workers == 0:
+        tokenizer_workers = min(cpu_count, 16) if cpu_intensive else min(cpu_count // 2, 8)
+        if max_workers > 0:
+            tokenizer_workers = min(tokenizer_workers, max_workers)
+    
+    # Ajustar batch size para CPU intensivo
+    effective_batch_size = batch_size * batch_size_multiplier
+    
     print(f"🚀 Iniciando entrenamiento HRM con tokenizador HF")
     print(f"📊 Configuración:")
+    print(f"🖥️  Hardware detectado:")
+    print(f"   CPU cores: {cpu_count}")
+    print(f"   Modo CPU intensivo: {'✅' if cpu_intensive else '❌'}")
+    print(f"⚙️  Paralelización configurada:")
+    print(f"   DataLoader workers: {num_workers}")
+    print(f"   Tokenizer workers: {tokenizer_workers}")
+    print(f"   Prefetch factor: {prefetch_factor}")
+    print(f"   Batch size efectivo: {effective_batch_size} (original: {batch_size})")
+    if max_workers > 0:
+        print(f"   Límite máximo workers: {max_workers}")
+    print(f"📋 Entrenamiento:")
     print(f"   Tokenizador: {tokenizer_name}")
     print(f"   Directorio salida: {output_dir}")
     print(f"   Samples entrenamiento: {num_train_samples}")
@@ -620,25 +840,86 @@ def train_hrm_hf(
     else:
         scaler = None
     
-    # Cargar datasets
+    # Cargar datasets de HuggingFace
     print("📚 Cargando datasets...")
-    train_texts = load_dataset_hf(tokenizer, "train", num_train_samples)
-    val_texts = load_dataset_hf(tokenizer, "validation", num_val_samples)
     
-    train_dataset = TextDataset(tokenizer, train_texts, config.block_size, "train")
-    val_dataset = TextDataset(tokenizer, val_texts, config.block_size, "validation")
+    # Configurar streaming basado en parámetros
+    use_streaming_mode = not no_streaming and not fast_mode
     
-    # Crear dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    train_texts = load_dataset_hf(
+        tokenizer, "train", num_train_samples,
+        dataset_name=dataset_name, dataset_config=dataset_config,
+        min_text_length=min_text_length, max_text_length=max_text_length,
+        use_streaming=use_streaming_mode, fast_mode=fast_mode
+    )
+    val_texts = load_dataset_hf(
+        tokenizer, "validation", num_val_samples,
+        dataset_name=dataset_name, dataset_config=dataset_config,
+        min_text_length=min_text_length, max_text_length=max_text_length,
+        use_streaming=use_streaming_mode, fast_mode=fast_mode
+    )
+    
+    train_dataset = OptimizedTextDataset(
+        tokenizer, train_texts, config.block_size, "train",
+        device=device, batch_tokenize=batch_tokenize, cache_tokens=cache_tokens,
+        max_length=max_text_length, min_text_length=min_text_length,
+        num_proc=tokenizer_workers
+    )
+    val_dataset = OptimizedTextDataset(
+        tokenizer, val_texts, config.block_size, "validation", 
+        device=device, batch_tokenize=batch_tokenize, cache_tokens=False,  # No cache para validación
+        max_length=max_text_length, min_text_length=min_text_length,
+        num_proc=min(tokenizer_workers, 4)  # Menos workers para validación
+    )
+    
+    # Crear dataloaders con configuración optimizada
+    print(f"🔧 Configurando dataloaders optimizados...")
+    print(f"   Train workers: {num_workers}, prefetch: {prefetch_factor}")
+    
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=effective_batch_size, 
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == 'cuda',  # Pin memory para GPU
+        persistent_workers=num_workers > 0,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        drop_last=True,  # Evitar batches incompletos
+        multiprocessing_context='spawn' if num_workers > 0 else None  # Mejor para muchos workers
+    )
+    
+    # Configurar validation loader con menos recursos
+    val_workers = min(max(num_workers // 2, 1), 4) if num_workers > 0 else 0
+    print(f"   Val workers: {val_workers}, prefetch: {min(prefetch_factor, 2)}")
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=effective_batch_size, 
+        shuffle=False,
+        num_workers=val_workers,
+        pin_memory=device.type == 'cuda',
+        persistent_workers=val_workers > 0,
+        prefetch_factor=min(prefetch_factor, 2) if val_workers > 0 else None,
+        drop_last=False,
+        multiprocessing_context='spawn' if val_workers > 0 else None
+    )
     
     # Crear optimizador
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     
-    # Scheduler con warmup
-    total_steps = len(train_texts) // batch_size * num_epochs
+    # Scheduler con warmup - estimación conservadora de steps
+    # El dataset crea múltiples chunks por texto, así que estimamos generosamente
+    estimated_chunks_per_text = 2  # Estimación conservadora
+    total_steps = len(train_texts) * estimated_chunks_per_text * num_epochs
+    # Para entrenamientos grandes (10M+), usar warmup más largo
+    if len(train_texts) >= 1000000:  # Si >= 1M samples
+        effective_warmup_steps = max(warmup_steps, total_steps // 20)  # 5% warmup
+        print(f"🔥 Entrenamiento a gran escala detectado: Warmup extendido a {effective_warmup_steps} steps")
+    else:
+        effective_warmup_steps = warmup_steps
     # Asegurar que pct_start esté entre 0 y 1
-    pct_start = min(0.3, warmup_steps / max(total_steps, warmup_steps))
+    pct_start = min(0.3, effective_warmup_steps / max(total_steps, effective_warmup_steps))
+    
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=learning_rate,
@@ -646,10 +927,17 @@ def train_hrm_hf(
         pct_start=pct_start
     )
     
+    # Early stopping para evitar overfitting en entrenamientos grandes
+    early_stopping_patience = 5 if len(train_texts) >= 1000000 else 10
+    early_stopping_min_delta = 0.001
+    no_improvement_count = 0
+    early_stop_triggered = False
+    
     print(f"🎯 Entrenamiento configurado:")
     print(f"   Steps totales estimados: {total_steps:,}")
-    print(f"   Warmup steps: {warmup_steps}")
-    print(f"   Warmup pct_start: {pct_start:.3f}")
+    print(f"   Warmup steps efectivos: {effective_warmup_steps}")
+    if len(train_texts) >= 1000000:
+        print(f"   🛑 Early stopping: patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
     
     # Training loop
     model.train()
@@ -695,7 +983,7 @@ def train_hrm_hf(
             
             # Forward pass con mixed precision si está disponible
             if use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                     loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
             else:
@@ -716,7 +1004,9 @@ def train_hrm_hf(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
                 
-            scheduler.step()
+            # Solo hacer step del scheduler si no hemos excedido total_steps
+            if step <= total_steps:
+                scheduler.step()
             
             epoch_loss += loss.item()
             num_batches += 1
@@ -792,12 +1082,25 @@ def train_hrm_hf(
                 
                 print(f"📊 Step {step} | Val Loss: {avg_val_loss:.4f} | Perplexity: {perplexity:.2f}")
                 
-                # Guardar mejor modelo
-                if avg_val_loss < best_val_loss:
+                # Guardar mejor modelo y early stopping
+                if avg_val_loss < best_val_loss - early_stopping_min_delta:
                     best_val_loss = avg_val_loss
+                    no_improvement_count = 0
                     best_model_path = os.path.join(output_dir, "best_model")
                     save_model_hf(model, tokenizer, best_model_path, config, step)
                     print(f"💎 Nuevo mejor modelo guardado: {avg_val_loss:.4f}")
+                else:
+                    no_improvement_count += 1
+                    if len(train_texts) >= 1000000:  # Solo para entrenamientos grandes
+                        print(f"⏸️  Sin mejora: {no_improvement_count}/{early_stopping_patience}")
+                        
+                        if no_improvement_count >= early_stopping_patience:
+                            print(f"\n🛑 Early stopping activado después de {no_improvement_count} evaluaciones sin mejora")
+                            print(f"   Mejor val loss: {best_val_loss:.4f}")
+                            print(f"   Val loss actual: {avg_val_loss:.4f}")
+                            print("   Deteniendo entrenamiento para evitar overfitting...")
+                            early_stop_triggered = True
+                            break
                 
                 model.train()
             
@@ -811,6 +1114,11 @@ def train_hrm_hf(
             if loss.item() < 0.01:
                 print("🎯 Loss muy bajo, finalizando entrenamiento temprano")
                 break
+        
+        # Verificar early stopping
+        if early_stop_triggered:
+            print("🛑 Saliendo del entrenamiento por early stopping")
+            break
         
         # Estadísticas de época
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
@@ -856,17 +1164,59 @@ def main():
     parser.add_argument("--eval_steps", type=int, default=500,
                        help="Frecuencia de evaluación (menos frecuente)")
     
+    # Parámetros de tokenización optimizada
+    parser.add_argument("--dataset_name", type=str, default="allenai/c4",
+                       help="Nombre del dataset HF (ej: allenai/c4, wikitext)")
+    parser.add_argument("--dataset_config", type=str, default="en",
+                       help="Configuración del dataset (ej: en, es)")
+    parser.add_argument("--batch_tokenize", action="store_true", default=True,
+                       help="Usar tokenización en batch para mejor rendimiento")
+    parser.add_argument("--no_batch_tokenize", action="store_false", dest="batch_tokenize",
+                       help="Desactivar tokenización en batch")
+    parser.add_argument("--cache_tokens", action="store_true", default=False,
+                       help="Pre-tokenizar y cachear todos los tokens en memoria")
+    parser.add_argument("--max_text_length", type=int, default=2000,
+                       help="Longitud máxima de texto en caracteres")
+    parser.add_argument("--min_text_length", type=int, default=50,
+                       help="Longitud mínima de texto en caracteres")
+    parser.add_argument("--num_workers", type=int, default=0,
+                       help="Número de workers para DataLoader (0=auto-detect, recomendado: 4-16)")
+    parser.add_argument("--tokenizer_workers", type=int, default=0,
+                       help="Workers para tokenización paralela (0=auto-detect)")
+    parser.add_argument("--prefetch_factor", type=int, default=2,
+                       help="Factor de prefetch para DataLoader (recomendado: 2-8)")
+    parser.add_argument("--cpu_intensive", action="store_true", default=False,
+                       help="Modo CPU intensivo: maximiza uso de cores para CPU sin GPU")
+    parser.add_argument("--max_workers", type=int, default=0,
+                       help="Máximo workers permitidos (0=sin límite, útil para limitar uso)")
+    parser.add_argument("--batch_size_multiplier", type=int, default=1,
+                       help="Multiplicador de batch size para CPU intensivo (1-4)")
+    
+    # Parámetros para optimizar descarga de dataset
+    parser.add_argument("--fast_mode", action="store_true", default=False,
+                       help="Modo rápido: descarga dataset completo en lugar de streaming")
+    parser.add_argument("--no_streaming", action="store_true", default=False,
+                       help="Forzar descarga completa del dataset (más rápido para lotes grandes)")
+    
     if len(os.sys.argv) == 1:
         print("🚀 HRM Training con Tokenizador HuggingFace")
         print("\nUso:")
-        print("  python hrm_training_micro_10m_hf.py [opciones]")
+        print("  python hrm_training_small_50m_standalone_hf.py [opciones]")
         print("\nEjemplos:")
-        print("  # Entrenar con GPT2 inglés")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer openai-community/gpt2")
-        print("  # Entrenar con GPT2 español")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer DeepESP/gpt2-spanish")
-        print("  # Configuración personalizada")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer openai-community/gpt2 --batch_size 16 --epochs 5")
+        print("  # Entrenar con GPT2 inglés (configuración automática)")
+        print("  python hrm_training_small_50m_standalone_hf.py --tokenizer openai-community/gpt2")
+        print("  ")
+        print("  # NO STREAMING (descarga completa, recomendado para entrenamientos grandes)")
+        print("  python hrm_training_small_50m_standalone_hf.py --no_streaming --train_samples 100000")
+        print("  ")
+        print("  # Modo CPU INTENSIVO")
+        print("  python hrm_training_small_50m_standalone_hf.py --cpu_intensive --batch_size_multiplier 2")
+        print("  ")
+        print("  # Configuración manual de workers + no streaming")  
+        print("  python hrm_training_small_50m_standalone_hf.py --num_workers 8 --no_streaming")
+        print("  ")
+        print("  # Dataset diferente en español")
+        print("  python hrm_training_small_50m_standalone_hf.py --tokenizer DeepESP/gpt2-spanish --no_streaming")
         return
     
     args = parser.parse_args()
@@ -888,6 +1238,23 @@ def main():
         num_epochs=args.epochs,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
+        # Parámetros de tokenización optimizada
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        batch_tokenize=args.batch_tokenize,
+        cache_tokens=args.cache_tokens,
+        max_text_length=args.max_text_length,
+        min_text_length=args.min_text_length,
+        # Parámetros de paralelización configurable
+        num_workers=args.num_workers,
+        tokenizer_workers=args.tokenizer_workers,
+        prefetch_factor=args.prefetch_factor,
+        cpu_intensive=args.cpu_intensive,
+        max_workers=args.max_workers,
+        batch_size_multiplier=args.batch_size_multiplier,
+        # Parámetros para acelerar carga de datos
+        fast_mode=args.fast_mode,
+        no_streaming=args.no_streaming,
     )
 
 if __name__ == "__main__":
