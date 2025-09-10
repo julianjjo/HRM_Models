@@ -15,6 +15,28 @@ import os, multiprocessing as mp, math, time
 from typing import List, Dict, Optional, Tuple
 import argparse
 
+
+# Progress bar
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("⚠️ tqdm no disponible, usando progreso básico")
+
+# Configurar método de multiprocessing antes de cualquier uso
+if __name__ == '__main__':
+    mp.set_start_method('fork', force=True)
+    # Marcar PID principal para evitar spam en multiprocessing
+    import os
+    os._main_pid = os.getpid()
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
+from torch.optim import AdamW
+
 # Función de inicialización del código ACT de referencia
 def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0, lower: float = -2.0, upper: float = 2.0):
     """PyTorch version of jax truncated normal init (matemáticamente correcto)"""
@@ -38,27 +60,6 @@ def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0, lower: float = -2
             tensor.clip_(lower * comp_std, upper * comp_std)
 
     return tensor
-
-# Progress bar
-try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-    print("⚠️ tqdm no disponible, usando progreso básico")
-
-# Configurar método de multiprocessing antes de cualquier uso
-if __name__ == '__main__':
-    mp.set_start_method('fork', force=True)
-    # Marcar PID principal para evitar spam en multiprocessing
-    import os
-    os._main_pid = os.getpid()
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
-from torch.optim import AdamW
 
 # Importar wrapper de tokenizador HF simplificado
 try:
