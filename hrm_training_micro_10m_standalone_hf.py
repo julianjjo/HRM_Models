@@ -626,7 +626,8 @@ class HRMText1(ModelBase):
                     if hrm_info.get('q_values'):
                         for q_vals in hrm_info['q_values']:
                             # Q-halt loss: predecir si la secuencia será correcta
-                            q_halt_logits = q_vals[..., 1].mean(dim=1)  # Pool sobre secuencia
+                            # q_vals ya tiene dimensiones [batch_size, 2] después del pooling
+                            q_halt_logits = q_vals[..., 1]  # Solo tomar índice de halt
                             q_halt_loss = F.binary_cross_entropy_with_logits(
                                 q_halt_logits,
                                 seq_is_correct.float(),
