@@ -222,3 +222,4 @@ tensorboard_logs/
 dolma_data
 checkpoint_dataset
 HRM/*
+.codacy
