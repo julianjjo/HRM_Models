@@ -80,7 +80,9 @@ class HRMText1Config(SimpleConfig):
                  rotary_embedding_base=10000,
                  use_flash_attention=True,
                  gradient_checkpointing=True,  # Activar para modelo más grande
-                 h_update_period=3,         # H-module update period optimizado
+                 # HRM Ciclos según paper original
+                 H_cycles=2,                # Número de ciclos H por forward
+                 L_cycles=3,                # Número de ciclos L por ciclo H
                  **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -98,7 +100,9 @@ class HRMText1Config(SimpleConfig):
         self.rotary_embedding_base = rotary_embedding_base
         self.use_flash_attention = use_flash_attention
         self.gradient_checkpointing = gradient_checkpointing
-        self.h_update_period = h_update_period
+        # HRM Ciclos según paper original
+        self.H_cycles = H_cycles
+        self.L_cycles = L_cycles
 
 class RMSNorm(nn.Module):
     def __init__(self, n_embd, eps=1e-6):
@@ -215,12 +219,13 @@ class HRMBlock(nn.Module):
         return x
 
 class HRMInner(nn.Module):
-    """True HRM implementation with hierarchical temporal separation"""
-    def __init__(self, config):
+    """True HRM implementation with hierarchical temporal separation and Deep Supervision for LLMs"""
+    def __init__(self, config, layer_idx=0):
         super().__init__()
         self.H_module = HRMBlock(config)
         self.L_module = HRMBlock(config)
         self.config = config
+        self.layer_idx = layer_idx
         
         # Q-learning components for adaptive computation
         self.q_network = nn.Sequential(
@@ -229,87 +234,111 @@ class HRMInner(nn.Module):
             nn.Linear(config.n_embd // 4, 2)  # [continue, halt]
         )
         
+        # Deep Supervision: intermediate prediction heads for hierarchical supervision
+        self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        # Ponder loss components
+        self.ponder_network = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 4),
+            nn.ReLU(),
+            nn.Linear(config.n_embd // 4, 1),
+            nn.Sigmoid()
+        )
+        
         self.convergence_threshold = 1e-3
         self.max_l_steps = config.halt_max_steps
-        self.h_update_period = getattr(config, 'h_update_period', 4)
+        
+        # HRM Cycles from paper, adapted for LLMs
+        self.H_cycles = config.H_cycles
+        self.L_cycles = config.L_cycles
     
-    def forward(self, z_H, z_L, step_count=0, attn_mask=None, key_padding_mask=None, training=True):
-        """Forward pass with proper HRM hierarchical reasoning"""
+    def forward(self, z_H, z_L, input_embeddings, attn_mask=None, key_padding_mask=None, training=True):
+        """Forward pass with HRM cycles adapted for LLMs - respects token causality"""
         batch_size, seq_len, d_model = z_H.shape
         device = z_H.device
         
-        # Determine if this is an H-module update step
-        is_h_update_step = (step_count % self.h_update_period) == 0
-        
-        if is_h_update_step:
-            # H-module update: Run L-module to convergence, then update H-module
-            z_L_converged, l_steps, q_values = self._run_l_module_to_convergence(
-                z_H, z_L, attn_mask, key_padding_mask, training
-            )
-            
-            # Update H-module with converged L-module output
-            z_H_input = z_H + z_L_converged
-            z_H_new = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
-            
-            # Reset L-module (start fresh for next cycle)
-            z_L_new = torch.zeros_like(z_L)
-            
-            return z_H_new, z_L_new, {
-                'h_updated': True,
-                'l_steps': l_steps,
-                'q_values': q_values,
-                'convergence_achieved': True
-            }
-        else:
-            # L-module only step: Continue L-module processing
-            z_L_input = z_L + z_H.detach()  # Detach H to prevent gradients
-            z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
-            
-            return z_H, z_L_new, {
-                'h_updated': False,
-                'l_steps': 1,
-                'q_values': None,
-                'convergence_achieved': False
-            }
-    
-    def _run_l_module_to_convergence(self, z_H, z_L, attn_mask, key_padding_mask, training):
-        """Run L-module until convergence or max steps reached"""
-        z_L_current = z_L
-        z_L_prev = z_L
+        total_l_steps = 0
+        total_ponder_loss = 0.0
         all_q_values = []
         
-        for l_step in range(self.max_l_steps):
-            # L-module forward pass
-            z_L_input = z_L_current + z_H.detach()
-            z_L_next = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        # HRM Cycles implementation for LLMs
+        # Key adaptation: maintain causal structure for autoregressive generation
+        for h_cycle in range(self.H_cycles):
+            cycle_l_steps = 0
+            cycle_ponder_loss = 0.0
             
-            # Q-learning decision: should we continue or halt?
-            if training and l_step < self.max_l_steps - 1:
-                q_values = self.q_network(z_L_next)
-                all_q_values.append(q_values)
+            # L-module cycles (local refinement with causal attention)
+            for l_cycle in range(self.L_cycles):
+                # L-module processes with H-module context + input injection
+                z_L_input = z_L + z_H.detach() + input_embeddings  # Input injection as in paper
+                z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
                 
-                # Epsilon-greedy exploration during training
-                epsilon = max(0.1, 1.0 - l_step * 0.1)
-                if torch.rand(1).item() < epsilon:
-                    action = torch.randint(0, 2, (1,)).item()
-                else:
-                    # Average Q-values across batch and sequence dimensions, then select action
-                    avg_q_values = q_values.mean(dim=[0, 1])  # Shape: [2]
-                    action = torch.argmax(avg_q_values).item()
+                # Ponder loss: computational cost of this L-cycle
+                ponder_score = self.ponder_network(z_L_new).mean()
+                cycle_ponder_loss += ponder_score
+                cycle_l_steps += 1
                 
-                # If action is halt (1), break
-                if action == 1:
-                    break
+                # Q-learning decision: should we halt this L-cycle early?
+                if training and l_cycle < self.L_cycles - 1:  # Not on last L-cycle
+                    q_values = self.q_network(z_L_new)
+                    all_q_values.append(q_values)
+                    
+                    # Adaptive halting based on convergence
+                    if l_cycle > 0:  # Need at least one step
+                        diff = torch.norm(z_L_new - z_L, p=2, dim=-1).mean()
+                        
+                        # Epsilon-greedy + convergence-based halting
+                        epsilon = max(0.1, 1.0 - l_cycle * 0.2)
+                        if torch.rand(1).item() < epsilon:
+                            # Exploration: random action
+                            action = torch.randint(0, 2, (1,)).item()
+                        else:
+                            # Exploitation: Q-value based + convergence
+                            avg_q_values = q_values.mean(dim=[0, 1])
+                            q_halt = avg_q_values[1].item()
+                            q_continue = avg_q_values[0].item()
+                            
+                            # Halt if Q suggests OR if converged
+                            should_halt = (q_halt > q_continue) or (diff < self.convergence_threshold)
+                            action = 1 if should_halt else 0
+                        
+                        if action == 1:  # Halt L-cycles early
+                            break
+                
+                z_L = z_L_new
             
-            # Check convergence
-            diff = torch.norm(z_L_next - z_L_current, p=2, dim=-1).mean()
-            if diff < self.convergence_threshold:
-                break
+            # H-module update after L-cycles (except last H-cycle)
+            if h_cycle < self.H_cycles - 1:
+                z_H_input = z_H + z_L  # H gets refined L-module output
+                z_H = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
             
-            z_L_prev = z_L_current
-            z_L_current = z_L_next
+            total_l_steps += cycle_l_steps
+            total_ponder_loss += cycle_ponder_loss
         
-        return z_L_current, l_step + 1, all_q_values
+        # Final H-module update with all L-module refinements
+        z_H_final = self.H_module(z_H + z_L, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        
+        # Deep Supervision: Generate intermediate predictions for LLM tasks
+        h_logits = self.h_prediction_head(z_H_final)
+        l_logits = self.l_prediction_head(z_L)
+        
+        # Normalize metrics
+        avg_ponder_loss = total_ponder_loss / max(total_l_steps, 1)
+        
+        return z_H_final, z_L, {
+            'h_updated': True,
+            'l_steps': total_l_steps,
+            'q_values': all_q_values,
+            'convergence_achieved': True,
+            'h_logits': h_logits,  # For Deep Supervision
+            'l_logits': l_logits,  # For Deep Supervision 
+            'ponder_loss': avg_ponder_loss,  # For computational regularization
+            'layer_idx': self.layer_idx,
+            'h_cycles_completed': self.H_cycles,
+            'avg_l_cycles': total_l_steps / self.H_cycles
+        }
+    
 
 class HRMText1(nn.Module):
     """HRM Model with full hierarchical temporal separation"""
@@ -328,9 +357,9 @@ class HRMText1(nn.Module):
             self.pos_embeddings = None
             self.pos_ids = None
         
-        # Apilar múltiples capas HRM
+        # Apilar múltiples capas HRM con índices para Deep Supervision
         self.layers = nn.ModuleList([
-            HRMInner(config) for _ in range(config.n_layers)
+            HRMInner(config, layer_idx=i) for i in range(config.n_layers)
         ])
         
         self.final_norm = RMSNorm(config.n_embd)
@@ -373,26 +402,101 @@ class HRMText1(nn.Module):
         z_H = x
         z_L = torch.zeros_like(x)
         
-        # HRM layers con estados separados
-        for step_count, layer in enumerate(self.layers):
-            z_H, z_L, hrm_info = layer(z_H, z_L, step_count, attn_mask=causal_mask, key_padding_mask=attention_mask)
+        # Deep Supervision: collect intermediate predictions and losses
+        all_hrm_info = []
+        total_ponder_loss = 0.0
+        intermediate_losses = []
+        
+        # HRM layers con estados separados - using cycles approach
+        for layer_idx, layer in enumerate(self.layers):
+            z_H, z_L, hrm_info = layer(z_H, z_L, x, attn_mask=causal_mask, key_padding_mask=attention_mask, training=self.training)
+            all_hrm_info.append(hrm_info)
+            
+            # Accumulate ponder loss
+            if hrm_info.get('ponder_loss') is not None:
+                total_ponder_loss += hrm_info['ponder_loss']
+            
+            # Deep Supervision: calculate intermediate losses if we have labels and intermediate predictions
+            if labels is not None and hrm_info.get('h_logits') is not None:
+                h_logits = hrm_info['h_logits']
+                l_logits = hrm_info.get('l_logits')
+                
+                # Calculate losses for intermediate predictions
+                shift_labels = labels[..., 1:].contiguous()
+                
+                # H-module supervision
+                shift_h_logits = h_logits[..., :-1, :].contiguous()
+                h_loss = F.cross_entropy(
+                    shift_h_logits.view(-1, shift_h_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=self.config.pad_token_id
+                )
+                
+                # L-module supervision (if available)
+                l_loss = 0.0
+                if l_logits is not None:
+                    shift_l_logits = l_logits[..., :-1, :].contiguous()
+                    l_loss = F.cross_entropy(
+                        shift_l_logits.view(-1, shift_l_logits.size(-1)),
+                        shift_labels.view(-1),
+                        ignore_index=self.config.pad_token_id
+                    )
+                
+                intermediate_losses.append({
+                    'layer_idx': layer_idx,
+                    'h_loss': h_loss,
+                    'l_loss': l_loss
+                })
         
         # Final norm y lm_head
         output = self.final_norm(z_H)
         logits = self.lm_head(output)
         
-        # Si se proporcionan labels, calcular loss
+        # Si se proporcionan labels, calcular loss total con Deep Supervision
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            loss = F.cross_entropy(
+            
+            # Main loss
+            main_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
                 ignore_index=self.config.pad_token_id
             )
-            return (loss, logits)
+            
+            # Deep Supervision loss (weighted sum of intermediate losses)
+            deep_supervision_loss = 0.0
+            if intermediate_losses:
+                total_layers = len(self.layers)
+                for loss_info in intermediate_losses:
+                    layer_weight = (loss_info['layer_idx'] + 1) / total_layers  # Higher weight for deeper layers
+                    deep_supervision_loss += layer_weight * (loss_info['h_loss'] + 0.5 * loss_info['l_loss'])
+                
+                deep_supervision_loss /= len(intermediate_losses)  # Average
+            
+            # Ponder loss (computational regularization)
+            ponder_loss = total_ponder_loss / len(self.layers) if total_ponder_loss > 0 else 0.0
+            
+            # Combined loss
+            total_loss = (
+                main_loss + 
+                0.3 * deep_supervision_loss +  # Deep supervision weight
+                self.config.ponder_loss_weight * ponder_loss  # Ponder loss weight
+            )
+            
+            return {
+                'loss': total_loss,
+                'logits': logits,
+                'main_loss': main_loss,
+                'deep_supervision_loss': deep_supervision_loss,
+                'ponder_loss': ponder_loss,
+                'hrm_info': all_hrm_info
+            }
         
-        return logits
+        return {
+            'logits': logits,
+            'hrm_info': all_hrm_info
+        }
 
 # Hugging Face Hub imports
 try:
@@ -985,10 +1089,28 @@ def train_hrm_hf(
             if use_amp:
                 with torch.amp.autocast('cuda'):
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                    loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
+                    if isinstance(outputs, dict):
+                        loss = outputs['loss']
+                        main_loss = outputs.get('main_loss', loss)
+                        deep_supervision_loss = outputs.get('deep_supervision_loss', 0.0)
+                        ponder_loss = outputs.get('ponder_loss', 0.0)
+                    else:
+                        loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
+                        main_loss = loss
+                        deep_supervision_loss = 0.0
+                        ponder_loss = 0.0
             else:
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
+                if isinstance(outputs, dict):
+                    loss = outputs['loss']
+                    main_loss = outputs.get('main_loss', loss)
+                    deep_supervision_loss = outputs.get('deep_supervision_loss', 0.0)
+                    ponder_loss = outputs.get('ponder_loss', 0.0)
+                else:
+                    loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
+                    main_loss = loss
+                    deep_supervision_loss = 0.0
+                    ponder_loss = 0.0
             
             # Backward pass
             optimizer.zero_grad()
@@ -1017,10 +1139,17 @@ def train_hrm_hf(
             if TQDM_AVAILABLE:
                 postfix = {
                     'loss': f'{loss.item():.4f}',
+                    'main': f'{main_loss.item() if hasattr(main_loss, "item") else main_loss:.4f}',
                     'lr': f'{current_lr:.2e}',
                     's/step': f'{step_time:.2f}',
                     'step': step
                 }
+                
+                # Agregar métricas HRM si están disponibles
+                if deep_supervision_loss > 0:
+                    postfix['ds'] = f'{deep_supervision_loss.item() if hasattr(deep_supervision_loss, "item") else deep_supervision_loss:.4f}'
+                if ponder_loss > 0:
+                    postfix['ponder'] = f'{ponder_loss.item() if hasattr(ponder_loss, "item") else ponder_loss:.4f}'
                 
                 # Añadir información de GPU si está disponible
                 if device.type == 'cuda':
@@ -1070,7 +1199,10 @@ def train_hrm_hf(
                         
                         # Usar interfaz HRM completa
                         val_outputs = model(input_ids=val_input_ids, attention_mask=val_attention_mask, labels=val_labels)
-                        batch_val_loss = (val_outputs[0] if isinstance(val_outputs, tuple) else val_outputs.loss).item()
+                        if isinstance(val_outputs, dict):
+                            batch_val_loss = val_outputs['loss'].item()
+                        else:
+                            batch_val_loss = (val_outputs[0] if isinstance(val_outputs, tuple) else val_outputs.loss).item()
                         val_loss += batch_val_loss
                         val_batches += 1
                         
@@ -1081,6 +1213,16 @@ def train_hrm_hf(
                 perplexity = math.exp(avg_val_loss) if avg_val_loss < 10 else float('inf')
                 
                 print(f"📊 Step {step} | Val Loss: {avg_val_loss:.4f} | Perplexity: {perplexity:.2f}")
+                
+                # Reportar métricas HRM si están disponibles en la última validación
+                if isinstance(val_outputs, dict) and val_outputs.get('hrm_info'):
+                    hrm_info = val_outputs['hrm_info']
+                    h_updates = sum(1 for info in hrm_info if info.get('h_updated', False))
+                    total_l_steps = sum(info.get('l_steps', 0) for info in hrm_info)
+                    avg_l_steps = total_l_steps / len(hrm_info) if hrm_info else 0
+                    convergence_rate = sum(1 for info in hrm_info if info.get('convergence_achieved', False)) / len(hrm_info) if hrm_info else 0
+                    
+                    print(f"   🔄 HRM Métricas: H-updates: {h_updates}/{len(hrm_info)}, Avg L-steps: {avg_l_steps:.1f}, Convergencia: {convergence_rate*100:.1f}%")
                 
                 # Guardar mejor modelo y early stopping
                 if avg_val_loss < best_val_loss - early_stopping_min_delta:
