@@ -68,7 +68,7 @@ class HRMText1Config(SimpleConfig):
                  block_size=128,            # Micro model context
                  n_embd=256,                # Micro model embeddings
                  n_head=8,                  # Micro model heads
-                 n_layers=6,                # Micro model layers
+                 n_layers=4,                # Micro model layers - reducido para estabilidad
                  d_ff=1024,                 # Micro model FFN
                  dropout=0.1,
                  pad_token_id=0,
@@ -80,8 +80,8 @@ class HRMText1Config(SimpleConfig):
                  use_flash_attention=True,
                  gradient_checkpointing=False,
                  # HRM Ciclos según paper original
-                 H_cycles=2,                # Número de ciclos H por forward
-                 L_cycles=2,                # Número de ciclos L por ciclo H (menor para modelo micro)
+                 H_cycles=1,                # Reducido para estabilidad micro
+                 L_cycles=1,                # Reducido para estabilidad micro
                  **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -238,13 +238,11 @@ class HRMInner(nn.Module):
             nn.Linear(config.n_embd // 4, 2)  # [continue, halt]
         )
 
-        # Deep Supervision: intermediate prediction heads for hierarchical supervision
-        self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # TEMPORAL: Desactivar prediction heads para simplificar
+        # self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # Inicialización ultra-conservadora para prediction heads
-        nn.init.normal_(self.h_prediction_head.weight, mean=0.0, std=0.005)  # Muy pequeño
-        nn.init.normal_(self.l_prediction_head.weight, mean=0.0, std=0.005)  # Muy pequeño
+        print(f"🔧 Capa {layer_idx}: Modo simplificado - sin prediction heads")
 
         # Ponder loss components
         self.ponder_network = nn.Sequential(
@@ -326,9 +324,11 @@ class HRMInner(nn.Module):
         # Final H-module update with all L-module refinements
         z_H_final = self.H_module(z_H + z_L, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
 
-        # Deep Supervision: Generate intermediate predictions for LLM tasks
-        h_logits = self.h_prediction_head(z_H_final)
-        l_logits = self.l_prediction_head(z_L)
+        # TEMPORAL: Sin Deep Supervision
+        # h_logits = self.h_prediction_head(z_H_final)
+        # l_logits = self.l_prediction_head(z_L)
+        h_logits = None
+        l_logits = None
 
         # Normalize metrics
         avg_ponder_loss = total_ponder_loss / max(total_l_steps, 1)
@@ -424,8 +424,8 @@ class HRMText1(nn.Module):
             if hrm_info.get('ponder_loss') is not None:
                 total_ponder_loss += hrm_info['ponder_loss']
 
-            # Deep Supervision: calculate intermediate losses if we have labels and intermediate predictions
-            if labels is not None and hrm_info.get('h_logits') is not None:
+            # TEMPORAL: Desactivar Deep Supervision completamente
+            if False and labels is not None and hrm_info.get('h_logits') is not None:
                 h_logits = hrm_info['h_logits']
                 l_logits = hrm_info.get('l_logits')
 
@@ -523,11 +523,11 @@ class HRMText1(nn.Module):
                 print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
                 deep_supervision_loss = 0.0
 
-            # Combined loss con verificación de estabilidad
+            # TEMPORAL: Solo main_loss hasta estabilizar el modelo base
             total_loss = (
                 main_loss +
-                0.2 * deep_supervision_loss +  # Peso balanceado para HRM completo
-                self.config.ponder_loss_weight * ponder_loss  # Ponder loss weight
+                0.0 * deep_supervision_loss +  # DESACTIVADO temporalmente
+                0.0 * self.config.ponder_loss_weight * ponder_loss  # DESACTIVADO temporalmente
             )
 
             # Verificar estabilidad de la pérdida final
@@ -914,7 +914,7 @@ def train_hrm_hf(
         block_size=128,
         n_embd=256,
         n_head=8,
-        n_layers=6,
+        n_layers=4,  # Reducido para estabilidad
         d_ff=1024,
         dropout=0.1,
         tokenizer_type='huggingface',
