@@ -242,6 +242,10 @@ class HRMInner(nn.Module):
         self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+        # Inicialización ultra-conservadora para prediction heads
+        nn.init.normal_(self.h_prediction_head.weight, mean=0.0, std=0.005)  # Muy pequeño
+        nn.init.normal_(self.l_prediction_head.weight, mean=0.0, std=0.005)  # Muy pequeño
+
         # Ponder loss components
         self.ponder_network = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd // 4),
@@ -428,23 +432,44 @@ class HRMText1(nn.Module):
                 # Calculate losses for intermediate predictions
                 shift_labels = labels[..., 1:].contiguous()
 
-                # H-module supervision
+                # H-module supervision con estabilización
                 shift_h_logits = h_logits[..., :-1, :].contiguous()
+
+                # Estabilizar logits antes del cálculo de pérdida
+                shift_h_logits = torch.clamp(shift_h_logits, -20.0, 20.0)  # Prevenir logits extremos
+
                 h_loss = F.cross_entropy(
                     shift_h_logits.view(-1, shift_h_logits.size(-1)),
                     shift_labels.view(-1),
-                    ignore_index=self.config.pad_token_id
+                    ignore_index=self.config.pad_token_id,
+                    reduction='mean'  # Asegurar reducción mean
                 )
 
-                # L-module supervision (if available)
+                # Verificar y corregir h_loss si es inestable
+                if torch.isnan(h_loss) or torch.isinf(h_loss) or h_loss > 50.0:
+                    print(f"⚠️ H-loss inestable en capa {layer_idx}: {h_loss.item():.4f}, usando fallback")
+                    # Usar una pérdida de referencia basada en vocabulario
+                    h_loss = torch.log(torch.tensor(self.config.vocab_size, device=h_loss.device, dtype=torch.float32))
+
+                # L-module supervision (if available) con estabilización
                 l_loss = 0.0
                 if l_logits is not None:
                     shift_l_logits = l_logits[..., :-1, :].contiguous()
+
+                    # Estabilizar L-logits también
+                    shift_l_logits = torch.clamp(shift_l_logits, -20.0, 20.0)
+
                     l_loss = F.cross_entropy(
                         shift_l_logits.view(-1, shift_l_logits.size(-1)),
                         shift_labels.view(-1),
-                        ignore_index=self.config.pad_token_id
+                        ignore_index=self.config.pad_token_id,
+                        reduction='mean'
                     )
+
+                    # Verificar y corregir l_loss si es inestable
+                    if torch.isnan(l_loss) or torch.isinf(l_loss) or l_loss > 50.0:
+                        print(f"⚠️ L-loss inestable en capa {layer_idx}: {l_loss.item():.4f}, usando fallback")
+                        l_loss = torch.log(torch.tensor(self.config.vocab_size, device=l_loss.device, dtype=torch.float32))
 
                 intermediate_losses.append({
                     'layer_idx': layer_idx,
@@ -468,36 +493,27 @@ class HRMText1(nn.Module):
                 ignore_index=self.config.pad_token_id
             )
 
-            # Deep Supervision loss (weighted sum of intermediate losses) con protección NaN
+            # Deep Supervision loss (weighted sum of intermediate losses) - ahora más estable
             deep_supervision_loss = 0.0
             if intermediate_losses:
                 total_layers = len(self.layers)
-                valid_losses = []
 
                 for loss_info in intermediate_losses:
                     h_loss = loss_info['h_loss']
                     l_loss = loss_info['l_loss']
 
-                    # Verificar que las pérdidas intermedias no sean NaN
-                    if torch.isnan(h_loss) or torch.isinf(h_loss):
-                        print(f"⚠️ H-loss NaN en capa {loss_info['layer_idx']}, saltando")
-                        continue
-                    if torch.isnan(l_loss) or torch.isinf(l_loss):
-                        print(f"⚠️ L-loss NaN en capa {loss_info['layer_idx']}, saltando")
-                        l_loss = 0.0  # Usar 0 en lugar de saltar completamente
+                    # Las pérdidas ya están estabilizadas arriba, solo verificar valores extremos
+                    h_loss = torch.clamp(h_loss, 0.0, 50.0)  # Limitar rango
+                    if isinstance(l_loss, torch.Tensor):
+                        l_loss = torch.clamp(l_loss, 0.0, 50.0)
+                    else:
+                        l_loss = min(max(l_loss, 0.0), 50.0)  # Para valores scalar
 
                     layer_weight = (loss_info['layer_idx'] + 1) / total_layers
-                    layer_loss = layer_weight * (h_loss + 0.5 * l_loss)
+                    layer_loss = layer_weight * (h_loss + 0.3 * l_loss)  # Reducir peso de L-loss
+                    deep_supervision_loss += layer_loss
 
-                    # Verificar resultado de la capa
-                    if not torch.isnan(layer_loss) and not torch.isinf(layer_loss):
-                        valid_losses.append(layer_loss)
-
-                if valid_losses:
-                    deep_supervision_loss = sum(valid_losses) / len(valid_losses)
-                else:
-                    print("⚠️ Todas las pérdidas de Deep Supervision son NaN, desactivando")
-                    deep_supervision_loss = 0.0
+                deep_supervision_loss /= len(intermediate_losses)  # Promedio
 
             # Ponder loss (computational regularization)
             ponder_loss = total_ponder_loss / len(self.layers) if total_ponder_loss > 0 else 0.0
@@ -510,7 +526,7 @@ class HRMText1(nn.Module):
             # Combined loss con verificación de estabilidad
             total_loss = (
                 main_loss +
-                0.05 * deep_supervision_loss +  # Peso muy reducido para testear
+                0.2 * deep_supervision_loss +  # Peso balanceado para HRM completo
                 self.config.ponder_loss_weight * ponder_loss  # Ponder loss weight
             )
 
