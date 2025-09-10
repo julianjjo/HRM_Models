@@ -8,7 +8,7 @@ python hrm_training_micro_10m_standalone_hf.py \
   --val_samples 50000 \
   --epochs 1 \
   --batch_size 16 \
-  --learning_rate 0.00005 \
+  --learning_rate 0.000025 \
   --num_workers 8 \
   --prefetch_factor 4 \
   --val_check_interval 5000 \
@@ -27,7 +27,7 @@ python hrm_training_micro_10m_standalone_hf.py \
   --val_samples 50000 \
   --epochs 1 \
   --batch_size 32 \
-  --learning_rate 0.00008 \
+  --learning_rate 0.00004 \
   --num_workers 12 \
   --prefetch_factor 8 \
   --val_check_interval 2500 \
@@ -44,7 +44,7 @@ python hrm_training_micro_10m_standalone_hf.py \
   --val_samples 50000 \
   --epochs 1 \
   --batch_size 8 \
-  --learning_rate 0.00003 \
+  --learning_rate 0.000015 \
   --cpu_intensive \
   --batch_size_multiplier 2 \
   --num_workers 16 \
@@ -63,7 +63,7 @@ python hrm_training_micro_10m_standalone_hf.py \
   --val_samples 25000 \
   --epochs 1 \
   --batch_size 4 \
-  --learning_rate 0.00003 \
+  --learning_rate 0.000015 \
   --num_workers 4 \
   --prefetch_factor 2 \
   --val_check_interval 5000 \
@@ -80,12 +80,12 @@ python hrm_training_micro_10m_standalone_hf.py \
 - **Min Delta: 0.001** - Mejora mínima requerida
 - **Automático** - Se activa solo para datasets >= 1M samples
 
-### **Learning Rates recomendados (CORREGIDOS)**
-- **GPU potente**: 0.00005-0.00008 (10x más bajo que antes)
-- **CPU/GPU débil**: 0.00003-0.00005 (10x más bajo que antes)
-- **Memoria limitada**: 0.00003
+### **Learning Rates recomendados (ULTRA-CONSERVADORES)**
+- **GPU potente**: 0.000025-0.00004 (20x más bajo que el original)
+- **CPU/GPU débil**: 0.000015-0.000025 (33x más bajo que el original)
+- **Memoria limitada**: 0.000015
 
-**⚠️ IMPORTANTE**: Learning rates anteriores causaban mejora lineal anómala y overfitting severo
+**🚨 CRÍTICO**: Incluso los LR "corregidos" anteriores seguían causando convergencia lineal demasiado rápida. Estos valores ultra-bajos son necesarios para evitar memorización.
 
 ### **Batch Sizes por hardware**
 - **GPU 24GB+**: batch_size 32-64
