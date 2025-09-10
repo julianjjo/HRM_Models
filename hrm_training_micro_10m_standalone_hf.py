@@ -15,6 +15,30 @@ import os, multiprocessing as mp, math, time
 from typing import List, Dict, Optional, Tuple
 import argparse
 
+# Función de inicialización del código ACT de referencia
+def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0, lower: float = -2.0, upper: float = 2.0):
+    """PyTorch version of jax truncated normal init (matemáticamente correcto)"""
+    with torch.no_grad():
+        if std == 0:
+            tensor.zero_()
+        else:
+            sqrt2 = math.sqrt(2)
+            a = math.erf(lower / sqrt2)
+            b = math.erf(upper / sqrt2)
+            z = (b - a) / 2
+
+            c = (2 * math.pi) ** -0.5
+            pdf_u = c * math.exp(-0.5 * lower ** 2)
+            pdf_l = c * math.exp(-0.5 * upper ** 2)
+            comp_std = std / math.sqrt(1 - (upper * pdf_u - lower * pdf_l) / z - ((pdf_u - pdf_l) / z) ** 2)
+
+            tensor.uniform_(a, b)
+            tensor.erfinv_()
+            tensor.mul_(sqrt2 * comp_std)
+            tensor.clip_(lower * comp_std, upper * comp_std)
+
+    return tensor
+
 # Progress bar
 try:
     from tqdm import tqdm
@@ -249,31 +273,40 @@ class HRMInner(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
 
-        # Q-learning components for adaptive computation
+        # Q-learning components for adaptive computation (del código ACT)
         self.q_network = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd // 4),
             nn.ReLU(),
-            nn.Linear(config.n_embd // 4, 2)  # [continue, halt]
+            nn.Linear(config.n_embd // 4, 2)  # [continue, halt] como en ACT
         )
+
+        # Inicialización especial para Q-network como en ACT
+        with torch.no_grad():
+            # Inicializar pesos a casi cero para bootstrapping más rápido
+            for layer in self.q_network:
+                if isinstance(layer, nn.Linear):
+                    layer.weight.zero_()
+                    if layer.bias is not None:
+                        layer.bias.fill_(-5.0)  # Bias hacia halt para estabilidad inicial
 
         # Deep Supervision: prediction heads reactivados gradualmente
         self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # Inicialización estable tipo LeCun/Kaiming para HRM
-        # Inspirado en el código de referencia que usa std=1.0/sqrt(fan_in)
+        # Inicialización del código ACT de referencia - matemáticamente correcta
         fan_in = config.n_embd
-        lecun_std = 1.0 / (fan_in ** 0.5)
+        lecun_std = 1.0 / (fan_in ** 0.5)  # LeCun initialization del paper original
 
-        # Inicialización más conservadora para capas profundas
+        # Factor de profundidad como en el código ACT
         depth_factor = max(0.1, 1.0 - (layer_idx / max(config.n_layers, 1)))
-        std_h = lecun_std * depth_factor * 0.5  # Muy conservador
-        std_l = lecun_std * depth_factor * 0.3  # Ultra conservador
+        std_h = lecun_std * depth_factor
+        std_l = lecun_std * depth_factor * 0.7  # L-module ligeramente más conservador
 
-        nn.init.normal_(self.h_prediction_head.weight, mean=0.0, std=std_h)
-        nn.init.normal_(self.l_prediction_head.weight, mean=0.0, std=std_l)
+        # Usar trunc_normal_init_ del código ACT (matemáticamente correcto)
+        trunc_normal_init_(self.h_prediction_head.weight, std=std_h)
+        trunc_normal_init_(self.l_prediction_head.weight, std=std_l)
 
-        print(f"🔧 Capa {layer_idx}: H-head std={std_h:.5f}, L-head std={std_l:.5f} (LeCun estable)")
+        print(f"🔧 Capa {layer_idx}: H-head std={std_h:.5f}, L-head std={std_l:.5f} (ACT trunc_normal)")
 
         # Ponder loss components
         self.ponder_network = nn.Sequential(
@@ -315,31 +348,37 @@ class HRMInner(nn.Module):
                 cycle_ponder_loss += ponder_score
                 cycle_l_steps += 1
 
-                # Q-learning decision: should we halt this L-cycle early?
+                # ACT-style Q-learning halting para LLMs
                 if training and l_cycle < self.L_cycles - 1:  # Not on last L-cycle
-                    q_values = self.q_network(z_L_new)
+                    # Q-values para decisión de halting (inspirado en ACT)
+                    q_values = self.q_network(z_L_new.mean(dim=1))  # Pool sobre secuencia para decisión
                     all_q_values.append(q_values)
 
-                    # Adaptive halting based on convergence
-                    if l_cycle > 0:  # Need at least one step
+                    # Halting logic del código ACT adaptado para LLMs
+                    if l_cycle > 0:  # Necesario al menos un step
+                        # Calcular diferencia de convergencia
                         diff = torch.norm(z_L_new - z_L, p=2, dim=-1).mean()
+                        is_last_step = l_cycle >= self.max_l_steps - 1
 
-                        # Epsilon-greedy + convergence-based halting
-                        epsilon = max(0.1, 1.0 - l_cycle * 0.3)  # Faster decay for micro model
-                        if torch.rand(1).item() < epsilon:
-                            # Exploration: random action
-                            action = torch.randint(0, 2, (1,)).item()
-                        else:
-                            # Exploitation: Q-value based + convergence
-                            avg_q_values = q_values.mean(dim=[0, 1])
-                            q_halt = avg_q_values[1].item()
-                            q_continue = avg_q_values[0].item()
+                        # Q-learning decision como en ACT
+                        q_halt_logits = q_values[..., 1]  # Halt logits
+                        q_continue_logits = q_values[..., 0]  # Continue logits
 
-                            # Halt if Q suggests OR if converged
-                            should_halt = (q_halt > q_continue) or (diff < self.convergence_threshold)
-                            action = 1 if should_halt else 0
+                        # Halting decision (adaptado del código ACT)
+                        halted = is_last_step | (q_halt_logits.mean() > q_continue_logits.mean())
 
-                        if action == 1:  # Halt L-cycles early
+                        # Exploration durante training (como en ACT)
+                        halt_exploration_prob = 0.1  # Similar al código ACT
+                        if torch.rand(1).item() < halt_exploration_prob:
+                            min_halt_steps = torch.randint(2, self.max_l_steps + 1, (1,)).item()
+                            if l_cycle >= min_halt_steps:
+                                halted = True
+
+                        # Convergence-based halting adicional
+                        if diff < self.convergence_threshold:
+                            halted = True
+
+                        if halted:
                             break
 
                 z_L = z_L_new
@@ -567,6 +606,33 @@ class HRMText1(ModelBase):
             # Ponder loss (computational regularization)
             ponder_loss = total_ponder_loss / len(self.layers) if total_ponder_loss > 0 else 0.0
 
+            # Q-learning loss para halting (inspirado en código ACT)
+            q_learning_loss = 0.0
+            if all_hrm_info and labels is not None:
+                # Calcular correctness para Q-learning target (como en ACT)
+                with torch.no_grad():
+                    # Verificar si las predicciones son correctas
+                    predictions = torch.argmax(logits, dim=-1)
+                    mask = labels != self.config.pad_token_id
+                    is_correct = mask & (predictions == labels)
+
+                    # Accuracy por secuencia para Q-learning target
+                    seq_accuracy = is_correct.float().sum(-1) / mask.float().sum(-1).clamp(min=1)
+                    seq_is_correct = seq_accuracy > 0.8  # Threshold como en ACT
+
+                # Calcular Q-learning loss de todos los layers
+                for hrm_info in all_hrm_info:
+                    if hrm_info.get('q_values'):
+                        for q_vals in hrm_info['q_values']:
+                            # Q-halt loss: predecir si la secuencia será correcta
+                            q_halt_logits = q_vals[..., 1].mean(dim=1)  # Pool sobre secuencia
+                            q_halt_loss = F.binary_cross_entropy_with_logits(
+                                q_halt_logits,
+                                seq_is_correct.float(),
+                                reduction='mean'
+                            )
+                            q_learning_loss += q_halt_loss * 0.1  # Peso menor que en ACT original
+
             # TEMPORAL: Verificar y desactivar Deep Supervision si tiene NaN
             if torch.isnan(torch.tensor(deep_supervision_loss)) or torch.isinf(torch.tensor(deep_supervision_loss)):
                 print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
@@ -578,8 +644,9 @@ class HRMText1(ModelBase):
 
             total_loss = (
                 main_loss +
-                ds_weight * deep_supervision_loss +  # Deep supervision COMPLETAMENTE activado
-                ponder_weight * ponder_loss  # Ponder loss peso completo
+                ds_weight * deep_supervision_loss +  # Deep supervision controlado
+                ponder_weight * ponder_loss +  # Ponder loss reducido
+                q_learning_loss  # Q-learning loss para halting automático
             )
 
             # Verificar estabilidad de la pérdida final
@@ -603,6 +670,7 @@ class HRMText1(ModelBase):
                     'main_loss': main_loss,
                     'deep_supervision_loss': deep_supervision_loss,
                     'ponder_loss': ponder_loss,
+                    'q_learning_loss': q_learning_loss,
                     'hrm_info': all_hrm_info
                 }
 
@@ -1213,11 +1281,13 @@ def train_hrm_hf(
                         main_loss = outputs.get('main_loss', loss)
                         deep_supervision_loss = outputs.get('deep_supervision_loss', 0.0)
                         ponder_loss = outputs.get('ponder_loss', 0.0)
+                        q_learning_loss = outputs.get('q_learning_loss', 0.0)
                     else:
                         loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
                         main_loss = loss
                         deep_supervision_loss = 0.0
                         ponder_loss = 0.0
+                        q_learning_loss = 0.0
             else:
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 if isinstance(outputs, dict):
@@ -1225,11 +1295,13 @@ def train_hrm_hf(
                     main_loss = outputs.get('main_loss', loss)
                     deep_supervision_loss = outputs.get('deep_supervision_loss', 0.0)
                     ponder_loss = outputs.get('ponder_loss', 0.0)
+                    q_learning_loss = outputs.get('q_learning_loss', 0.0)
                 else:
                     loss = outputs[0] if isinstance(outputs, tuple) else outputs.loss
                     main_loss = loss
                     deep_supervision_loss = 0.0
                     ponder_loss = 0.0
+                    q_learning_loss = 0.0
 
             # Backward pass
             optimizer.zero_grad()
@@ -1280,6 +1352,8 @@ def train_hrm_hf(
                     postfix['ds'] = f'{deep_supervision_loss.item() if hasattr(deep_supervision_loss, "item") else deep_supervision_loss:.4f}'
                 if ponder_loss > 0:
                     postfix['ponder'] = f'{ponder_loss.item() if hasattr(ponder_loss, "item") else ponder_loss:.4f}'
+                if q_learning_loss > 0:
+                    postfix['qlearn'] = f'{q_learning_loss.item() if hasattr(q_learning_loss, "item") else q_learning_loss:.4f}'
 
                 # Añadir información de GPU si está disponible
                 if device.type == 'cuda':
