@@ -100,27 +100,29 @@ python hrm_training_micro_10m_standalone_hf.py \
 
 ## 📊 Monitoreo recomendado
 
-### **Métricas objetivo (CON LEARNING RATE CORREGIDO)**
-- **Val Loss objetivo**: 2.0 - 4.0 (más realista con LR bajo)
-- **Perplexity objetivo**: 7.4 - 55.0 (más realista, evitar < 3.0)
+### **Métricas objetivo (CON LEARNING RATE ULTRA-BAJO)**
+- **Val Loss objetivo**: 2.8 - 4.5 (realista con LR ultra-conservador)
+- **Perplexity objetivo**: 16.0 - 90.0 (sin memorización, evitar < 12.0)
 - **Steps estimados**: ~1.25M steps para 10M samples
-- **Convergencia**: Lenta y logarítmica (NO lineal)
+- **Convergencia**: MUY lenta con mesetas y fluctuaciones naturales
 
 ### **Señales de éxito**
 ```
-✅ Val Loss estable entre 2.5-3.5
-✅ Mejora logarítmica (no lineal) 
-✅ Perplexity 8.0-20.0  
-✅ Generación de texto coherente
-✅ Sin convergencia demasiado rápida
+✅ Val Loss final entre 3.0-4.0 (NO más bajo)
+✅ Convergencia con mesetas y fluctuaciones
+✅ Perplexity 18.0-40.0 (sin memorización)
+✅ Generación de texto coherente sin repetición
+✅ Progreso lento pero estable (sin caídas lineales)
 ```
 
 ### **Señales de problema**
 ```
-❌ Val Loss < 0.5 (overfitting)
-❌ Early stopping antes de 100k steps
-❌ Perplexity < 1.5 (memorización)
-❌ Loss errático o explosivo
+❌ Val Loss < 2.0 (overfitting severo)
+❌ Perplexity < 12.0 (memorización) 
+❌ Caída lineal constante sin fluctuaciones
+❌ Convergencia demasiado rápida (como tu caso actual)
+❌ Early stopping antes de 200k steps
+❌ Generación repetitiva o incoherente
 ```
 
 ## 🚨 Comandos de emergencia
