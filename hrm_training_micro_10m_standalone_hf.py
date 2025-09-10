@@ -11,7 +11,7 @@ VERSIÓN MEJORADA: Usando tokenizadores profesionales de HuggingFace
 - Sin dependencias de transformers para el modelo (solo tokenizer)
 """
 
-import os, random, multiprocessing as mp, atexit, math, time
+import os, multiprocessing as mp, math, time
 from typing import List, Dict, Optional, Tuple
 import argparse
 
@@ -47,6 +47,16 @@ except ImportError:
     print("💡 Ejecute: pip install transformers tokenizers")
     exit(1)
 
+# Importar base de transformers para compatibilidad
+try:
+    from transformers import PreTrainedModel, PretrainedConfig
+    from transformers.modeling_outputs import CausalLMOutput
+    TRANSFORMERS_AVAILABLE = True
+    print("✅ Transformers disponible para integración HRM")
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    print("⚠️ Transformers no disponible - usando implementación standalone")
+
 # Definir clases HRM directamente (extraídas del archivo standalone para evitar dependencias)
 print("✅ Configuración HRM integrada directamente en el script HF")
 
@@ -60,7 +70,15 @@ class SimpleConfig:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-class HRMText1Config(SimpleConfig):
+# Usar PretrainedConfig si transformers está disponible, sino SimpleConfig
+if TRANSFORMERS_AVAILABLE:
+    ConfigBase = PretrainedConfig
+    print("🔧 Usando PretrainedConfig de transformers")
+else:
+    ConfigBase = SimpleConfig
+    print("🔧 Usando SimpleConfig standalone")
+
+class HRMText1Config(ConfigBase):
     model_type = "hrm_text1"
 
     def __init__(self,
@@ -70,7 +88,7 @@ class HRMText1Config(SimpleConfig):
                  n_head=8,                  # Micro model heads
                  n_layers=4,                # Micro model layers - reducido para estabilidad
                  d_ff=1024,                 # Micro model FFN
-                 dropout=0.1,
+                 dropout=0.2,  # Aumentado para mejor generalización
                  pad_token_id=0,
                  halt_max_steps=4,          # HRM halt steps
                  ponder_loss_weight=5e-3,
@@ -238,11 +256,19 @@ class HRMInner(nn.Module):
             nn.Linear(config.n_embd // 4, 2)  # [continue, halt]
         )
 
-        # TEMPORAL: Desactivar prediction heads para simplificar
-        # self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # Deep Supervision: prediction heads reactivados gradualmente
+        self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        print(f"🔧 Capa {layer_idx}: Modo simplificado - sin prediction heads")
+        # Inicialización ultra-conservadora para estabilidad
+        depth_factor = max(0.1, 1.0 - (layer_idx / max(config.n_layers, 1)))
+        std_h = 0.001 + 0.004 * depth_factor  # Entre 0.001 y 0.005 (muy conservador)
+        std_l = 0.0005 + 0.002 * depth_factor  # Entre 0.0005 y 0.0025 (ultra conservador)
+
+        nn.init.normal_(self.h_prediction_head.weight, mean=0.0, std=std_h)
+        nn.init.normal_(self.l_prediction_head.weight, mean=0.0, std=std_l)
+
+        print(f"🔧 Capa {layer_idx}: H-head std={std_h:.5f}, L-head std={std_l:.5f} (ultra-conservador)")
 
         # Ponder loss components
         self.ponder_network = nn.Sequential(
@@ -324,11 +350,13 @@ class HRMInner(nn.Module):
         # Final H-module update with all L-module refinements
         z_H_final = self.H_module(z_H + z_L, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
 
-        # TEMPORAL: Sin Deep Supervision
-        # h_logits = self.h_prediction_head(z_H_final)
-        # l_logits = self.l_prediction_head(z_L)
-        h_logits = None
-        l_logits = None
+        # Deep Supervision: generar logits intermedios con estabilización
+        h_logits = self.h_prediction_head(z_H_final)
+        l_logits = self.l_prediction_head(z_L)
+
+        # Estabilizar logits para prevenir explosión de gradientes
+        h_logits = torch.clamp(h_logits, -10.0, 10.0)
+        l_logits = torch.clamp(l_logits, -10.0, 10.0)
 
         # Normalize metrics
         avg_ponder_loss = total_ponder_loss / max(total_l_steps, 1)
@@ -347,11 +375,20 @@ class HRMInner(nn.Module):
         }
 
 
-class HRMText1(nn.Module):
+# Usar PreTrainedModel si transformers está disponible, sino nn.Module
+if TRANSFORMERS_AVAILABLE:
+    ModelBase = PreTrainedModel
+    print("🔧 Modelo HRM usando PreTrainedModel de transformers")
+else:
+    ModelBase = nn.Module
+    print("🔧 Modelo HRM usando nn.Module standalone")
+
+class HRMText1(ModelBase):
     """HRM Model with full hierarchical temporal separation"""
+    config_class = HRMText1Config
 
     def __init__(self, config: HRMText1Config):
-        super().__init__()
+        super().__init__(config if TRANSFORMERS_AVAILABLE else())
         self.config = config
 
         self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
@@ -424,8 +461,8 @@ class HRMText1(nn.Module):
             if hrm_info.get('ponder_loss') is not None:
                 total_ponder_loss += hrm_info['ponder_loss']
 
-            # TEMPORAL: Desactivar Deep Supervision completamente
-            if False and labels is not None and hrm_info.get('h_logits') is not None:
+            # Deep Supervision: calcular pérdidas intermedias con validación robusta
+            if labels is not None and hrm_info.get('h_logits') is not None:
                 h_logits = hrm_info['h_logits']
                 l_logits = hrm_info.get('l_logits')
 
@@ -486,11 +523,12 @@ class HRMText1(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
-            # Main loss
+            # Main loss con label smoothing para mejor generalización
             main_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
-                ignore_index=self.config.pad_token_id
+                ignore_index=self.config.pad_token_id,
+                label_smoothing=0.1  # Evita overconfidence
             )
 
             # Deep Supervision loss (weighted sum of intermediate losses) - ahora más estable
@@ -523,11 +561,14 @@ class HRMText1(nn.Module):
                 print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
                 deep_supervision_loss = 0.0
 
-            # TEMPORAL: Solo main_loss hasta estabilizar el modelo base
+            # Deep supervision reactivado gradualmente con pesos muy bajos
+            ds_weight = 0.01  # Peso muy bajo para comenzar gradualmente
+            ponder_weight = self.config.ponder_loss_weight * 0.1  # 10% del peso original
+
             total_loss = (
                 main_loss +
-                0.0 * deep_supervision_loss +  # DESACTIVADO temporalmente
-                0.0 * self.config.ponder_loss_weight * ponder_loss  # DESACTIVADO temporalmente
+                ds_weight * deep_supervision_loss +  # Reactivado gradualmente
+                ponder_weight * ponder_loss  # Reactivado con peso reducido
             )
 
             # Verificar estabilidad de la pérdida final
@@ -536,19 +577,36 @@ class HRMText1(nn.Module):
                 # Usar solo main_loss si las otras pérdidas están corruptas
                 total_loss = main_loss
 
+            # Retornar en formato compatible con transformers si está disponible
+            if TRANSFORMERS_AVAILABLE:
+                return CausalLMOutput(
+                    loss=total_loss,
+                    logits=logits,
+                    hidden_states=all_hrm_info,
+                    attentions=None
+                )
+            else:
+                return {
+                    'loss': total_loss,
+                    'logits': logits,
+                    'main_loss': main_loss,
+                    'deep_supervision_loss': deep_supervision_loss,
+                    'ponder_loss': ponder_loss,
+                    'hrm_info': all_hrm_info
+                }
+
+        # Sin labels, solo retornar logits
+        if TRANSFORMERS_AVAILABLE:
+            return CausalLMOutput(
+                logits=logits,
+                hidden_states=all_hrm_info,
+                attentions=None
+            )
+        else:
             return {
-                'loss': total_loss,
                 'logits': logits,
-                'main_loss': main_loss,
-                'deep_supervision_loss': deep_supervision_loss,
-                'ponder_loss': ponder_loss,
                 'hrm_info': all_hrm_info
             }
-
-        return {
-            'logits': logits,
-            'hrm_info': all_hrm_info
-        }
 
 # Hugging Face Hub imports - commented out unused import
 # try:
@@ -733,12 +791,6 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
         else:
             print("📦 Descargando dataset completo (más rápido para lotes grandes)...")
             dataset = load_dataset(dataset_name, dataset_config, split=split)
-            if num_samples < len(dataset):
-                # Usar sampling aleatorio en lugar de secuencial
-                import random
-                indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
-                dataset = dataset.select(indices)
-                print(f"   🎲 Seleccionados {len(indices)} samples aleatorios de {len(dataset)}")
 
         texts = []
         processed_count = 0
@@ -797,6 +849,31 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
 # --- Training Functions ---
 # ==============================================================================
 
+def generate_sample_text(model, tokenizer, prompt="The", max_length=50, device='cuda'):
+    """Generar texto de muestra para verificar calidad del aprendizaje"""
+    model.eval()
+    with torch.no_grad():
+        # Tokenizar prompt
+        input_ids = tokenizer.encode(prompt, return_tensors='pt').to(device)
+
+        # Generar
+        for _ in range(max_length):
+            outputs = model(input_ids)
+            logits = outputs['logits'] if isinstance(outputs, dict) else outputs.logits
+            next_token_logits = logits[0, -1, :]
+
+            # Usar top-k sampling para mejor diversidad
+            next_token = torch.multinomial(F.softmax(next_token_logits / 0.8, dim=-1), 1)
+            input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+
+            # Parar en token especial
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+
+        # Decodificar
+        generated_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        return generated_text
+
 def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step: int = 0):  # pylint: disable=unused-argument
     """Guardar modelo y tokenizador HF"""
     os.makedirs(save_path, exist_ok=True)
@@ -838,10 +915,10 @@ def train_hrm_hf(
     num_train_samples: int = 10000,
     num_val_samples: int = 1000,
     batch_size: int = 8,
-    learning_rate: float = 1e-4,
+    learning_rate: float = 5e-5,  # Reducido para aprendizaje más gradual
     num_epochs: int = 3,
     save_steps: int = 200,
-    eval_steps: int = 200,
+    eval_steps: int = 50,  # Evaluación más frecuente para detectar overfitting
     max_grad_norm: float = 0.5,
     warmup_steps: int = 500,
     # Parámetros de tokenización optimizada
@@ -916,7 +993,7 @@ def train_hrm_hf(
         n_head=8,
         n_layers=4,  # Reducido para estabilidad
         d_ff=1024,
-        dropout=0.1,
+        dropout=0.2,  # Aumentado para mejor generalización
         tokenizer_type='huggingface',
         hf_tokenizer_name=tokenizer_name,
         pad_token_id=tokenizer.pad_token_id,
@@ -1033,11 +1110,11 @@ def train_hrm_hf(
         multiprocessing_context='spawn' if val_workers > 0 else None
     )
 
-    # Crear optimizador con configuración más conservadora para HRM
+    # Crear optimizador con mayor regularización para evitar overfitting
     optimizer = AdamW(
         model.parameters(),
         lr=learning_rate,
-        weight_decay=0.01,
+        weight_decay=0.1,  # Aumentado significativamente
         betas=(0.9, 0.95),  # Más conservador que el default (0.9, 0.999)
         eps=1e-8
     )
@@ -1062,9 +1139,9 @@ def train_hrm_hf(
         pct_start=pct_start
     )
 
-    # Early stopping para evitar overfitting en entrenamientos grandes
-    early_stopping_patience = 5 if len(train_texts) >= 1000000 else 10
-    early_stopping_min_delta = 0.001
+    # Early stopping más agresivo para evitar overfitting
+    early_stopping_patience = 3 if len(train_texts) >= 1000000 else 5  # Más agresivo
+    early_stopping_min_delta = 0.01  # Delta más alto
     no_improvement_count = 0
     early_stop_triggered = False
 
