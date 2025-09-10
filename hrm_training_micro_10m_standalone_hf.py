@@ -883,8 +883,14 @@ def train_hrm_hf(
     # El dataset crea múltiples chunks por texto, así que estimamos generosamente
     estimated_chunks_per_text = 2  # Estimación conservadora
     total_steps = len(train_texts) * estimated_chunks_per_text * num_epochs
+    # Para entrenamientos grandes (10M+), usar warmup más largo
+    if len(train_texts) >= 1000000:  # Si >= 1M samples
+        effective_warmup_steps = max(warmup_steps, total_steps // 20)  # 5% warmup
+        print(f"🔥 Entrenamiento a gran escala detectado: Warmup extendido a {effective_warmup_steps} steps")
+    else:
+        effective_warmup_steps = warmup_steps
     # Asegurar que pct_start esté entre 0 y 1
-    pct_start = min(0.3, warmup_steps / max(total_steps, warmup_steps))
+    pct_start = min(0.3, effective_warmup_steps / max(total_steps, effective_warmup_steps))
     
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
@@ -893,9 +899,17 @@ def train_hrm_hf(
         pct_start=pct_start
     )
     
+    # Early stopping para evitar overfitting en entrenamientos grandes
+    early_stopping_patience = 5 if len(train_texts) >= 1000000 else 10
+    early_stopping_min_delta = 0.001
+    no_improvement_count = 0
+    early_stop_triggered = False
+    
     print(f"🎯 Entrenamiento configurado:")
     print(f"   Steps totales estimados: {total_steps:,}")
-    print(f"   Warmup steps: {warmup_steps}")
+    print(f"   Warmup steps efectivos: {effective_warmup_steps}")
+    if len(train_texts) >= 1000000:
+        print(f"   🛑 Early stopping: patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
     
     # Training loop
     model.train()
@@ -1040,12 +1054,25 @@ def train_hrm_hf(
                 
                 print(f"📊 Step {step} | Val Loss: {avg_val_loss:.4f} | Perplexity: {perplexity:.2f}")
                 
-                # Guardar mejor modelo
-                if avg_val_loss < best_val_loss:
+                # Guardar mejor modelo y early stopping
+                if avg_val_loss < best_val_loss - early_stopping_min_delta:
                     best_val_loss = avg_val_loss
+                    no_improvement_count = 0
                     best_model_path = os.path.join(output_dir, "best_model")
                     save_model_hf(model, tokenizer, best_model_path, config, step)
                     print(f"💎 Nuevo mejor modelo guardado: {avg_val_loss:.4f}")
+                else:
+                    no_improvement_count += 1
+                    if len(train_texts) >= 1000000:  # Solo para entrenamientos grandes
+                        print(f"⏸️  Sin mejora: {no_improvement_count}/{early_stopping_patience}")
+                        
+                        if no_improvement_count >= early_stopping_patience:
+                            print(f"\n🛑 Early stopping activado después de {no_improvement_count} evaluaciones sin mejora")
+                            print(f"   Mejor val loss: {best_val_loss:.4f}")
+                            print(f"   Val loss actual: {avg_val_loss:.4f}")
+                            print("   Deteniendo entrenamiento para evitar overfitting...")
+                            early_stop_triggered = True
+                            break
                 
                 model.train()
             
@@ -1059,6 +1086,11 @@ def train_hrm_hf(
             if loss.item() < 0.01:
                 print("🎯 Loss muy bajo, finalizando entrenamiento temprano")
                 break
+        
+        # Verificar early stopping
+        if early_stop_triggered:
+            print("🛑 Saliendo del entrenamiento por early stopping")
+            break
         
         # Estadísticas de época
         avg_epoch_loss = epoch_loss / max(num_batches, 1)

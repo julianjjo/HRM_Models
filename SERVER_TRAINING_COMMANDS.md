@@ -1,0 +1,171 @@
+# Comandos Optimizados para Servidor - 10M Samples
+
+## 🚀 Comando Principal para 10M samples
+
+```bash
+python hrm_training_micro_10m_standalone_hf.py \
+  --train_samples 10000000 \
+  --val_samples 50000 \
+  --epochs 1 \
+  --batch_size 16 \
+  --learning_rate 0.00005 \
+  --num_workers 8 \
+  --prefetch_factor 4 \
+  --val_check_interval 5000 \
+  --save_steps 10000 \
+  --max_grad_norm 0.5 \
+  --output_dir ./hrm-micro-10m-server \
+  --device auto
+```
+
+## ⚡ Configuraciones por tipo de servidor
+
+### **GPU Server (CUDA)**
+```bash
+python hrm_training_micro_10m_standalone_hf.py \
+  --train_samples 10000000 \
+  --val_samples 50000 \
+  --epochs 1 \
+  --batch_size 32 \
+  --learning_rate 0.00008 \
+  --num_workers 12 \
+  --prefetch_factor 8 \
+  --val_check_interval 2500 \
+  --save_steps 5000 \
+  --max_grad_norm 0.5 \
+  --device cuda \
+  --output_dir ./hrm-micro-10m-gpu
+```
+
+### **CPU Server (High cores)**  
+```bash
+python hrm_training_micro_10m_standalone_hf.py \
+  --train_samples 10000000 \
+  --val_samples 50000 \
+  --epochs 1 \
+  --batch_size 8 \
+  --learning_rate 0.00003 \
+  --cpu_intensive \
+  --batch_size_multiplier 2 \
+  --num_workers 16 \
+  --prefetch_factor 2 \
+  --val_check_interval 10000 \
+  --save_steps 25000 \
+  --max_grad_norm 0.5 \
+  --device cpu \
+  --output_dir ./hrm-micro-10m-cpu
+```
+
+### **Memory Optimized**
+```bash
+python hrm_training_micro_10m_standalone_hf.py \
+  --train_samples 10000000 \
+  --val_samples 25000 \
+  --epochs 1 \
+  --batch_size 4 \
+  --learning_rate 0.00003 \
+  --num_workers 4 \
+  --prefetch_factor 2 \
+  --val_check_interval 5000 \
+  --save_steps 15000 \
+  --max_grad_norm 0.5 \
+  --no_streaming \
+  --output_dir ./hrm-micro-10m-mem
+```
+
+## 🎯 Parámetros clave explicados
+
+### **Early Stopping (automático para 10M+)**
+- **Patience: 5** - Detiene después de 5 evaluaciones sin mejora
+- **Min Delta: 0.001** - Mejora mínima requerida
+- **Automático** - Se activa solo para datasets >= 1M samples
+
+### **Learning Rates recomendados (CORREGIDOS)**
+- **GPU potente**: 0.00005-0.00008 (10x más bajo que antes)
+- **CPU/GPU débil**: 0.00003-0.00005 (10x más bajo que antes)
+- **Memoria limitada**: 0.00003
+
+**⚠️ IMPORTANTE**: Learning rates anteriores causaban mejora lineal anómala y overfitting severo
+
+### **Batch Sizes por hardware**
+- **GPU 24GB+**: batch_size 32-64
+- **GPU 8-16GB**: batch_size 16-24  
+- **CPU potente**: batch_size 8-16
+- **Memoria limitada**: batch_size 4-8
+
+### **Workers y Prefetch**
+- **GPU**: num_workers=12, prefetch_factor=8
+- **CPU**: num_workers=16, prefetch_factor=2
+- **Limitado**: num_workers=4, prefetch_factor=2
+
+## 📊 Monitoreo recomendado
+
+### **Métricas objetivo (CON LEARNING RATE CORREGIDO)**
+- **Val Loss objetivo**: 2.0 - 4.0 (más realista con LR bajo)
+- **Perplexity objetivo**: 7.4 - 55.0 (más realista, evitar < 3.0)
+- **Steps estimados**: ~1.25M steps para 10M samples
+- **Convergencia**: Lenta y logarítmica (NO lineal)
+
+### **Señales de éxito**
+```
+✅ Val Loss estable entre 2.5-3.5
+✅ Mejora logarítmica (no lineal) 
+✅ Perplexity 8.0-20.0  
+✅ Generación de texto coherente
+✅ Sin convergencia demasiado rápida
+```
+
+### **Señales de problema**
+```
+❌ Val Loss < 0.5 (overfitting)
+❌ Early stopping antes de 100k steps
+❌ Perplexity < 1.5 (memorización)
+❌ Loss errático o explosivo
+```
+
+## 🚨 Comandos de emergencia
+
+### **Reanudar desde checkpoint**
+```bash
+python hrm_training_micro_10m_standalone_hf.py \
+  --resume_from_checkpoint ./hrm-micro-10m-server/checkpoint-50000 \
+  --train_samples 10000000 \
+  --val_samples 50000
+```
+
+### **Reducir recursos si falla**
+```bash
+# Reducir batch size y workers si hay OOM
+python hrm_training_micro_10m_standalone_hf.py \
+  --train_samples 10000000 \
+  --val_samples 50000 \
+  --batch_size 2 \
+  --num_workers 2 \
+  --prefetch_factor 1
+```
+
+## 🎛️ Configuraciones avanzadas
+
+### **Dataset streaming (recomendado)**
+- Por defecto está activado
+- Usa `--no_streaming` solo si tienes 500GB+ RAM disponible
+
+### **Tokenizer optimizations**
+- Se ajustan automáticamente según CPU cores
+- Para servidores 32+ cores, el paralelismo será máximo
+
+### **Gradient accumulation** 
+- Se calcula automáticamente si batch_size * batch_size_multiplier < 16
+- Para simular batch sizes más grandes en hardware limitado
+
+## 📈 Timeline esperado
+
+**10M samples, 1 época:**
+- **GPU V100/A100**: 8-12 horas
+- **GPU RTX 4090**: 12-18 horas  
+- **CPU 32-cores**: 2-4 días
+- **CPU 16-cores**: 4-7 días
+
+**Checkpoints recomendados cada:**
+- **GPU**: 5,000-10,000 steps
+- **CPU**: 15,000-25,000 steps
