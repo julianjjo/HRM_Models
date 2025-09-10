@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Models Training Script con Tokenizador HuggingFace - MODELO MICRO ~10M PARÁMETROS  
+HRM-Models Training Script con Tokenizador HuggingFace - MODELO MICRO ~10M PARÁMETROS
 VERSIÓN MEJORADA: Usando tokenizadores profesionales de HuggingFace
 
 🖥️  CARACTERÍSTICAS:
@@ -62,8 +62,8 @@ class SimpleConfig:
 
 class HRMText1Config(SimpleConfig):
     model_type = "hrm_text1"
-    
-    def __init__(self, 
+
+    def __init__(self,
                  vocab_size=50257,          # HF tokenizer default
                  block_size=128,            # Micro model context
                  n_embd=256,                # Micro model embeddings
@@ -71,15 +71,15 @@ class HRMText1Config(SimpleConfig):
                  n_layers=6,                # Micro model layers
                  d_ff=1024,                 # Micro model FFN
                  dropout=0.1,
-                 pad_token_id=0,            
+                 pad_token_id=0,
                  halt_max_steps=4,          # HRM halt steps
-                 ponder_loss_weight=1e-2,
-                 halt_bias_init=-0.5,
+                 ponder_loss_weight=5e-3,
+                 halt_bias_init=-1.0,
                  use_rotary_embeddings=True,
                  rotary_embedding_base=10000,
                  use_flash_attention=True,
                  gradient_checkpointing=False,
-                 # HRM Ciclos según paper original  
+                 # HRM Ciclos según paper original
                  H_cycles=2,                # Número de ciclos H por forward
                  L_cycles=2,                # Número de ciclos L por ciclo H (menor para modelo micro)
                  **kwargs):
@@ -108,11 +108,16 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(n_embd))
-    
+
     def forward(self, x):
         device = x.device
-        norm = x.norm(dim=-1, keepdim=True, dtype=torch.float32).clamp(min=self.eps)
-        return (x / norm.to(device)) * self.weight
+        # Protección adicional contra NaN en RMSNorm
+        x = torch.clamp(x, -10.0, 10.0)  # Evitar valores extremos
+        norm = x.norm(dim=-1, keepdim=True, dtype=torch.float32).clamp(min=self.eps, max=1e6)
+        normalized = x / norm.to(device)
+        # Verificar NaN y reemplazar por ceros si es necesario
+        normalized = torch.where(torch.isfinite(normalized), normalized, torch.zeros_like(normalized))
+        return normalized * self.weight
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, base=10000):
@@ -120,7 +125,7 @@ class RotaryEmbedding(nn.Module):
         self.dim = dim
         self.base = base
         self.register_buffer('inv_freq', 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim)))
-    
+
     def forward(self, x, seq_len):
         device = x.device
         t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
@@ -144,7 +149,7 @@ class SwiGLUMuchPelu(nn.Module):
         self.w2 = nn.Linear(n_embd, d_ff, bias=False)
         self.w3 = nn.Linear(d_ff, n_embd, bias=False)
         self.dropout = nn.Dropout(dropout)
-    
+
     def forward(self, x):
         return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
@@ -156,48 +161,48 @@ class OptimizedMultiHeadAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         self.use_flash_attention = config.use_flash_attention
         self.use_rotary_embeddings = config.use_rotary_embeddings
-        
+
         self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.dropout = nn.Dropout(config.dropout)
-        
+
         if self.use_rotary_embeddings:
             self.rotary_emb = RotaryEmbedding(self.head_dim, config.rotary_embedding_base)
-    
+
     def forward(self, x, attn_mask=None, key_padding_mask=None):
         batch_size, seq_len, _ = x.shape
-        
+
         q = self.q_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
-        
+
         if self.use_rotary_embeddings:
             cos, sin = self.rotary_emb(x, seq_len)
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        
+
         attn_output = self._standard_attention(q, k, v, attn_mask, key_padding_mask)
         attn_output = attn_output.contiguous().view(batch_size, seq_len, self.n_embd)
         return self.out_proj(attn_output)
-    
+
     def _standard_attention(self, q, k, v, attn_mask=None, key_padding_mask=None):
         scale = 1.0 / math.sqrt(self.head_dim)
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
-        
+
         if attn_mask is not None:
             attn_weights = attn_weights.masked_fill(attn_mask, float('-inf'))
-        
+
         if key_padding_mask is not None:
             # Convertir a bool si es necesario
             mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             if mask.dtype != torch.bool:
                 mask = mask == 0  # Convertir padding mask (0 = padded, 1 = valid) a bool
             attn_weights = attn_weights.masked_fill(mask, float('-inf'))
-        
+
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.dropout(attn_weights)
-        
+
         return torch.matmul(attn_weights, v)
 
 class HRMBlock(nn.Module):
@@ -208,12 +213,12 @@ class HRMBlock(nn.Module):
         self.norm2 = RMSNorm(config.n_embd)
         self.mlp = SwiGLUMuchPelu(config.n_embd, config.d_ff, config.dropout)
         self.dropout = nn.Dropout(config.dropout)
-    
+
     def forward(self, x, attn_mask=None, key_padding_mask=None):
         x_norm = self.norm1(x)
         attn_out = self.attn(x_norm, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
         x = x + self.dropout(attn_out)
-        
+
         x = x + self.dropout(self.mlp(self.norm2(x)))
         return x
 
@@ -225,18 +230,18 @@ class HRMInner(nn.Module):
         self.L_module = HRMBlock(config)
         self.config = config
         self.layer_idx = layer_idx
-        
+
         # Q-learning components for adaptive computation
         self.q_network = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd // 4),
             nn.ReLU(),
             nn.Linear(config.n_embd // 4, 2)  # [continue, halt]
         )
-        
+
         # Deep Supervision: intermediate prediction heads for hierarchical supervision
         self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        
+
         # Ponder loss components
         self.ponder_network = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd // 4),
@@ -244,48 +249,48 @@ class HRMInner(nn.Module):
             nn.Linear(config.n_embd // 4, 1),
             nn.Sigmoid()
         )
-        
+
         self.convergence_threshold = 1e-3
         self.max_l_steps = config.halt_max_steps
-        
+
         # HRM Cycles from paper, adapted for LLMs
         self.H_cycles = config.H_cycles
         self.L_cycles = config.L_cycles
-    
+
     def forward(self, z_H, z_L, input_embeddings, attn_mask=None, key_padding_mask=None, training=True):
         """Forward pass with HRM cycles adapted for LLMs - respects token causality"""
-        batch_size, seq_len, d_model = z_H.shape
-        device = z_H.device
-        
+        _ = z_H.shape  # batch_size, seq_len, d_model
+        _ = z_H.device  # device
+
         total_l_steps = 0
         total_ponder_loss = 0.0
         all_q_values = []
-        
+
         # HRM Cycles implementation for LLMs (micro model: fewer cycles)
         for h_cycle in range(self.H_cycles):
             cycle_l_steps = 0
             cycle_ponder_loss = 0.0
-            
+
             # L-module cycles (local refinement with causal attention)
             for l_cycle in range(self.L_cycles):
                 # L-module processes with H-module context + input injection
                 z_L_input = z_L + z_H.detach() + input_embeddings  # Input injection as in paper
                 z_L_new = self.L_module(z_L_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
-                
+
                 # Ponder loss: computational cost of this L-cycle
                 ponder_score = self.ponder_network(z_L_new).mean()
                 cycle_ponder_loss += ponder_score
                 cycle_l_steps += 1
-                
+
                 # Q-learning decision: should we halt this L-cycle early?
                 if training and l_cycle < self.L_cycles - 1:  # Not on last L-cycle
                     q_values = self.q_network(z_L_new)
                     all_q_values.append(q_values)
-                    
+
                     # Adaptive halting based on convergence
                     if l_cycle > 0:  # Need at least one step
                         diff = torch.norm(z_L_new - z_L, p=2, dim=-1).mean()
-                        
+
                         # Epsilon-greedy + convergence-based halting
                         epsilon = max(0.1, 1.0 - l_cycle * 0.3)  # Faster decay for micro model
                         if torch.rand(1).item() < epsilon:
@@ -296,57 +301,57 @@ class HRMInner(nn.Module):
                             avg_q_values = q_values.mean(dim=[0, 1])
                             q_halt = avg_q_values[1].item()
                             q_continue = avg_q_values[0].item()
-                            
+
                             # Halt if Q suggests OR if converged
                             should_halt = (q_halt > q_continue) or (diff < self.convergence_threshold)
                             action = 1 if should_halt else 0
-                        
+
                         if action == 1:  # Halt L-cycles early
                             break
-                
+
                 z_L = z_L_new
-            
+
             # H-module update after L-cycles (except last H-cycle)
             if h_cycle < self.H_cycles - 1:
                 z_H_input = z_H + z_L  # H gets refined L-module output
                 z_H = self.H_module(z_H_input, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
-            
+
             total_l_steps += cycle_l_steps
             total_ponder_loss += cycle_ponder_loss
-        
+
         # Final H-module update with all L-module refinements
         z_H_final = self.H_module(z_H + z_L, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
-        
+
         # Deep Supervision: Generate intermediate predictions for LLM tasks
         h_logits = self.h_prediction_head(z_H_final)
         l_logits = self.l_prediction_head(z_L)
-        
+
         # Normalize metrics
         avg_ponder_loss = total_ponder_loss / max(total_l_steps, 1)
-        
+
         return z_H_final, z_L, {
             'h_updated': True,
             'l_steps': total_l_steps,
             'q_values': all_q_values,
             'convergence_achieved': True,
             'h_logits': h_logits,  # For Deep Supervision
-            'l_logits': l_logits,  # For Deep Supervision 
+            'l_logits': l_logits,  # For Deep Supervision
             'ponder_loss': avg_ponder_loss,  # For computational regularization
             'layer_idx': self.layer_idx,
             'h_cycles_completed': self.H_cycles,
             'avg_l_cycles': total_l_steps / self.H_cycles
         }
-    
+
 
 class HRMText1(nn.Module):
     """HRM Model with full hierarchical temporal separation"""
-    
+
     def __init__(self, config: HRMText1Config):
         super().__init__()
         self.config = config
-        
+
         self.token_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
-        
+
         # Usar RoPE en lugar de embeddings posicionales aprendidos
         if not config.use_rotary_embeddings:
             self.pos_embeddings = nn.Embedding(config.block_size, config.n_embd)
@@ -354,74 +359,75 @@ class HRMText1(nn.Module):
         else:
             self.pos_embeddings = None
             self.pos_ids = None
-        
+
         # Apilar múltiples capas HRM con índices para Deep Supervision
         self.layers = nn.ModuleList([
             HRMInner(config, layer_idx=i) for i in range(config.n_layers)
         ])
-        
+
         self.final_norm = RMSNorm(config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        
+
         # Compartir pesos entre token embeddings y lm_head
         self.lm_head.weight = self.token_embeddings.weight
-        
+
         # Inicialización
         self.apply(self._init_weights)
-    
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # Inicialización Xavier/Glorot más conservadora para HRM
+            nn.init.xavier_uniform_(module.weight, gain=0.5)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-    
+            nn.init.normal_(module.weight, mean=0.0, std=0.01)
+
     def forward(self, input_ids, attention_mask=None, labels=None):
-        batch_size, seq_len = input_ids.shape
+        _, seq_len = input_ids.shape
         device = input_ids.device
-        
+
         # Token embeddings
         x = self.token_embeddings(input_ids)
-        
+
         # Positional embeddings (si no usa RoPE)
         if not self.config.use_rotary_embeddings:
             pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
             pos_embs = self.pos_embeddings(pos_ids)
             x = x + pos_embs
-        
+
         # Crear máscara causal
         if attention_mask is None:
             causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
         else:
             causal_mask = None
-        
+
         # Inicializar estados H y L para HRM
         z_H = x
         z_L = torch.zeros_like(x)
-        
+
         # Deep Supervision: collect intermediate predictions and losses
         all_hrm_info = []
         total_ponder_loss = 0.0
         intermediate_losses = []
-        
+
         # HRM layers con estados separados - using cycles approach
         for layer_idx, layer in enumerate(self.layers):
             z_H, z_L, hrm_info = layer(z_H, z_L, x, attn_mask=causal_mask, key_padding_mask=attention_mask, training=self.training)
             all_hrm_info.append(hrm_info)
-            
+
             # Accumulate ponder loss
             if hrm_info.get('ponder_loss') is not None:
                 total_ponder_loss += hrm_info['ponder_loss']
-            
+
             # Deep Supervision: calculate intermediate losses if we have labels and intermediate predictions
             if labels is not None and hrm_info.get('h_logits') is not None:
                 h_logits = hrm_info['h_logits']
                 l_logits = hrm_info.get('l_logits')
-                
+
                 # Calculate losses for intermediate predictions
                 shift_labels = labels[..., 1:].contiguous()
-                
+
                 # H-module supervision
                 shift_h_logits = h_logits[..., :-1, :].contiguous()
                 h_loss = F.cross_entropy(
@@ -429,7 +435,7 @@ class HRMText1(nn.Module):
                     shift_labels.view(-1),
                     ignore_index=self.config.pad_token_id
                 )
-                
+
                 # L-module supervision (if available)
                 l_loss = 0.0
                 if l_logits is not None:
@@ -439,29 +445,29 @@ class HRMText1(nn.Module):
                         shift_labels.view(-1),
                         ignore_index=self.config.pad_token_id
                     )
-                
+
                 intermediate_losses.append({
                     'layer_idx': layer_idx,
                     'h_loss': h_loss,
                     'l_loss': l_loss
                 })
-        
+
         # Final norm y lm_head
         output = self.final_norm(z_H)
         logits = self.lm_head(output)
-        
+
         # Si se proporcionan labels, calcular loss total con Deep Supervision
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            
+
             # Main loss
             main_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
                 ignore_index=self.config.pad_token_id
             )
-            
+
             # Deep Supervision loss (weighted sum of intermediate losses)
             deep_supervision_loss = 0.0
             if intermediate_losses:
@@ -469,19 +475,25 @@ class HRMText1(nn.Module):
                 for loss_info in intermediate_losses:
                     layer_weight = (loss_info['layer_idx'] + 1) / total_layers  # Higher weight for deeper layers
                     deep_supervision_loss += layer_weight * (loss_info['h_loss'] + 0.5 * loss_info['l_loss'])
-                
+
                 deep_supervision_loss /= len(intermediate_losses)  # Average
-            
+
             # Ponder loss (computational regularization)
             ponder_loss = total_ponder_loss / len(self.layers) if total_ponder_loss > 0 else 0.0
-            
-            # Combined loss
+
+            # Combined loss con verificación de estabilidad
             total_loss = (
-                main_loss + 
+                main_loss +
                 0.3 * deep_supervision_loss +  # Deep supervision weight
                 self.config.ponder_loss_weight * ponder_loss  # Ponder loss weight
             )
-            
+
+            # Verificar estabilidad de la pérdida
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                print(f"⚠️ NaN/Inf detectado en total_loss: main={main_loss.item()}, ds={deep_supervision_loss}, ponder={ponder_loss}")
+                # Usar solo main_loss si las otras pérdidas están corruptas
+                total_loss = main_loss
+
             return {
                 'loss': total_loss,
                 'logits': logits,
@@ -490,19 +502,19 @@ class HRMText1(nn.Module):
                 'ponder_loss': ponder_loss,
                 'hrm_info': all_hrm_info
             }
-        
+
         return {
             'logits': logits,
             'hrm_info': all_hrm_info
         }
 
-# Hugging Face Hub imports
-try:
-    from huggingface_hub import HfApi
-    HF_API_AVAILABLE = True
-except ImportError:
-    HF_API_AVAILABLE = False
-    print("⚠️ WARNING: huggingface_hub no está disponible. No se podrá subir al Hub.")
+# Hugging Face Hub imports - commented out unused import
+# try:
+#     from huggingface_hub import HfApi
+#     HF_API_AVAILABLE = True
+# except ImportError:
+#     HF_API_AVAILABLE = False
+#     print("⚠️ WARNING: huggingface_hub no está disponible. No se podrá subir al Hub.")
 
 # ==============================================================================
 # --- Dataset Handling ---
@@ -510,8 +522,8 @@ except ImportError:
 
 class OptimizedTextDataset(IterableDataset):
     """Dataset optimizado para texto usando tokenizador HF con GPU y paralelización"""
-    
-    def __init__(self, tokenizer, texts: List[str], block_size: int = 128, split_type: str = "train", 
+
+    def __init__(self, tokenizer, texts: List[str], block_size: int = 128, split_type: str = "train",
                  device=None, batch_tokenize: bool = True, num_proc: int = None, max_length: int = 1024,
                  min_text_length: int = 10, cache_tokens: bool = False):
         self.tokenizer = tokenizer
@@ -530,40 +542,40 @@ class OptimizedTextDataset(IterableDataset):
         self.max_length = max_length
         self.min_text_length = min_text_length
         self.cache_tokens = cache_tokens
-        
+
         # Pre-procesar y tokenizar si está habilitado el cache
         if self.cache_tokens:
             print(f"🔄 Pre-tokenizando {len(texts)} textos para cache...")
             self.tokenized_chunks = self._preprocess_and_tokenize()
         else:
             self.tokenized_chunks = None
-        
+
         print(f"📚 Dataset {split_type}: {len(texts)} textos, block_size={block_size}")
         print(f"   🚀 GPU tokenization: {self.device.type == 'cuda'}")
         print(f"   ⚡ Batch tokenization: {batch_tokenize}")
         print(f"   🔧 Num processes: {self.num_proc}")
         print(f"   💾 Cache tokens: {cache_tokens}")
-    
+
     def _preprocess_and_tokenize(self):
         """Pre-procesar y tokenizar todos los textos en paralelo"""
         # Filtrar textos válidos
-        valid_texts = [text.strip()[:self.max_length] for text in self.texts 
+        valid_texts = [text.strip()[:self.max_length] for text in self.texts
                       if text and len(text.strip()) >= self.min_text_length]
-        
+
         if not valid_texts:
             return []
-        
+
         all_chunks = []
-        
+
         if self.batch_tokenize and len(valid_texts) > 1:
             # Tokenización en batch para mejor rendimiento
             try:
                 print(f"   🔄 Tokenizando en batches de 32...")
                 batch_size = 32
-                
+
                 for i in range(0, len(valid_texts), batch_size):
                     batch_texts = valid_texts[i:i + batch_size]
-                    
+
                     # Tokenizar batch completo
                     batch_tokens = self.tokenizer(
                         batch_texts,
@@ -573,37 +585,37 @@ class OptimizedTextDataset(IterableDataset):
                         padding=False,
                         return_tensors=None
                     )
-                    
+
                     # Procesar cada secuencia tokenizada
                     for tokens in batch_tokens['input_ids']:
                         chunks = self._create_chunks(tokens)
                         all_chunks.extend(chunks)
-                        
+
             except Exception as e:
                 print(f"⚠️ Error en batch tokenization, usando secuencial: {e}")
                 # Fallback a tokenización secuencial
                 for text in valid_texts:
                     try:
-                        tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                        tokens = self.tokenizer.encode(text, add_special_tokens=True,
                                                      max_length=self.max_length, truncation=True)
                         chunks = self._create_chunks(tokens)
                         all_chunks.extend(chunks)
-                    except:
+                    except Exception:  # pylint: disable=broad-except
                         continue
         else:
             # Tokenización secuencial tradicional
             for text in valid_texts:
                 try:
-                    tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                    tokens = self.tokenizer.encode(text, add_special_tokens=True,
                                                  max_length=self.max_length, truncation=True)
                     chunks = self._create_chunks(tokens)
                     all_chunks.extend(chunks)
-                except:
+                except Exception:  # pylint: disable=broad-except
                     continue
-        
+
         print(f"   ✅ Generados {len(all_chunks)} chunks tokenizados")
         return all_chunks
-    
+
     def _create_chunks(self, tokens):
         """Crear chunks de tokens del tamaño especificado"""
         chunks = []
@@ -615,7 +627,7 @@ class OptimizedTextDataset(IterableDataset):
                     'labels': torch.tensor(chunk[1:], dtype=torch.long)
                 })
         return chunks
-    
+
     def __iter__(self):
         if self.tokenized_chunks is not None:
             # Usar chunks pre-tokenizados
@@ -626,12 +638,12 @@ class OptimizedTextDataset(IterableDataset):
             for text in self.texts:
                 if not text or len(text.strip()) < self.min_text_length:
                     continue
-                
+
                 try:
                     # Tokenizar con HF
-                    tokens = self.tokenizer.encode(text, add_special_tokens=True, 
+                    tokens = self.tokenizer.encode(text, add_special_tokens=True,
                                                  max_length=self.max_length, truncation=True)
-                    
+
                     # Crear chunks
                     for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
                         chunk = tokens[i:i + self.block_size]
@@ -649,30 +661,30 @@ class OptimizedTextDataset(IterableDataset):
 # Mantener compatibilidad hacia atrás
 TextDataset = OptimizedTextDataset
 
-def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000, 
+def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
                    dataset_name: str = "allenai/c4", dataset_config: str = "en",
-                   text_column: str = "text", min_text_length: int = 50, 
+                   text_column: str = "text", min_text_length: int = 50,
                    max_text_length: int = 2000, num_proc: int = None,
                    use_streaming: bool = True, fast_mode: bool = False):
     """Cargar dataset usando datasets de HuggingFace de forma parametrizable"""
     try:
         from datasets import load_dataset
-        
+
         print(f"📥 Cargando dataset '{dataset_name}' ({dataset_config}) split '{split}' con {num_samples} samples...")
         print(f"   📋 Configuración:")
         print(f"   - Dataset: {dataset_name}")
-        print(f"   - Config: {dataset_config}")  
+        print(f"   - Config: {dataset_config}")
         print(f"   - Columna texto: {text_column}")
         print(f"   - Min length: {min_text_length} chars")
         print(f"   - Max length: {max_text_length} chars")
         print(f"   - Streaming: {use_streaming}")
         print(f"   - Fast mode: {fast_mode}")
-        
+
         # OPTIMIZACIÓN: Para datasets grandes, usar modo no-streaming es más rápido
         if fast_mode and num_samples > 50000:
             print("⚡ Fast mode: Usando dataset no-streaming para mejor rendimiento...")
             use_streaming = False
-        
+
         # Cargar dataset
         if use_streaming:
             dataset = load_dataset(dataset_name, dataset_config, split=split, streaming=True)
@@ -685,55 +697,55 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
                 indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
                 dataset = dataset.select(indices)
                 print(f"   🎲 Seleccionados {len(indices)} samples aleatorios de {len(dataset)}")
-        
+
         texts = []
         processed_count = 0
-        
+
         if TQDM_AVAILABLE:
             progress_desc = f"Procesando {dataset_name}"
             progress = tqdm(enumerate(dataset), desc=progress_desc, total=num_samples if use_streaming else len(dataset))
         else:
             progress = enumerate(dataset)
-        
+
         for i, item in progress:
             if use_streaming and i >= num_samples:
                 break
-            
+
             text = item.get(text_column, '')
             if isinstance(text, list):
                 text = ' '.join(text)  # Para datasets con texto en listas
-            
+
             if text and len(text.strip()) >= min_text_length:
                 # Procesar y limpiar texto
                 text = text.strip()[:max_text_length]
                 texts.append(text)
                 processed_count += 1
-                
+
                 if TQDM_AVAILABLE and isinstance(progress, tqdm):
                     progress.set_postfix({
                         'válidos': processed_count,
                         'ratio': f'{processed_count/(i+1)*100:.1f}%'
                     })
-        
+
         if TQDM_AVAILABLE and isinstance(progress, tqdm):
             progress.close()
-        
+
         print(f"✅ Procesados {processed_count} textos válidos de {i+1} samples totales")
         print(f"   📊 Ratio de aprovechamiento: {processed_count/(i+1)*100:.1f}%")
-        
+
         if not texts:
             print("❌ No se encontraron textos válidos en el dataset")
             print("💡 Sugerencias:")
             print("   - Use --no_streaming para mejor compatibilidad")
             print("   - Reduzca --train_samples")
             raise ValueError(f"No se pudieron cargar textos válidos de {dataset_name}")
-            
+
         return texts
-        
+
     except Exception as e:
         print(f"❌ Error cargando dataset HF: {e}")
         print("💡 Sugerencias:")
-        print("   - Use --no_streaming para mejor compatibilidad con datasets grandes") 
+        print("   - Use --no_streaming para mejor compatibilidad con datasets grandes")
         print("   - Verifique conectividad de red")
         print("   - Reduzca el número de samples")
         raise RuntimeError(f"Falló carga de dataset {dataset_name}: {e}") from e
@@ -743,14 +755,14 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
 # --- Training Functions ---
 # ==============================================================================
 
-def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step: int = 0):
+def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step: int = 0):  # pylint: disable=unused-argument
     """Guardar modelo y tokenizador HF"""
     os.makedirs(save_path, exist_ok=True)
-    
+
     # Guardar modelo PyTorch
     model_path = os.path.join(save_path, "pytorch_model.bin")
     torch.save(model.state_dict(), model_path)
-    
+
     # Guardar configuración
     config_dict = {
         'vocab_size': config.vocab_size,
@@ -765,12 +777,12 @@ def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step
         'hf_tokenizer_name': getattr(config, 'hf_tokenizer_name', 'openai-community/gpt2'),
         'pad_token_id': getattr(config, 'pad_token_id', 0),
     }
-    
+
     config_path = os.path.join(save_path, "config.json")
     with open(config_path, 'w') as f:
         import json
         json.dump(config_dict, f, indent=2)
-    
+
     # Guardar tokenizador HF
     try:
         tokenizer.save_pretrained(save_path)
@@ -784,12 +796,12 @@ def train_hrm_hf(
     num_train_samples: int = 10000,
     num_val_samples: int = 1000,
     batch_size: int = 8,
-    learning_rate: float = 5e-4,
+    learning_rate: float = 1e-4,
     num_epochs: int = 3,
-    save_steps: int = 500,
+    save_steps: int = 200,
     eval_steps: int = 200,
-    max_grad_norm: float = 1.0,
-    warmup_steps: int = 100,
+    max_grad_norm: float = 0.5,
+    warmup_steps: int = 500,
     # Parámetros de tokenización optimizada
     dataset_name: str = "allenai/c4",
     dataset_config: str = "en",
@@ -809,10 +821,10 @@ def train_hrm_hf(
     no_streaming: bool = False,
 ):
     """Entrenar modelo HRM con tokenizador HuggingFace"""
-    
+
     # Configuración inteligente de paralelización
     cpu_count = mp.cpu_count()
-    
+
     # Auto-detectar configuración óptima
     if num_workers == 0:
         if cpu_intensive:
@@ -821,15 +833,15 @@ def train_hrm_hf(
         else:
             # Modo balanceado
             num_workers = min(cpu_count // 2, 8) if max_workers == 0 else min(max_workers, cpu_count // 2)
-    
+
     if tokenizer_workers == 0:
         tokenizer_workers = min(cpu_count, 16) if cpu_intensive else min(cpu_count // 2, 8)
         if max_workers > 0:
             tokenizer_workers = min(tokenizer_workers, max_workers)
-    
+
     # Ajustar batch size para CPU intensivo
     effective_batch_size = batch_size * batch_size_multiplier
-    
+
     print(f"🚀 Iniciando entrenamiento HRM con tokenizador HF")
     print(f"📊 Configuración:")
     print(f"🖥️  Hardware detectado:")
@@ -849,11 +861,11 @@ def train_hrm_hf(
     print(f"   Batch size: {batch_size}")
     print(f"   Learning rate: {learning_rate}")
     print(f"   Épocas: {num_epochs}")
-    
+
     # Crear tokenizador HF
     print(f"🔧 Cargando tokenizador: {tokenizer_name}")
     tokenizer = create_tokenizer(tokenizer_name)
-    
+
     # Crear configuración del modelo
     config = HRMText1Config(
         vocab_size=len(tokenizer),
@@ -867,36 +879,36 @@ def train_hrm_hf(
         hf_tokenizer_name=tokenizer_name,
         pad_token_id=tokenizer.pad_token_id,
     )
-    
+
     print(f"📐 Configuración del modelo:")
     print(f"   Vocabulario: {config.vocab_size:,} tokens")
     print(f"   Embeddings: {config.n_embd}")
     print(f"   Capas: {config.n_layers}")
     print(f"   Cabezas atención: {config.n_head}")
-    
+
     # Crear modelo
     model = HRMText1(config)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
     print(f"🧠 Modelo creado:")
     print(f"   Total parámetros: {total_params:,}")
     print(f"   Parámetros entrenables: {trainable_params:,}")
-    
+
     # Configurar dispositivo (GPU/CPU)
     if torch.cuda.is_available():
         device = torch.device("cuda")
         gpu_count = torch.cuda.device_count()
         gpu_name = torch.cuda.get_device_name(0)
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        
+
         print(f"🚀 GPU disponible:")
         print(f"   📱 Dispositivo: {gpu_name}")
         print(f"   💾 Memoria: {gpu_memory:.1f} GB")
         print(f"   🔢 GPUs: {gpu_count}")
-        
+
         model = model.to(device)
-        
+
         # Configurar para entrenamiento multi-GPU si hay múltiples GPUs
         if gpu_count > 1:
             print(f"🔗 Configurando entrenamiento multi-GPU ({gpu_count} GPUs)")
@@ -904,9 +916,9 @@ def train_hrm_hf(
     else:
         device = torch.device("cpu")
         print(f"💻 Usando CPU (no hay GPU disponible)")
-    
+
     print(f"🎯 Modelo movido a dispositivo: {device}")
-    
+
     # Configurar mixed precision para GPU moderna
     use_amp = device.type == 'cuda'
     if use_amp:
@@ -914,13 +926,13 @@ def train_hrm_hf(
         scaler = torch.amp.GradScaler('cuda')
     else:
         scaler = None
-    
+
     # Cargar datasets de HuggingFace
     print("📚 Cargando datasets...")
-    
+
     # Configurar streaming basado en parámetros
     use_streaming_mode = not no_streaming and not fast_mode
-    
+
     train_texts = load_dataset_hf(
         tokenizer, "train", num_train_samples,
         dataset_name=dataset_name, dataset_config=dataset_config,
@@ -933,7 +945,7 @@ def train_hrm_hf(
         min_text_length=min_text_length, max_text_length=max_text_length,
         use_streaming=use_streaming_mode, fast_mode=fast_mode
     )
-    
+
     train_dataset = OptimizedTextDataset(
         tokenizer, train_texts, config.block_size, "train",
         device=device, batch_tokenize=batch_tokenize, cache_tokens=cache_tokens,
@@ -941,19 +953,19 @@ def train_hrm_hf(
         num_proc=tokenizer_workers
     )
     val_dataset = OptimizedTextDataset(
-        tokenizer, val_texts, config.block_size, "validation", 
+        tokenizer, val_texts, config.block_size, "validation",
         device=device, batch_tokenize=batch_tokenize, cache_tokens=False,  # No cache para validación
         max_length=max_text_length, min_text_length=min_text_length,
         num_proc=min(tokenizer_workers, 4)  # Menos workers para validación
     )
-    
+
     # Crear dataloaders con configuración optimizada
     print(f"🔧 Configurando dataloaders optimizados...")
     print(f"   Train workers: {num_workers}, prefetch: {prefetch_factor}")
-    
+
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=effective_batch_size, 
+        train_dataset,
+        batch_size=effective_batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=device.type == 'cuda',  # Pin memory para GPU
@@ -962,14 +974,14 @@ def train_hrm_hf(
         drop_last=True,  # Evitar batches incompletos
         multiprocessing_context='spawn' if num_workers > 0 else None  # Mejor para muchos workers
     )
-    
+
     # Configurar validation loader con menos recursos
     val_workers = min(max(num_workers // 2, 1), 4) if num_workers > 0 else 0
     print(f"   Val workers: {val_workers}, prefetch: {min(prefetch_factor, 2)}")
-    
+
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=effective_batch_size, 
+        val_dataset,
+        batch_size=effective_batch_size,
         shuffle=False,
         num_workers=val_workers,
         pin_memory=device.type == 'cuda',
@@ -978,10 +990,16 @@ def train_hrm_hf(
         drop_last=False,
         multiprocessing_context='spawn' if val_workers > 0 else None
     )
-    
-    # Crear optimizador
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-    
+
+    # Crear optimizador con configuración más conservadora para HRM
+    optimizer = AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=0.01,
+        betas=(0.9, 0.95),  # Más conservador que el default (0.9, 0.999)
+        eps=1e-8
+    )
+
     # Scheduler con warmup - estimación conservadora de steps
     # El dataset crea múltiples chunks por texto, así que estimamos generosamente
     estimated_chunks_per_text = 2  # Estimación conservadora
@@ -994,40 +1012,40 @@ def train_hrm_hf(
         effective_warmup_steps = warmup_steps
     # Asegurar que pct_start esté entre 0 y 1
     pct_start = min(0.3, effective_warmup_steps / max(total_steps, effective_warmup_steps))
-    
+
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
+        optimizer,
         max_lr=learning_rate,
         total_steps=total_steps,
         pct_start=pct_start
     )
-    
+
     # Early stopping para evitar overfitting en entrenamientos grandes
     early_stopping_patience = 5 if len(train_texts) >= 1000000 else 10
     early_stopping_min_delta = 0.001
     no_improvement_count = 0
     early_stop_triggered = False
-    
+
     print(f"🎯 Entrenamiento configurado:")
     print(f"   Steps totales estimados: {total_steps:,}")
     print(f"   Warmup steps efectivos: {effective_warmup_steps}")
     if len(train_texts) >= 1000000:
         print(f"   🛑 Early stopping: patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
-    
+
     # Training loop
     model.train()
     step = 0
     best_val_loss = float('inf')
-    
+
     print(f"\n🎉 ¡Iniciando entrenamiento!")
     print("=" * 60)
-    
+
     for epoch in range(num_epochs):
         print(f"\n📅 Época {epoch + 1}/{num_epochs}")
         epoch_loss = 0
         num_batches = 0
         epoch_start_time = time.time()
-        
+
         # Crear barra de progreso si tqdm está disponible
         if TQDM_AVAILABLE:
             # Estimamos el número de batches basado en los samples
@@ -1042,20 +1060,20 @@ def train_hrm_hf(
             )
         else:
             progress_bar = enumerate(train_loader)
-        
-        for batch_idx, batch in progress_bar:
+
+        for _, batch in progress_bar:
             step += 1
             step_start_time = time.time()
-            
+
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
-            
+
             # Forward pass usando interfaz HRM completa
             # Crear attention mask si no existe
             attention_mask = torch.ones_like(input_ids)
             if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
                 attention_mask = (input_ids != tokenizer.pad_token_id).long()
-            
+
             # Forward pass con mixed precision si está disponible
             if use_amp:
                 with torch.amp.autocast('cuda'):
@@ -1082,29 +1100,40 @@ def train_hrm_hf(
                     main_loss = loss
                     deep_supervision_loss = 0.0
                     ponder_loss = 0.0
-            
+
             # Backward pass
             optimizer.zero_grad()
-            
+
             if use_amp:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
+                # Gradient clipping más agresivo para HRM
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                # Verificar NaN en gradientes antes del step
+                if not torch.isnan(loss) and all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None):
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    print(f"⚠️ NaN detectado en step {step}, saltando optimización")
+                    scaler.update()  # Actualizar scaler pero no optimizer
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                optimizer.step()
-                
+                # Verificar NaN en gradientes
+                if torch.isnan(loss) or any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None):
+                    print(f"⚠️ NaN detectado en step {step}, saltando optimización")
+                    optimizer.zero_grad()  # Limpiar gradientes corruptos
+                else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    optimizer.step()
+
             # Solo hacer step del scheduler si no hemos excedido total_steps
             if step <= total_steps:
                 scheduler.step()
-            
+
             epoch_loss += loss.item()
             num_batches += 1
             step_time = time.time() - step_start_time
-            
+
             # Actualizar barra de progreso
             current_lr = scheduler.get_last_lr()[0]
             if TQDM_AVAILABLE:
@@ -1115,38 +1144,37 @@ def train_hrm_hf(
                     's/step': f'{step_time:.2f}',
                     'step': step
                 }
-                
+
                 # Agregar métricas HRM si están disponibles
                 if deep_supervision_loss > 0:
                     postfix['ds'] = f'{deep_supervision_loss.item() if hasattr(deep_supervision_loss, "item") else deep_supervision_loss:.4f}'
                 if ponder_loss > 0:
                     postfix['ponder'] = f'{ponder_loss.item() if hasattr(ponder_loss, "item") else ponder_loss:.4f}'
-                
+
                 # Añadir información de GPU si está disponible
                 if device.type == 'cuda':
                     gpu_mem_used = torch.cuda.memory_allocated(0) / 1024**3
-                    gpu_mem_cached = torch.cuda.memory_reserved(0) / 1024**3
                     postfix['GPU'] = f'{gpu_mem_used:.1f}GB'
-                
+
                 progress_bar.set_postfix(postfix)
-            
+
             # Logging detallado cada 50 steps
             if step % 50 == 0 and not TQDM_AVAILABLE:
                 print(f"Step {step:4d} | Loss: {loss.item():.4f} | LR: {current_lr:.2e} | Time: {step_time:.2f}s")
-            
+
             # Evaluación
             if step % eval_steps == 0:
                 model.eval()
                 val_loss = 0
                 val_batches = 0
-                
+
                 eval_desc = "🔍 Evaluando..."
                 if TQDM_AVAILABLE:
                     print(f"\n{eval_desc}")
                     estimated_val_batches = min(50, len(val_texts) // batch_size)
                     eval_progress = tqdm(
-                        val_loader, 
-                        desc="Validación", 
+                        val_loader,
+                        desc="Validación",
                         total=estimated_val_batches,
                         leave=False,
                         dynamic_ncols=True
@@ -1154,20 +1182,20 @@ def train_hrm_hf(
                 else:
                     print(eval_desc)
                     eval_progress = val_loader
-                
+
                 with torch.no_grad():
                     for val_batch in eval_progress:
                         if val_batches >= 50:  # Evaluar solo 50 batches
                             break
-                        
+
                         val_input_ids = val_batch['input_ids'].to(device)
                         val_labels = val_batch['labels'].to(device)
-                        
+
                         # Crear attention mask para validación
                         val_attention_mask = torch.ones_like(val_input_ids)
                         if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
                             val_attention_mask = (val_input_ids != tokenizer.pad_token_id).long()
-                        
+
                         # Usar interfaz HRM completa
                         val_outputs = model(input_ids=val_input_ids, attention_mask=val_attention_mask, labels=val_labels)
                         if isinstance(val_outputs, dict):
@@ -1176,15 +1204,15 @@ def train_hrm_hf(
                             batch_val_loss = (val_outputs[0] if isinstance(val_outputs, tuple) else val_outputs.loss).item()
                         val_loss += batch_val_loss
                         val_batches += 1
-                        
+
                         if TQDM_AVAILABLE:
                             eval_progress.set_postfix({'val_loss': f'{batch_val_loss:.4f}'})
-                
+
                 avg_val_loss = val_loss / max(val_batches, 1)
                 perplexity = math.exp(avg_val_loss) if avg_val_loss < 10 else float('inf')
-                
+
                 print(f"📊 Step {step} | Val Loss: {avg_val_loss:.4f} | Perplexity: {perplexity:.2f}")
-                
+
                 # Reportar métricas HRM si están disponibles en la última validación
                 if isinstance(val_outputs, dict) and val_outputs.get('hrm_info'):
                     hrm_info = val_outputs['hrm_info']
@@ -1192,9 +1220,9 @@ def train_hrm_hf(
                     total_l_steps = sum(info.get('l_steps', 0) for info in hrm_info)
                     avg_l_steps = total_l_steps / len(hrm_info) if hrm_info else 0
                     convergence_rate = sum(1 for info in hrm_info if info.get('convergence_achieved', False)) / len(hrm_info) if hrm_info else 0
-                    
+
                     print(f"   🔄 HRM Métricas: H-updates: {h_updates}/{len(hrm_info)}, Avg L-steps: {avg_l_steps:.1f}, Convergencia: {convergence_rate*100:.1f}%")
-                
+
                 # Guardar mejor modelo y early stopping
                 if avg_val_loss < best_val_loss - early_stopping_min_delta:
                     best_val_loss = avg_val_loss
@@ -1206,7 +1234,7 @@ def train_hrm_hf(
                     no_improvement_count += 1
                     if len(train_texts) >= 1000000:  # Solo para entrenamientos grandes
                         print(f"⏸️  Sin mejora: {no_improvement_count}/{early_stopping_patience}")
-                        
+
                         if no_improvement_count >= early_stopping_patience:
                             print(f"\n🛑 Early stopping activado después de {no_improvement_count} evaluaciones sin mejora")
                             print(f"   Mejor val loss: {best_val_loss:.4f}")
@@ -1214,42 +1242,42 @@ def train_hrm_hf(
                             print("   Deteniendo entrenamiento para evitar overfitting...")
                             early_stop_triggered = True
                             break
-                
+
                 model.train()
-            
+
             # Guardar checkpoint
             if step % save_steps == 0:
                 checkpoint_path = os.path.join(output_dir, f"checkpoint-{step}")
                 save_model_hf(model, tokenizer, checkpoint_path, config, step)
                 print(f"💾 Checkpoint guardado: {checkpoint_path}")
-            
+
             # Early stopping en caso de pérdida muy baja
             if loss.item() < 0.01:
                 print("🎯 Loss muy bajo, finalizando entrenamiento temprano")
                 break
-        
+
         # Verificar early stopping
         if early_stop_triggered:
             print("🛑 Saliendo del entrenamiento por early stopping")
             break
-        
+
         # Estadísticas de época
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
         epoch_time = time.time() - epoch_start_time
         samples_per_sec = num_batches * batch_size / epoch_time if epoch_time > 0 else 0
-        
+
         print(f"\n📊 Época {epoch + 1}/{num_epochs} completada:")
         print(f"   📈 Loss promedio: {avg_epoch_loss:.4f}")
         print(f"   ⏱️  Tiempo: {epoch_time:.1f}s")
         print(f"   🚀 Samples/sec: {samples_per_sec:.1f}")
         print(f"   🎯 Mejor val loss: {best_val_loss:.4f}")
         print("-" * 50)
-    
+
     # Guardar modelo final
     final_path = os.path.join(output_dir, "final_model")
     save_model_hf(model, tokenizer, final_path, config, step)
     print(f"🏁 Modelo final guardado: {final_path}")
-    
+
     print(f"\n✅ ¡Entrenamiento completado!")
     print(f"📊 Estadísticas finales:")
     print(f"   Steps totales: {step}")
@@ -1276,7 +1304,7 @@ def main():
                        help="Frecuencia de guardado")
     parser.add_argument("--eval_steps", type=int, default=200,
                        help="Frecuencia de evaluación")
-    
+
     # Parámetros de tokenización optimizada
     parser.add_argument("--dataset_name", type=str, default="allenai/c4",
                        help="Nombre del dataset HF (ej: allenai/c4, wikitext)")
@@ -1304,13 +1332,13 @@ def main():
                        help="Máximo workers permitidos (0=sin límite, útil para limitar uso)")
     parser.add_argument("--batch_size_multiplier", type=int, default=1,
                        help="Multiplicador de batch size para CPU intensivo (1-4)")
-    
+
     # Parámetros para optimizar descarga de dataset
     parser.add_argument("--fast_mode", action="store_true", default=False,
                        help="Modo rápido: descarga dataset completo en lugar de streaming")
     parser.add_argument("--no_streaming", action="store_true", default=False,
                        help="Forzar descarga completa del dataset (más rápido para lotes grandes)")
-    
+
     if len(os.sys.argv) == 1:
         print("🚀 HRM Training con Tokenizador HuggingFace")
         print("\nUso:")
@@ -1325,21 +1353,21 @@ def main():
         print("  # Modo CPU INTENSIVO")
         print("  python hrm_training_micro_10m_hf.py --cpu_intensive --batch_size_multiplier 2")
         print("  ")
-        print("  # Configuración manual de workers + no streaming")  
+        print("  # Configuración manual de workers + no streaming")
         print("  python hrm_training_micro_10m_hf.py --num_workers 8 --no_streaming")
         print("  ")
         print("  # Dataset diferente en español")
         print("  python hrm_training_micro_10m_hf.py --tokenizer DeepESP/gpt2-spanish --no_streaming")
         return
-    
+
     args = parser.parse_args()
-    
+
     # Verificar dependencias
     if not HF_TOKENIZER_AVAILABLE:
         print("❌ Tokenizador HF no disponible. Instale las dependencias:")
         print("pip install transformers tokenizers datasets")
         return
-    
+
     # Iniciar entrenamiento
     train_hrm_hf(
         tokenizer_name=args.tokenizer,
