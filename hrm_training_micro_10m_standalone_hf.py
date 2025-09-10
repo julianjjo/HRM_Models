@@ -1220,17 +1220,10 @@ def train_hrm_hf(
         pct_start=pct_start
     )
 
-    # Early stopping más agresivo para evitar overfitting
-    early_stopping_patience = 3 if len(train_texts) >= 1000000 else 5  # Más agresivo
-    early_stopping_min_delta = 0.01  # Delta más alto
-    no_improvement_count = 0
-    early_stop_triggered = False
 
     print(f"🎯 Entrenamiento configurado:")
     print(f"   Steps totales estimados: {total_steps:,}")
     print(f"   Warmup steps efectivos: {effective_warmup_steps}")
-    if len(train_texts) >= 1000000:
-        print(f"   🛑 Early stopping: patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
 
     # Training loop
     model.train()
@@ -1429,25 +1422,12 @@ def train_hrm_hf(
 
                     print(f"   🔄 HRM Métricas: H-updates: {h_updates}/{len(hrm_info)}, Avg L-steps: {avg_l_steps:.1f}, Convergencia: {convergence_rate*100:.1f}%")
 
-                # Guardar mejor modelo y early stopping
-                if avg_val_loss < best_val_loss - early_stopping_min_delta:
+                # Guardar mejor modelo
+                if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
-                    no_improvement_count = 0
                     best_model_path = os.path.join(output_dir, "best_model")
                     save_model_hf(model, tokenizer, best_model_path, config, step)
                     print(f"💎 Nuevo mejor modelo guardado: {avg_val_loss:.4f}")
-                else:
-                    no_improvement_count += 1
-                    if len(train_texts) >= 1000000:  # Solo para entrenamientos grandes
-                        print(f"⏸️  Sin mejora: {no_improvement_count}/{early_stopping_patience}")
-
-                        if no_improvement_count >= early_stopping_patience:
-                            print(f"\n🛑 Early stopping activado después de {no_improvement_count} evaluaciones sin mejora")
-                            print(f"   Mejor val loss: {best_val_loss:.4f}")
-                            print(f"   Val loss actual: {avg_val_loss:.4f}")
-                            print("   Deteniendo entrenamiento para evitar overfitting...")
-                            early_stop_triggered = True
-                            break
 
                 model.train()
 
@@ -1457,15 +1437,7 @@ def train_hrm_hf(
                 save_model_hf(model, tokenizer, checkpoint_path, config, step)
                 print(f"💾 Checkpoint guardado: {checkpoint_path}")
 
-            # Early stopping en caso de pérdida muy baja
-            if loss.item() < 0.01:
-                print("🎯 Loss muy bajo, finalizando entrenamiento temprano")
-                break
 
-        # Verificar early stopping
-        if early_stop_triggered:
-            print("🛑 Saliendo del entrenamiento por early stopping")
-            break
 
         # Estadísticas de época
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
