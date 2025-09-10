@@ -86,7 +86,7 @@ class HRMText1Config(ConfigBase):
                  block_size=128,            # Micro model context
                  n_embd=256,                # Micro model embeddings
                  n_head=8,                  # Micro model heads
-                 n_layers=4,                # Micro model layers - reducido para estabilidad
+                 n_layers=6,                # Micro model layers - incrementado para HRM completo
                  d_ff=1024,                 # Micro model FFN
                  dropout=0.2,  # Aumentado para mejor generalización
                  pad_token_id=0,
@@ -97,9 +97,9 @@ class HRMText1Config(ConfigBase):
                  rotary_embedding_base=10000,
                  use_flash_attention=True,
                  gradient_checkpointing=False,
-                 # HRM Ciclos según paper original
-                 H_cycles=1,                # Reducido para estabilidad micro
-                 L_cycles=1,                # Reducido para estabilidad micro
+                 # HRM Ciclos según paper original - FULL CAPACITY
+                 H_cycles=2,                # Incrementado para mayor capacidad
+                 L_cycles=3,                # Incrementado para refinamiento detallado
                  **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -260,15 +260,15 @@ class HRMInner(nn.Module):
         self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # Inicialización ultra-conservadora para estabilidad
-        depth_factor = max(0.1, 1.0 - (layer_idx / max(config.n_layers, 1)))
-        std_h = 0.001 + 0.004 * depth_factor  # Entre 0.001 y 0.005 (muy conservador)
-        std_l = 0.0005 + 0.002 * depth_factor  # Entre 0.0005 y 0.0025 (ultra conservador)
+        # Inicialización menos conservadora para mejor capacidad
+        depth_factor = max(0.3, 1.0 - (layer_idx / max(config.n_layers, 1)))
+        std_h = 0.005 + 0.015 * depth_factor  # Entre 0.005 y 0.020 (menos conservador)
+        std_l = 0.003 + 0.010 * depth_factor  # Entre 0.003 y 0.013 (menos conservador)
 
         nn.init.normal_(self.h_prediction_head.weight, mean=0.0, std=std_h)
         nn.init.normal_(self.l_prediction_head.weight, mean=0.0, std=std_l)
 
-        print(f"🔧 Capa {layer_idx}: H-head std={std_h:.5f}, L-head std={std_l:.5f} (ultra-conservador)")
+        print(f"🔧 Capa {layer_idx}: H-head std={std_h:.4f}, L-head std={std_l:.4f} (capacidad completa)")
 
         # Ponder loss components
         self.ponder_network = nn.Sequential(
@@ -561,14 +561,14 @@ class HRMText1(ModelBase):
                 print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
                 deep_supervision_loss = 0.0
 
-            # Deep supervision reactivado gradualmente con pesos muy bajos
-            ds_weight = 0.01  # Peso muy bajo para comenzar gradualmente
-            ponder_weight = self.config.ponder_loss_weight * 0.1  # 10% del peso original
+            # Deep supervision COMPLETAMENTE activado
+            ds_weight = 0.2  # Peso significativo para deep supervision
+            ponder_weight = self.config.ponder_loss_weight  # Peso completo para ponder loss
 
             total_loss = (
                 main_loss +
-                ds_weight * deep_supervision_loss +  # Reactivado gradualmente
-                ponder_weight * ponder_loss  # Reactivado con peso reducido
+                ds_weight * deep_supervision_loss +  # Deep supervision COMPLETAMENTE activado
+                ponder_weight * ponder_loss  # Ponder loss peso completo
             )
 
             # Verificar estabilidad de la pérdida final
@@ -991,7 +991,7 @@ def train_hrm_hf(
         block_size=128,
         n_embd=256,
         n_head=8,
-        n_layers=4,  # Reducido para estabilidad
+        n_layers=6,  # Incrementado para HRM completo
         d_ff=1024,
         dropout=0.2,  # Aumentado para mejor generalización
         tokenizer_type='huggingface',
