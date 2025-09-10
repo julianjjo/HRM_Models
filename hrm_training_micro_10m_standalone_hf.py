@@ -468,27 +468,53 @@ class HRMText1(nn.Module):
                 ignore_index=self.config.pad_token_id
             )
 
-            # Deep Supervision loss (weighted sum of intermediate losses)
+            # Deep Supervision loss (weighted sum of intermediate losses) con protección NaN
             deep_supervision_loss = 0.0
             if intermediate_losses:
                 total_layers = len(self.layers)
-                for loss_info in intermediate_losses:
-                    layer_weight = (loss_info['layer_idx'] + 1) / total_layers  # Higher weight for deeper layers
-                    deep_supervision_loss += layer_weight * (loss_info['h_loss'] + 0.5 * loss_info['l_loss'])
+                valid_losses = []
 
-                deep_supervision_loss /= len(intermediate_losses)  # Average
+                for loss_info in intermediate_losses:
+                    h_loss = loss_info['h_loss']
+                    l_loss = loss_info['l_loss']
+
+                    # Verificar que las pérdidas intermedias no sean NaN
+                    if torch.isnan(h_loss) or torch.isinf(h_loss):
+                        print(f"⚠️ H-loss NaN en capa {loss_info['layer_idx']}, saltando")
+                        continue
+                    if torch.isnan(l_loss) or torch.isinf(l_loss):
+                        print(f"⚠️ L-loss NaN en capa {loss_info['layer_idx']}, saltando")
+                        l_loss = 0.0  # Usar 0 en lugar de saltar completamente
+
+                    layer_weight = (loss_info['layer_idx'] + 1) / total_layers
+                    layer_loss = layer_weight * (h_loss + 0.5 * l_loss)
+
+                    # Verificar resultado de la capa
+                    if not torch.isnan(layer_loss) and not torch.isinf(layer_loss):
+                        valid_losses.append(layer_loss)
+
+                if valid_losses:
+                    deep_supervision_loss = sum(valid_losses) / len(valid_losses)
+                else:
+                    print("⚠️ Todas las pérdidas de Deep Supervision son NaN, desactivando")
+                    deep_supervision_loss = 0.0
 
             # Ponder loss (computational regularization)
             ponder_loss = total_ponder_loss / len(self.layers) if total_ponder_loss > 0 else 0.0
 
+            # TEMPORAL: Verificar y desactivar Deep Supervision si tiene NaN
+            if torch.isnan(torch.tensor(deep_supervision_loss)) or torch.isinf(torch.tensor(deep_supervision_loss)):
+                print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
+                deep_supervision_loss = 0.0
+
             # Combined loss con verificación de estabilidad
             total_loss = (
                 main_loss +
-                0.3 * deep_supervision_loss +  # Deep supervision weight
+                0.05 * deep_supervision_loss +  # Peso muy reducido para testear
                 self.config.ponder_loss_weight * ponder_loss  # Ponder loss weight
             )
 
-            # Verificar estabilidad de la pérdida
+            # Verificar estabilidad de la pérdida final
             if torch.isnan(total_loss) or torch.isinf(total_loss):
                 print(f"⚠️ NaN/Inf detectado en total_loss: main={main_loss.item()}, ds={deep_supervision_loss}, ponder={ponder_loss}")
                 # Usar solo main_loss si las otras pérdidas están corruptas
