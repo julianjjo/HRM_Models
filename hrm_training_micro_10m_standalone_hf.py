@@ -86,7 +86,7 @@ class HRMText1Config(ConfigBase):
                  block_size=128,            # Micro model context
                  n_embd=256,                # Micro model embeddings
                  n_head=8,                  # Micro model heads
-                 n_layers=6,                # Micro model layers - incrementado para HRM completo
+                 n_layers=4,                # Micro model layers - balance entre capacidad y estabilidad
                  d_ff=1024,                 # Micro model FFN
                  dropout=0.2,  # Aumentado para mejor generalización
                  pad_token_id=0,
@@ -97,9 +97,9 @@ class HRMText1Config(ConfigBase):
                  rotary_embedding_base=10000,
                  use_flash_attention=True,
                  gradient_checkpointing=False,
-                 # HRM Ciclos según paper original - FULL CAPACITY
-                 H_cycles=2,                # Incrementado para mayor capacidad
-                 L_cycles=3,                # Incrementado para refinamiento detallado
+                 # HRM Ciclos controlados para estabilidad
+                 H_cycles=1,                # Reducido para evitar NaN
+                 L_cycles=2,                # Moderado para aprendizaje estable
                  **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -260,15 +260,20 @@ class HRMInner(nn.Module):
         self.h_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.l_prediction_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # Inicialización menos conservadora para mejor capacidad
-        depth_factor = max(0.3, 1.0 - (layer_idx / max(config.n_layers, 1)))
-        std_h = 0.005 + 0.015 * depth_factor  # Entre 0.005 y 0.020 (menos conservador)
-        std_l = 0.003 + 0.010 * depth_factor  # Entre 0.003 y 0.013 (menos conservador)
+        # Inicialización estable tipo LeCun/Kaiming para HRM
+        # Inspirado en el código de referencia que usa std=1.0/sqrt(fan_in)
+        fan_in = config.n_embd
+        lecun_std = 1.0 / (fan_in ** 0.5)
+
+        # Inicialización más conservadora para capas profundas
+        depth_factor = max(0.1, 1.0 - (layer_idx / max(config.n_layers, 1)))
+        std_h = lecun_std * depth_factor * 0.5  # Muy conservador
+        std_l = lecun_std * depth_factor * 0.3  # Ultra conservador
 
         nn.init.normal_(self.h_prediction_head.weight, mean=0.0, std=std_h)
         nn.init.normal_(self.l_prediction_head.weight, mean=0.0, std=std_l)
 
-        print(f"🔧 Capa {layer_idx}: H-head std={std_h:.4f}, L-head std={std_l:.4f} (capacidad completa)")
+        print(f"🔧 Capa {layer_idx}: H-head std={std_h:.5f}, L-head std={std_l:.5f} (LeCun estable)")
 
         # Ponder loss components
         self.ponder_network = nn.Sequential(
@@ -354,9 +359,15 @@ class HRMInner(nn.Module):
         h_logits = self.h_prediction_head(z_H_final)
         l_logits = self.l_prediction_head(z_L)
 
-        # Estabilizar logits para prevenir explosión de gradientes
-        h_logits = torch.clamp(h_logits, -10.0, 10.0)
-        l_logits = torch.clamp(l_logits, -10.0, 10.0)
+        # Estabilización agresiva de logits para prevenir NaN
+        h_logits = torch.clamp(h_logits, -5.0, 5.0)  # Rango más pequeño
+        l_logits = torch.clamp(l_logits, -5.0, 5.0)  # Rango más pequeño
+
+        # Verificar NaN en logits y usar fallback
+        if torch.isnan(h_logits).any():
+            h_logits = torch.zeros_like(h_logits)
+        if torch.isnan(l_logits).any():
+            l_logits = torch.zeros_like(l_logits)
 
         # Normalize metrics
         avg_ponder_loss = total_ponder_loss / max(total_l_steps, 1)
@@ -561,9 +572,9 @@ class HRMText1(ModelBase):
                 print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
                 deep_supervision_loss = 0.0
 
-            # Deep supervision COMPLETAMENTE activado
-            ds_weight = 0.2  # Peso significativo para deep supervision
-            ponder_weight = self.config.ponder_loss_weight  # Peso completo para ponder loss
+            # Deep supervision controlado para evitar NaN
+            ds_weight = 0.05  # Peso más moderado para evitar explosión
+            ponder_weight = self.config.ponder_loss_weight * 0.3  # Peso reducido temporalmente
 
             total_loss = (
                 main_loss +
@@ -919,7 +930,7 @@ def train_hrm_hf(
     num_epochs: int = 3,
     save_steps: int = 200,
     eval_steps: int = 50,  # Evaluación más frecuente para detectar overfitting
-    max_grad_norm: float = 0.5,
+    max_grad_norm: float = 0.1,  # Mucho más agresivo para evitar NaN
     warmup_steps: int = 500,
     # Parámetros de tokenización optimizada
     dataset_name: str = "allenai/c4",
@@ -991,7 +1002,7 @@ def train_hrm_hf(
         block_size=128,
         n_embd=256,
         n_head=8,
-        n_layers=6,  # Incrementado para HRM completo
+        n_layers=4,  # Balance entre capacidad y estabilidad
         d_ff=1024,
         dropout=0.2,  # Aumentado para mejor generalización
         tokenizer_type='huggingface',
