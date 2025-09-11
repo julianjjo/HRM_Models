@@ -1162,12 +1162,10 @@ def train_hrm_hf(
     )
 
     # Crear dataloaders con configuración optimizada
-    if safe_num_workers != num_workers:
-        print(f"   ⚠️ Workers reducidos para evitar multiprocessing issues")
-
     # Usar 0 workers si hay problemas de multiprocessing
     safe_num_workers = 0 if num_workers > 2 else num_workers
-    
+    if safe_num_workers != num_workers:
+        print(f"   ⚠️ Workers reducidos para evitar multiprocessing issues")
     train_loader = DataLoader(
         train_dataset,
         batch_size=effective_batch_size,
