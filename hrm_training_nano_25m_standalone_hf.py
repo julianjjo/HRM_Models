@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Models Training Script con Tokenizador HuggingFace - MODELO MICRO ~10M PARÁMETROS
+HRM-Models Training Script con Tokenizador HuggingFace - MODELO NANO ~25M PARÁMETROS
 VERSIÓN MEJORADA: Usando tokenizadores profesionales de HuggingFace
 
 🖥️  CARACTERÍSTICAS:
 - Tokenizador HuggingFace (GPT2, GPT2-Spanish, etc.)
 - Vocabulario profesional (50K+ tokens)
 - Mejor soporte multilingüe (español/inglés)
-- Arquitectura HRM optimizada
+- Arquitectura HRM optimizada para 25M parámetros
 - Sin dependencias de transformers para el modelo (solo tokenizer)
 """
 
@@ -26,8 +26,7 @@ except ImportError:
 
 # Configurar método de multiprocessing antes de cualquier uso
 if __name__ == '__main__':
-    # Usar spawn en lugar de fork para evitar pickle issues
-    mp.set_start_method('spawn', force=True)
+    mp.set_start_method('fork', force=True)
     # Marcar PID principal para evitar spam en multiprocessing
     import os
     os._main_pid = os.getpid()
@@ -109,14 +108,14 @@ class HRMText1Config(ConfigBase):
 
     def __init__(self,
                  vocab_size=50257,          # HF tokenizer default
-                 block_size=128,            # Micro model context
-                 n_embd=256,                # Micro model embeddings
-                 n_head=8,                  # Micro model heads
-                 n_layers=4,                # Micro model layers - balance entre capacidad y estabilidad
-                 d_ff=1024,                 # Micro model FFN
-                 dropout=0.2,  # Aumentado para mejor generalización
+                 block_size=256,            # Nano model context (increased)
+                 n_embd=384,                # Nano model embeddings
+                 n_head=6,                  # Nano model heads
+                 n_layers=8,                # Nano model layers
+                 d_ff=1536,                 # Nano model FFN
+                 dropout=0.1,               # Reduced for larger model
                  pad_token_id=0,
-                 halt_max_steps=4,          # HRM halt steps
+                 halt_max_steps=6,          # HRM halt steps (increased)
                  ponder_loss_weight=5e-3,
                  halt_bias_init=-1.0,
                  use_rotary_embeddings=True,
@@ -124,8 +123,8 @@ class HRMText1Config(ConfigBase):
                  use_flash_attention=True,
                  gradient_checkpointing=False,
                  # HRM Ciclos controlados para estabilidad
-                 H_cycles=1,                # Reducido para evitar NaN
-                 L_cycles=2,                # Moderado para aprendizaje estable
+                 H_cycles=1,                # Mantenido para estabilidad
+                 L_cycles=3,                # Incrementado para mayor capacidad
                  **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -334,7 +333,7 @@ class HRMInner(nn.Module):
         total_ponder_loss = 0.0
         all_q_values = []
 
-        # HRM Cycles implementation for LLMs (micro model: fewer cycles)
+        # HRM Cycles implementation for LLMs (nano model: more cycles)
         for h_cycle in range(self.H_cycles):
             cycle_l_steps = 0
             cycle_ponder_loss = 0.0
@@ -690,14 +689,6 @@ class HRMText1(ModelBase):
                 'hrm_info': all_hrm_info
             }
 
-# Hugging Face Hub imports - commented out unused import
-# try:
-#     from huggingface_hub import HfApi
-#     HF_API_AVAILABLE = True
-# except ImportError:
-#     HF_API_AVAILABLE = False
-#     print("⚠️ WARNING: huggingface_hub no está disponible. No se podrá subir al Hub.")
-
 # ==============================================================================
 # --- Dataset Handling ---
 # ==============================================================================
@@ -705,7 +696,7 @@ class HRMText1(ModelBase):
 class OptimizedTextDataset(IterableDataset):
     """Dataset optimizado para texto usando tokenizador HF con GPU y paralelización"""
 
-    def __init__(self, tokenizer, texts: List[str], block_size: int = 128, split_type: str = "train",
+    def __init__(self, tokenizer, texts: List[str], block_size: int = 256, split_type: str = "train",
                  device=None, batch_tokenize: bool = True, num_proc: int = None, max_length: int = 1024,
                  min_text_length: int = 10, cache_tokens: bool = False):
         self.tokenizer = tokenizer
@@ -993,16 +984,16 @@ def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step
 
 def train_hrm_hf(
     tokenizer_name: str = "openai-community/gpt2",
-    output_dir: str = "./hrm-micro-10m-hf",
-    num_train_samples: int = 10000,
-    num_val_samples: int = 1000,
-    batch_size: int = 8,
-    learning_rate: float = 5e-5,  # Reducido para aprendizaje más gradual
-    num_epochs: int = 3,
-    save_steps: int = 200,
-    eval_steps: int = 50,  # Evaluación más frecuente para detectar overfitting
-    max_grad_norm: float = 0.1,  # Mucho más agresivo para evitar NaN
-    warmup_steps: int = 500,
+    output_dir: str = "./hrm-nano-25m-hf",
+    num_train_samples: int = 25000,  # Incrementado para modelo más grande
+    num_val_samples: int = 2500,     # Incrementado para modelo más grande
+    batch_size: int = 6,             # Reducido por tamaño de modelo
+    learning_rate: float = 3e-5,     # Reducido para modelo más grande
+    num_epochs: int = 4,             # Incrementado para mejor entrenamiento
+    save_steps: int = 300,
+    eval_steps: int = 75,            # Evaluación más frecuente
+    max_grad_norm: float = 0.5,      # Menos agresivo para modelo más grande
+    warmup_steps: int = 1000,        # Incrementado para modelo más grande
     # Parámetros de tokenización optimizada
     dataset_name: str = "allenai/c4",
     dataset_config: str = "en",
@@ -1021,30 +1012,29 @@ def train_hrm_hf(
     fast_mode: bool = False,
     no_streaming: bool = False,
 ):
-    """Entrenar modelo HRM con tokenizador HuggingFace"""
+    """Entrenar modelo HRM Nano 25M con tokenizador HuggingFace"""
 
     # Configuración inteligente de paralelización
     cpu_count = mp.cpu_count()
 
-    # Auto-detectar configuración óptima con límites más conservadores
+    # Auto-detectar configuración óptima
     if num_workers == 0:
         if cpu_intensive:
-            # Modo CPU intensivo: usar menos workers para evitar memoria issues
-            num_workers = min(cpu_count // 2, 4) if max_workers == 0 else min(max_workers, 4)
+            # Modo CPU intensivo: usar la mayoría de cores disponibles
+            num_workers = min(cpu_count - 1, 16) if max_workers == 0 else min(max_workers, cpu_count - 1)
         else:
-            # Modo balanceado - muy conservador para evitar pickle issues
-            num_workers = min(cpu_count // 4, 2) if max_workers == 0 else min(max_workers, 2)
+            # Modo balanceado
+            num_workers = min(cpu_count // 2, 8) if max_workers == 0 else min(max_workers, cpu_count // 2)
 
     if tokenizer_workers == 0:
-        # Reducir tokenizer workers para evitar memory pressure
-        tokenizer_workers = min(cpu_count // 2, 4) if cpu_intensive else min(cpu_count // 4, 2)
+        tokenizer_workers = min(cpu_count, 16) if cpu_intensive else min(cpu_count // 2, 8)
         if max_workers > 0:
             tokenizer_workers = min(tokenizer_workers, max_workers)
 
     # Ajustar batch size para CPU intensivo
     effective_batch_size = batch_size * batch_size_multiplier
 
-    print(f"🚀 Iniciando entrenamiento HRM con tokenizador HF")
+    print(f"🚀 Iniciando entrenamiento HRM Nano 25M con tokenizador HF")
     print(f"📊 Configuración:")
     print(f"🖥️  Hardware detectado:")
     print(f"   CPU cores: {cpu_count}")
@@ -1068,32 +1058,34 @@ def train_hrm_hf(
     print(f"🔧 Cargando tokenizador: {tokenizer_name}")
     tokenizer = create_tokenizer(tokenizer_name)
 
-    # Crear configuración del modelo
+    # Crear configuración del modelo Nano 25M
     config = HRMText1Config(
         vocab_size=len(tokenizer),
-        block_size=128,
-        n_embd=256,
-        n_head=8,
-        n_layers=4,  # Balance entre capacidad y estabilidad
-        d_ff=1024,
-        dropout=0.2,  # Aumentado para mejor generalización
+        block_size=256,            # Nano model context (increased)
+        n_embd=384,                # Nano model embeddings
+        n_head=6,                  # Nano model heads
+        n_layers=8,                # Nano model layers
+        d_ff=1536,                 # Nano model FFN
+        dropout=0.1,               # Reduced for larger model
         tokenizer_type='huggingface',
         hf_tokenizer_name=tokenizer_name,
         pad_token_id=tokenizer.pad_token_id,
+        halt_max_steps=6,          # Increased for nano model
     )
 
-    print(f"📐 Configuración del modelo:")
+    print(f"📐 Configuración del modelo Nano 25M:")
     print(f"   Vocabulario: {config.vocab_size:,} tokens")
     print(f"   Embeddings: {config.n_embd}")
     print(f"   Capas: {config.n_layers}")
     print(f"   Cabezas atención: {config.n_head}")
+    print(f"   Block size: {config.block_size}")
 
     # Crear modelo
     model = HRMText1(config)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    print(f"🧠 Modelo creado:")
+    print(f"🧠 Modelo Nano 25M creado:")
     print(f"   Total parámetros: {total_params:,}")
     print(f"   Parámetros entrenables: {trainable_params:,}")
 
@@ -1163,28 +1155,23 @@ def train_hrm_hf(
 
     # Crear dataloaders con configuración optimizada
     print(f"🔧 Configurando dataloaders optimizados...")
-    print(f"   Train workers: {safe_num_workers} (original: {num_workers}), prefetch: {prefetch_factor}")
-    if safe_num_workers != num_workers:
-        print(f"   ⚠️ Workers reducidos para evitar multiprocessing issues")
+    print(f"   Train workers: {num_workers}, prefetch: {prefetch_factor}")
 
-    # Usar 0 workers si hay problemas de multiprocessing
-    safe_num_workers = 0 if num_workers > 2 else num_workers
-    
     train_loader = DataLoader(
         train_dataset,
         batch_size=effective_batch_size,
         shuffle=False,
-        num_workers=safe_num_workers,
-        pin_memory=device.type == 'cuda' and safe_num_workers == 0,  # Pin memory solo sin workers
-        persistent_workers=False,  # Desactivar para evitar memory issues
-        prefetch_factor=prefetch_factor if safe_num_workers > 0 else None,
+        num_workers=num_workers,
+        pin_memory=device.type == 'cuda',  # Pin memory para GPU
+        persistent_workers=num_workers > 0,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         drop_last=True,  # Evitar batches incompletos
-        multiprocessing_context='spawn' if safe_num_workers > 0 else None
+        multiprocessing_context='spawn' if num_workers > 0 else None  # Mejor para muchos workers
     )
 
-    # Configurar validation loader sin workers para evitar issues
-    val_workers = 0  # Forzar 0 workers para validación
-    print(f"   Val workers: {val_workers}, prefetch: disabled")
+    # Configurar validation loader con menos recursos
+    val_workers = min(max(num_workers // 2, 1), 4) if num_workers > 0 else 0
+    print(f"   Val workers: {val_workers}, prefetch: {min(prefetch_factor, 2)}")
 
     val_loader = DataLoader(
         val_dataset,
@@ -1192,24 +1179,24 @@ def train_hrm_hf(
         shuffle=False,
         num_workers=val_workers,
         pin_memory=device.type == 'cuda',
-        persistent_workers=False,
-        prefetch_factor=None,
+        persistent_workers=val_workers > 0,
+        prefetch_factor=min(prefetch_factor, 2) if val_workers > 0 else None,
         drop_last=False,
-        multiprocessing_context=None
+        multiprocessing_context='spawn' if val_workers > 0 else None
     )
 
-    # Crear optimizador con mayor regularización para evitar overfitting
+    # Crear optimizador con configuración para modelo más grande
     optimizer = AdamW(
         model.parameters(),
         lr=learning_rate,
-        weight_decay=0.1,  # Aumentado significativamente
+        weight_decay=0.01,  # Reducido para modelo más grande
         betas=(0.9, 0.95),  # Más conservador que el default (0.9, 0.999)
         eps=1e-8
     )
 
     # Scheduler con warmup - estimación conservadora de steps
     # El dataset crea múltiples chunks por texto, así que estimamos generosamente
-    estimated_chunks_per_text = 2  # Estimación conservadora
+    estimated_chunks_per_text = 3  # Estimación para modelo nano con mayor block_size
     total_steps = len(train_texts) * estimated_chunks_per_text * num_epochs
     # Para entrenamientos grandes (10M+), usar warmup más largo
     if len(train_texts) >= 1000000:  # Si >= 1M samples
@@ -1226,7 +1213,6 @@ def train_hrm_hf(
         total_steps=total_steps,
         pct_start=pct_start
     )
-
 
     print(f"🎯 Entrenamiento configurado:")
     print(f"   Steps totales estimados: {total_steps:,}")
@@ -1311,7 +1297,7 @@ def train_hrm_hf(
             if use_amp:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                # Gradient clipping más agresivo para HRM
+                # Gradient clipping para modelo nano
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 # Verificar NaN en gradientes antes del step
                 if not torch.isnan(loss) and all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None):
@@ -1444,8 +1430,6 @@ def train_hrm_hf(
                 save_model_hf(model, tokenizer, checkpoint_path, config, step)
                 print(f"💾 Checkpoint guardado: {checkpoint_path}")
 
-
-
         # Estadísticas de época
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
         epoch_time = time.time() - epoch_start_time
@@ -1470,24 +1454,24 @@ def train_hrm_hf(
     print(f"   Modelo final: {final_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Entrenar HRM Micro 10M con tokenizador HuggingFace optimizado")
+    parser = argparse.ArgumentParser(description="Entrenar HRM Nano 25M con tokenizador HuggingFace optimizado")
     parser.add_argument("--tokenizer", type=str, default="openai-community/gpt2",
                        help="Nombre del tokenizador HF")
-    parser.add_argument("--output_dir", type=str, default="./hrm-micro-10m-hf",
+    parser.add_argument("--output_dir", type=str, default="./hrm-nano-25m-hf",
                        help="Directorio de salida")
-    parser.add_argument("--train_samples", type=int, default=10000,
+    parser.add_argument("--train_samples", type=int, default=25000,
                        help="Número de samples de entrenamiento")
-    parser.add_argument("--val_samples", type=int, default=1000,
+    parser.add_argument("--val_samples", type=int, default=2500,
                        help="Número de samples de validación")
-    parser.add_argument("--batch_size", type=int, default=8,
+    parser.add_argument("--batch_size", type=int, default=6,
                        help="Tamaño del batch")
-    parser.add_argument("--learning_rate", type=float, default=5e-4,
+    parser.add_argument("--learning_rate", type=float, default=3e-5,
                        help="Learning rate")
-    parser.add_argument("--epochs", type=int, default=3,
+    parser.add_argument("--epochs", type=int, default=4,
                        help="Número de épocas")
-    parser.add_argument("--save_steps", type=int, default=500,
+    parser.add_argument("--save_steps", type=int, default=300,
                        help="Frecuencia de guardado")
-    parser.add_argument("--eval_steps", type=int, default=200,
+    parser.add_argument("--eval_steps", type=int, default=75,
                        help="Frecuencia de evaluación")
 
     # Parámetros de tokenización optimizada
@@ -1525,24 +1509,24 @@ def main():
                        help="Forzar descarga completa del dataset (más rápido para lotes grandes)")
 
     if len(os.sys.argv) == 1:
-        print("🚀 HRM Training con Tokenizador HuggingFace")
+        print("🚀 HRM Nano 25M Training con Tokenizador HuggingFace")
         print("\nUso:")
-        print("  python hrm_training_micro_10m_hf.py [opciones]")
+        print("  python hrm_training_nano_25m_standalone_hf.py [opciones]")
         print("\nEjemplos:")
         print("  # Entrenar con GPT2 inglés (configuración automática)")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer openai-community/gpt2")
+        print("  python hrm_training_nano_25m_standalone_hf.py --tokenizer openai-community/gpt2")
         print("  ")
         print("  # NO STREAMING (descarga completa, recomendado para entrenamientos grandes)")
-        print("  python hrm_training_micro_10m_hf.py --no_streaming --train_samples 1000000")
+        print("  python hrm_training_nano_25m_standalone_hf.py --no_streaming --train_samples 100000")
         print("  ")
         print("  # Modo CPU INTENSIVO")
-        print("  python hrm_training_micro_10m_hf.py --cpu_intensive --batch_size_multiplier 2")
+        print("  python hrm_training_nano_25m_standalone_hf.py --cpu_intensive --batch_size_multiplier 2")
         print("  ")
         print("  # Configuración manual de workers + no streaming")
-        print("  python hrm_training_micro_10m_hf.py --num_workers 8 --no_streaming")
+        print("  python hrm_training_nano_25m_standalone_hf.py --num_workers 8 --no_streaming")
         print("  ")
         print("  # Dataset diferente en español")
-        print("  python hrm_training_micro_10m_hf.py --tokenizer DeepESP/gpt2-spanish --no_streaming")
+        print("  python hrm_training_nano_25m_standalone_hf.py --tokenizer DeepESP/gpt2-spanish --no_streaming")
         return
 
     args = parser.parse_args()

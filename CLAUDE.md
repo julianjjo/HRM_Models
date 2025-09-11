@@ -94,7 +94,6 @@ pip install -r requirements-dev.txt
 - Mixed precision (BF16/FP16) training
 - TensorBoard integration for monitoring
 - Automatic checkpointing with best model tracking
-- Early stopping with configurable patience
 
 ### Dataset Support
 - Primary: C4-English (365M samples)

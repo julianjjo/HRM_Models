@@ -271,7 +271,6 @@ BATCH_SIZE = 8
 GRAD_ACCUM_STEPS = 4
 LEARNING_RATE = 3e-4
 EPOCHS = 4
-EARLY_STOPPING_PATIENCE = 3
 ```
 
 ### Environment Variables
@@ -314,7 +313,6 @@ torchrun --nproc_per_node=2 hrm_training_large_1b.py
 ### Advanced Optimizations
 - **Adaptive Learning Rate**: Cosine annealing with warmup
 - **Gradient Clipping**: Automatic norm clipping at 1.0
-- **Early Stopping**: Validation-based with configurable patience
 - **Checkpointing**: Automatic save/resume with best model tracking  
 - **Mixed Precision**: BF16/FP16 support for memory efficiency
 - **Flash Attention**: When available (2x faster attention)
