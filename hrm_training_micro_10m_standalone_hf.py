@@ -1162,8 +1162,6 @@ def train_hrm_hf(
     )
 
     # Crear dataloaders con configuración optimizada
-    print(f"🔧 Configurando dataloaders optimizados...")
-    print(f"   Train workers: {safe_num_workers} (original: {num_workers}), prefetch: {prefetch_factor}")
     if safe_num_workers != num_workers:
         print(f"   ⚠️ Workers reducidos para evitar multiprocessing issues")
 
