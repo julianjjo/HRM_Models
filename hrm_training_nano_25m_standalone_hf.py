@@ -637,7 +637,12 @@ class HRMText1(ModelBase):
                             q_learning_loss += q_halt_loss * 0.1  # Peso menor que en ACT original
 
             # TEMPORAL: Verificar y desactivar Deep Supervision si tiene NaN
-            if torch.isnan(torch.tensor(deep_supervision_loss)) or torch.isinf(torch.tensor(deep_supervision_loss)):
+            if isinstance(deep_supervision_loss, torch.Tensor):
+                ds_check = deep_supervision_loss.detach()
+            else:
+                ds_check = torch.tensor(float(deep_supervision_loss), device=device if 'device' in locals() else 'cpu')
+            
+            if torch.isnan(ds_check) or torch.isinf(ds_check):
                 print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
                 deep_supervision_loss = 0.0
 

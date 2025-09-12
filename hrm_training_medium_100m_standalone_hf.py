@@ -637,7 +637,12 @@ class HRMText1(ModelBase):
                             q_learning_loss += q_halt_loss * 0.1  # Peso menor que en ACT original
 
             # TEMPORAL: Verificar y desactivar Deep Supervision si tiene NaN
-            if torch.isnan(torch.tensor(deep_supervision_loss)) or torch.isinf(torch.tensor(deep_supervision_loss)):
+            if isinstance(deep_supervision_loss, torch.Tensor):
+                ds_check = deep_supervision_loss.detach()
+            else:
+                ds_check = torch.tensor(float(deep_supervision_loss), device=device if 'device' in locals() else 'cpu')
+            
+            if torch.isnan(ds_check) or torch.isinf(ds_check):
                 print(f"⚠️ Deep Supervision NaN detectado, desactivando temporalmente")
                 deep_supervision_loss = 0.0
 
@@ -988,12 +993,12 @@ def train_hrm_hf(
     output_dir: str = "./hrm-medium-100m-hf",
     num_train_samples: int = 100000,  # Incrementado para modelo más grande
     num_val_samples: int = 10000,     # Incrementado proporcionalmente
-    batch_size: int = 3,             # Reducido para acomodar modelo más grande
-    learning_rate: float = 1e-5,     # Reducido para mejor estabilidad
+    batch_size: int = 2,             # Reducido más para mayor estabilidad
+    learning_rate: float = 5e-6,     # Reducido más para evitar NaN
     num_epochs: int = 3,
     save_steps: int = 300,
     eval_steps: int = 75,            # Evaluación más frecuente
-    max_grad_norm: float = 0.5,     # Menos agresivo que micro
+    max_grad_norm: float = 0.3,     # Más agresivo para prevenir explosión
     warmup_steps: int = 2000,       # Incrementado para modelo más grande
     # Parámetros de tokenización optimizada
     dataset_name: str = "allenai/c4",
@@ -1297,6 +1302,7 @@ def train_hrm_hf(
 
             # Backward pass
             optimizer.zero_grad()
+            optimizer_stepped = False
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -1307,6 +1313,7 @@ def train_hrm_hf(
                 if not torch.isnan(loss) and all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None):
                     scaler.step(optimizer)
                     scaler.update()
+                    optimizer_stepped = True
                 else:
                     print(f"⚠️ NaN detectado en step {step}, saltando optimización")
                     scaler.update()  # Actualizar scaler pero no optimizer
@@ -1319,9 +1326,10 @@ def train_hrm_hf(
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                     optimizer.step()
+                    optimizer_stepped = True
 
-            # Solo hacer step del scheduler si no hemos excedido total_steps
-            if step <= total_steps:
+            # Solo hacer step del scheduler si se hizo step del optimizer y no hemos excedido total_steps
+            if optimizer_stepped and step <= total_steps:
                 scheduler.step()
 
             epoch_loss += loss.item()
