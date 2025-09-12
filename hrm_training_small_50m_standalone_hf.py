@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-HRM-Models Training Script con Tokenizador HuggingFace - MODELO MEDIUM ~350M PARÁMETROS
+HRM-Models Training Script con Tokenizador HuggingFace - MODELO SMALL ~50M PARÁMETROS
 VERSIÓN MEJORADA: Usando tokenizadores profesionales de HuggingFace
 
 🖥️  CARACTERÍSTICAS:
 - Tokenizador HuggingFace (GPT2, GPT2-Spanish, etc.)
 - Vocabulario profesional (50K+ tokens)
 - Mejor soporte multilingüe (español/inglés)
-- Arquitectura HRM optimizada para 350M parámetros
+- Arquitectura HRM optimizada para 50M parámetros
 - Sin dependencias de transformers para el modelo (solo tokenizer)
 """
 
@@ -109,11 +109,11 @@ class HRMText1Config(ConfigBase):
 
     def __init__(self,
                  vocab_size=50257,          # HF tokenizer default
-                 block_size=1024,           # Medium-Large model context - incrementado considerablemente
-                 n_embd=1024,              # Medium-Large model embeddings - escalado apropiadamente
-                 n_head=16,                # Medium-Large model heads - múltiplo de n_embd
-                 n_layers=16,              # Medium-Large model layers - balance entre capacidad y estabilidad
-                 d_ff=4096,               # Medium-Large model FFN - 4x n_embd
+                 block_size=512,            # Small model context - incrementado considerablemente
+                 n_embd=512,                # Small model embeddings - escalado apropiadamente
+                 n_head=16,                 # Small model heads - múltiplo de n_embd
+                 n_layers=8,                # Small model layers - balance entre capacidad y estabilidad
+                 d_ff=2048,                 # Small model FFN - 4x n_embd
                  dropout=0.1,               # Reducido para modelo más estable
                  pad_token_id=0,
                  halt_max_steps=4,          # HRM halt steps
@@ -985,16 +985,16 @@ def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step
 
 def train_hrm_hf(
     tokenizer_name: str = "openai-community/gpt2",
-    output_dir: str = "./hrm-medium-350m-hf",
-    num_train_samples: int = 350000,  # Incrementado para modelo más grande
-    num_val_samples: int = 35000,     # Incrementado proporcionalmente
-    batch_size: int = 2,             # Reducido para acomodar modelo más grande
-    learning_rate: float = 5e-6,     # Reducido para mejor estabilidad
+    output_dir: str = "./hrm-small-50m-hf",
+    num_train_samples: int = 50000,  # Incrementado para modelo más grande
+    num_val_samples: int = 5000,     # Incrementado proporcionalmente
+    batch_size: int = 4,             # Reducido para acomodar modelo más grande
+    learning_rate: float = 2e-5,     # Reducido para mejor estabilidad
     num_epochs: int = 3,
     save_steps: int = 300,
     eval_steps: int = 75,            # Evaluación más frecuente
     max_grad_norm: float = 0.5,     # Menos agresivo que micro
-    warmup_steps: int = 3000,       # Incrementado para modelo más grande
+    warmup_steps: int = 1000,       # Incrementado para modelo más grande
     # Parámetros de tokenización optimizada
     dataset_name: str = "allenai/c4",
     dataset_config: str = "en",
