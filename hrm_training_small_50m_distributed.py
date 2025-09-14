@@ -1012,7 +1012,7 @@ def train_hrm_distributed(
     use_amp = device.type == 'cuda'
     if use_amp and is_main_process:
         print("⚡ Activando Mixed Precision (AMP) para mejor rendimiento en GPU")
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
     # Cargar datasets de HuggingFace
     if is_main_process:
