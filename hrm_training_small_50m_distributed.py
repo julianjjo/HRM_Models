@@ -1159,7 +1159,7 @@ def train_hrm_distributed(
 
                 # Forward pass con mixed precision si está disponible
                 if use_amp:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast("cuda"):
                         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                         if isinstance(outputs, dict):
                             loss = outputs['loss']
