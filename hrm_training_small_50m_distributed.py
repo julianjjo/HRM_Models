@@ -812,8 +812,15 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
             dataset = load_dataset(dataset_name, dataset_config, split=split, streaming=True)
         else:
             if rank == 0:
-                print("📦 Descargando dataset completo (más rápido para lotes grandes)...")
-            dataset = load_dataset(dataset_name, dataset_config, split=split)
+                if num_samples < 5000000:  # Para datasets pequeños, usar split slicing
+                    print(f"📦 Descargando subset de {num_samples} samples...")
+                    split_slice = f"{split}[:{num_samples}]"
+                else:
+                    print("📦 Descargando dataset completo (más rápido para lotes grandes)...")
+                    split_slice = split
+            else:
+                split_slice = f"{split}[:{num_samples}]" if num_samples < 5000000 else split
+            dataset = load_dataset(dataset_name, dataset_config, split=split_slice)
 
         texts = []
         processed_count = 0
@@ -928,8 +935,8 @@ def train_hrm_distributed(
     max_text_length: int = 2000,
     min_text_length: int = 50,
     # Parámetros para acelerar carga de datos
-    fast_mode: bool = True,
-    no_streaming: bool = True,
+    fast_mode: bool = False,
+    no_streaming: bool = False,
 ):
     """Entrenar modelo HRM Small 50M con entrenamiento distribuido"""
     
@@ -1312,9 +1319,9 @@ def main():
                        help="Longitud máxima de texto en caracteres")
     parser.add_argument("--min_text_length", type=int, default=50,
                        help="Longitud mínima de texto en caracteres")
-    parser.add_argument("--fast_mode", action="store_true", default=True,
+    parser.add_argument("--fast_mode", action="store_true", default=False,
                        help="Modo rápido: descarga dataset completo")
-    parser.add_argument("--no_streaming", action="store_true", default=True,
+    parser.add_argument("--no_streaming", action="store_true", default=False,
                        help="Forzar descarga completa del dataset")
 
     if len(os.sys.argv) == 1:
