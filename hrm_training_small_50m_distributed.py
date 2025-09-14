@@ -802,10 +802,15 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
             print(f"   - Fast mode: {fast_mode}")
 
         # OPTIMIZACIÓN: Para datasets grandes, usar modo no-streaming es más rápido
-        if fast_mode and num_samples > 50000:
+        # Pero solo si no va a causar problemas de RAM/disco
+        if fast_mode and num_samples > 50000 and num_samples < 1000000:
             if rank == 0:
                 print("⚡ Fast mode: Usando dataset no-streaming para mejor rendimiento...")
             use_streaming = False
+        elif fast_mode and num_samples >= 1000000:
+            if rank == 0:
+                print("⚠️  Fast mode deshabilitado: dataset muy grande para RAM, usando streaming...")
+            use_streaming = True
 
         # Cargar dataset
         if use_streaming:
@@ -835,6 +840,11 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
         for i, item in progress:
             if use_streaming and i >= num_samples:
                 break
+            
+            # Distribución por ranks en streaming mode: cada GPU procesa samples diferentes
+            if use_streaming and world_size > 1:
+                if (i % world_size) != rank:
+                    continue  # Este sample no corresponde a este rank
 
             text = item.get(text_column, '')
             if isinstance(text, list):
@@ -847,17 +857,23 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
                 processed_count += 1
 
                 if TQDM_AVAILABLE and isinstance(progress, tqdm) and rank == 0:
+                    # En modo distribuido, cada rank procesa 1/world_size de los samples
+                    effective_samples = (i+1) // world_size if use_streaming and world_size > 1 else (i+1)
                     progress.set_postfix({
                         'válidos': processed_count,
-                        'ratio': f'{processed_count/(i+1)*100:.1f}%'
+                        'rank_samples': effective_samples if use_streaming and world_size > 1 else processed_count
                     })
 
         if TQDM_AVAILABLE and isinstance(progress, tqdm) and rank == 0:
             progress.close()
 
         if rank == 0:
-            print(f"✅ Procesados {processed_count} textos válidos de {i+1} samples totales")
-            print(f"   📊 Ratio de aprovechamiento: {processed_count/(i+1)*100:.1f}%")
+            if use_streaming and world_size > 1:
+                print(f"✅ Rank {rank}: {processed_count} textos válidos de ~{(i+1)//world_size} samples procesados")
+                print(f"   📊 Total estimado en todos los ranks: ~{processed_count * world_size} textos")
+            else:
+                print(f"✅ Procesados {processed_count} textos válidos de {i+1} samples totales")
+                print(f"   📊 Ratio de aprovechamiento: {processed_count/(i+1)*100:.1f}%")
 
         if not texts:
             if rank == 0:
