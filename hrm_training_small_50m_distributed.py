@@ -108,9 +108,11 @@ def setup_distributed():
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
         
         # Configurar timeouts NCCL para evitar cuelgues
-        os.environ.setdefault('NCCL_TIMEOUT', '1800')  # 30 minutes
-        os.environ.setdefault('NCCL_BLOCKING_WAIT', '1')
+        os.environ.setdefault('NCCL_TIMEOUT', '3600')  # 60 minutes
+        os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')  # Usar variable nueva
         os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+        os.environ.setdefault('NCCL_BUFFSIZE', '2097152')  # 2MB buffer
+        os.environ.setdefault('NCCL_NTHREADS', '4')       # Threads NCCL
         
         # Initialize process group con timeout extendido
         dist.init_process_group(
@@ -118,7 +120,7 @@ def setup_distributed():
             init_method='env://',
             rank=rank,
             world_size=world_size,
-            timeout=timedelta(minutes=30)  # Timeout extendido
+            timeout=timedelta(hours=2)      # Timeout muy extendido
         )
         
         # Set device for this process
@@ -1052,7 +1054,8 @@ def train_hrm_distributed(
         
         model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None,
                    output_device=local_rank if torch.cuda.is_available() else None,
-                   find_unused_parameters=True)  # Necesario para HRM adaptive computation
+                   find_unused_parameters=True,  # Necesario para HRM adaptive computation
+                   broadcast_buffers=False)      # Desactivar sync automático de buffers
         
     if is_main_process:
         print(f"🎯 Modelo configurado para dispositivo: {device}")
