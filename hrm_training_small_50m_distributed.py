@@ -13,6 +13,7 @@ VERSIÓN MULTI-GPU: Optimizada para entrenamiento distribuido en servidor
 
 import os, multiprocessing as mp, math, time
 from typing import List, Dict, Optional, Tuple
+from datetime import timedelta
 import argparse
 
 # Configurar hf_transfer para descargas más rápidas de HuggingFace
@@ -106,12 +107,18 @@ def setup_distributed():
         world_size = int(os.environ['WORLD_SIZE'])
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
         
-        # Initialize process group
+        # Configurar timeouts NCCL para evitar cuelgues
+        os.environ.setdefault('NCCL_TIMEOUT', '1800')  # 30 minutes
+        os.environ.setdefault('NCCL_BLOCKING_WAIT', '1')
+        os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+        
+        # Initialize process group con timeout extendido
         dist.init_process_group(
             backend='nccl' if torch.cuda.is_available() else 'gloo',
             init_method='env://',
             rank=rank,
-            world_size=world_size
+            world_size=world_size,
+            timeout=timedelta(minutes=30)  # Timeout extendido
         )
         
         # Set device for this process
@@ -741,8 +748,8 @@ class HRMText1(ModelBase):
 class DistributedTextDataset(IterableDataset):
     """Dataset optimizado para entrenamiento distribuido"""
 
-    def __init__(self, tokenizer, texts: List[str], block_size: int = 256, split_type: str = "train",
-                 device=None, batch_tokenize: bool = True, max_length: int = 1024,
+    def __init__(self, tokenizer, texts: List[str], block_size: int = 512, split_type: str = "train",
+                 device=None, batch_tokenize: bool = True, max_length: int = 512,
                  min_text_length: int = 10, rank: int = 0, world_size: int = 1):
         self.tokenizer = tokenizer
         self.texts = texts
@@ -770,9 +777,13 @@ class DistributedTextDataset(IterableDataset):
                 continue
 
             try:
-                # Tokenizar con HF
+                # Tokenizar con HF y asegurar truncación estricta
                 tokens = self.tokenizer.encode(text, add_special_tokens=True,
-                                             max_length=self.max_length, truncation=True)
+                                             max_length=self.block_size, truncation=True)
+                
+                # Verificación adicional de longitud por seguridad
+                if len(tokens) > self.block_size:
+                    tokens = tokens[:self.block_size]
 
                 # Crear chunks
                 for i in range(0, len(tokens) - self.block_size + 1, self.block_size):
@@ -1032,9 +1043,16 @@ def train_hrm_distributed(
 
     # Configurar DDP si es training distribuido
     if is_distributed:
+        # Suprimir warnings de DDP para HRM adaptive computation
+        import warnings
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch.distributed")
+        
+        # Configurar variables de entorno para suprimir warnings NCCL/DDP
+        os.environ.setdefault('PYTHONWARNINGS', 'ignore::UserWarning')
+        
         model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None,
                    output_device=local_rank if torch.cuda.is_available() else None,
-                   find_unused_parameters=True)  # Para HRM con adaptive computation
+                   find_unused_parameters=True)  # Necesario para HRM adaptive computation
         
     if is_main_process:
         print(f"🎯 Modelo configurado para dispositivo: {device}")
@@ -1070,12 +1088,12 @@ def train_hrm_distributed(
     # Crear datasets distribuidos
     train_dataset = DistributedTextDataset(
         tokenizer, train_texts, config.block_size, "train",
-        device=device, max_length=max_text_length, min_text_length=min_text_length,
+        device=device, max_length=config.block_size, min_text_length=min_text_length,
         rank=rank, world_size=world_size
     )
     val_dataset = DistributedTextDataset(
         tokenizer, val_texts, config.block_size, "validation",
-        device=device, max_length=max_text_length, min_text_length=min_text_length,
+        device=device, max_length=config.block_size, min_text_length=min_text_length,
         rank=rank, world_size=world_size
     )
 

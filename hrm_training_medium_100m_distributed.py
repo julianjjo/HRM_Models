@@ -1014,9 +1014,13 @@ def train_hrm_distributed_100m(
 
     # Configurar DDP si es training distribuido
     if is_distributed:
+        # Suprimir warning de find_unused_parameters para HRM adaptive computation
+        import warnings
+        warnings.filterwarnings("ignore", message=".*find_unused_parameters=True.*")
+        
         model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None,
                    output_device=local_rank if torch.cuda.is_available() else None,
-                   find_unused_parameters=True)  # Para HRM con adaptive computation
+                   find_unused_parameters=True)  # Necesario para HRM adaptive computation
         
     if is_main_process:
         print(f"🎯 Modelo configurado para dispositivo: {device}")
