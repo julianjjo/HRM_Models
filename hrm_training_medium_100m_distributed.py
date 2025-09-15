@@ -16,6 +16,14 @@ import os, multiprocessing as mp, math, time
 from typing import List, Dict, Optional, Tuple
 import argparse
 
+# Configurar hf_transfer para descargas más rápidas de HuggingFace
+try:
+    import hf_transfer
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    HF_TRANSFER_AVAILABLE = True
+except ImportError:
+    HF_TRANSFER_AVAILABLE = False
+
 # Progress bar
 try:
     from tqdm import tqdm
@@ -801,6 +809,7 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
             print(f"📥 Cargando dataset '{dataset_name}' ({dataset_config}) split '{split}' con {num_samples} samples...")
             print(f"   📋 Configuración:")
             print(f"   - Dataset: {dataset_name}")
+            print(f"   - HF Transfer: {'✅ Habilitado' if HF_TRANSFER_AVAILABLE else '❌ No disponible (instalar hf_transfer)'}")
             print(f"   - Config: {dataset_config}")
             print(f"   - Columna texto: {text_column}")
             print(f"   - Min length: {min_text_length} chars")
@@ -946,6 +955,7 @@ def train_hrm_distributed_100m(
         print(f"   🏷️ Rank: {rank}")
         print(f"   📱 Local rank: {local_rank}")
         print(f"   💻 Device: {device}")
+        print(f"   ⚡ HF Transfer: {'✅ Habilitado' if HF_TRANSFER_AVAILABLE else '❌ No disponible'}")
         print(f"   📋 Batch size por GPU: {batch_size}")
         print(f"   📊 Batch size efectivo: {batch_size * world_size}")
 
