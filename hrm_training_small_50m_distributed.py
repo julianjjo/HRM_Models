@@ -108,7 +108,7 @@ def setup_distributed():
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
         
         # Configurar timeouts NCCL para evitar cuelgues
-        os.environ.setdefault('NCCL_TIMEOUT', '3600')  # 60 minutes
+        os.environ.setdefault('NCCL_TIMEOUT', '36000')  # 10 hours (36000 seconds)
         os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')  # Usar variable nueva
         os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
         os.environ.setdefault('NCCL_BUFFSIZE', '2097152')  # 2MB buffer
@@ -120,7 +120,7 @@ def setup_distributed():
             init_method='env://',
             rank=rank,
             world_size=world_size,
-            timeout=timedelta(hours=2)      # Timeout muy extendido
+            timeout=timedelta(hours=12)     # Timeout 12 horas
         )
         
         # Set device for this process
@@ -920,6 +920,90 @@ def load_dataset_hf(tokenizer, split: str = "train", num_samples: int = 1000,
 # --- DISTRIBUTED TRAINING FUNCTIONS ---
 # ==============================================================================
 
+def find_latest_checkpoint(output_dir: str) -> str:
+    """Buscar el último checkpoint en el directorio de salida"""
+    if not os.path.exists(output_dir):
+        return None
+    
+    checkpoints = []
+    for item in os.listdir(output_dir):
+        if item.startswith("checkpoint-") and os.path.isdir(os.path.join(output_dir, item)):
+            try:
+                step = int(item.split("-")[1])
+                checkpoints.append((step, os.path.join(output_dir, item)))
+            except (ValueError, IndexError):
+                continue
+    
+    if not checkpoints:
+        return None
+    
+    # Retornar el checkpoint más reciente
+    latest_step, latest_path = max(checkpoints, key=lambda x: x[0])
+    return latest_path
+
+def load_checkpoint(checkpoint_path: str, model, optimizer, scheduler, scaler=None):
+    """Cargar checkpoint y retornar step inicial"""
+    if not os.path.exists(checkpoint_path):
+        return 0
+    
+    # Buscar archivos del checkpoint
+    model_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+    optimizer_path = os.path.join(checkpoint_path, "optimizer.pt")
+    scheduler_path = os.path.join(checkpoint_path, "scheduler.pt")
+    scaler_path = os.path.join(checkpoint_path, "scaler.pt")
+    
+    step = 0
+    try:
+        # Extraer step del nombre del directorio
+        step = int(os.path.basename(checkpoint_path).split("-")[1])
+    except (ValueError, IndexError):
+        pass
+    
+    try:
+        # Cargar modelo
+        if os.path.exists(model_path):
+            state_dict = torch.load(model_path, map_location='cpu')
+            model.load_state_dict(state_dict)
+            print(f"✅ Modelo cargado desde {model_path}")
+        
+        # Cargar optimizer
+        if os.path.exists(optimizer_path):
+            optimizer.load_state_dict(torch.load(optimizer_path, map_location='cpu'))
+            print(f"✅ Optimizer cargado desde {optimizer_path}")
+        
+        # Cargar scheduler
+        if os.path.exists(scheduler_path):
+            scheduler.load_state_dict(torch.load(scheduler_path, map_location='cpu'))
+            print(f"✅ Scheduler cargado desde {scheduler_path}")
+        
+        # Cargar scaler si existe
+        if scaler and os.path.exists(scaler_path):
+            scaler.load_state_dict(torch.load(scaler_path, map_location='cpu'))
+            print(f"✅ Scaler cargado desde {scaler_path}")
+        
+        return step
+    except Exception as e:
+        print(f"⚠️ Error cargando checkpoint {checkpoint_path}: {e}")
+        return 0
+
+def save_checkpoint(checkpoint_path: str, model, optimizer, scheduler, scaler=None, step: int = 0):
+    """Guardar checkpoint completo"""
+    os.makedirs(checkpoint_path, exist_ok=True)
+    
+    # Guardar modelo
+    model_to_save = model.module if hasattr(model, 'module') else model
+    torch.save(model_to_save.state_dict(), os.path.join(checkpoint_path, "pytorch_model.bin"))
+    
+    # Guardar optimizer
+    torch.save(optimizer.state_dict(), os.path.join(checkpoint_path, "optimizer.pt"))
+    
+    # Guardar scheduler
+    torch.save(scheduler.state_dict(), os.path.join(checkpoint_path, "scheduler.pt"))
+    
+    # Guardar scaler si existe
+    if scaler:
+        torch.save(scaler.state_dict(), os.path.join(checkpoint_path, "scaler.pt"))
+
 def save_model_hf(model, tokenizer, save_path: str, config: HRMText1Config, step: int = 0):
     """Guardar modelo y tokenizador HF"""
     os.makedirs(save_path, exist_ok=True)
@@ -975,6 +1059,9 @@ def train_hrm_distributed(
     # Parámetros para acelerar carga de datos
     fast_mode: bool = False,
     no_streaming: bool = False,
+    # Parámetros para reanudar entrenamiento
+    resume_from_checkpoint: str = None,
+    auto_resume: bool = True,
 ):
     """Entrenar modelo HRM Small 50M con entrenamiento distribuido"""
     
@@ -1052,21 +1139,19 @@ def train_hrm_distributed(
         # Configurar variables de entorno para suprimir warnings NCCL/DDP
         os.environ.setdefault('PYTHONWARNINGS', 'ignore::UserWarning')
         
+        # Configurar DDP con máxima tolerancia para HRM
         model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None,
                    output_device=local_rank if torch.cuda.is_available() else None,
                    find_unused_parameters=True,  # Necesario para HRM adaptive computation
-                   broadcast_buffers=False)      # Desactivar sync automático de buffers
+                   broadcast_buffers=False,      # Desactivar sync automático de buffers
+                   bucket_cap_mb=25,             # Reducir tamaño de buckets 
+                   gradient_as_bucket_view=True) # Optimizar memory views
         
     if is_main_process:
         print(f"🎯 Modelo configurado para dispositivo: {device}")
         if is_distributed:
             print(f"   🌐 Usando DistributedDataParallel")
 
-    # Configurar mixed precision para GPU moderna
-    use_amp = device.type == 'cuda'
-    if use_amp and is_main_process:
-        print("⚡ Activando Mixed Precision (AMP) para mejor rendimiento en GPU")
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
     # Cargar datasets de HuggingFace
     if is_main_process:
@@ -1146,9 +1231,32 @@ def train_hrm_distributed(
         print(f"   Steps totales estimados: {total_steps:,}")
         print(f"   Warmup steps: {warmup_steps}")
 
+    # Configurar mixed precision para GPU moderna
+    use_amp = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 7
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+
+    # Configurar checkpoint loading
+    start_step = 0
+    start_epoch = 0
+    
+    # Buscar checkpoint para reanudar
+    checkpoint_to_load = None
+    if resume_from_checkpoint:
+        checkpoint_to_load = resume_from_checkpoint
+    elif auto_resume:
+        checkpoint_to_load = find_latest_checkpoint(output_dir)
+    
+    if checkpoint_to_load:
+        if is_main_process:
+            print(f"🔄 Reanudando entrenamiento desde: {checkpoint_to_load}")
+        start_step = load_checkpoint(checkpoint_to_load, model, optimizer, scheduler, scaler)
+        start_epoch = start_step // estimated_steps_per_epoch if estimated_steps_per_epoch > 0 else 0
+        if is_main_process:
+            print(f"📍 Reanudando desde step {start_step}, época {start_epoch}")
+
     # Training loop
     model.train()
-    step = 0
+    step = start_step
     best_val_loss = float('inf')
 
     if is_main_process:
@@ -1156,7 +1264,7 @@ def train_hrm_distributed(
         print("=" * 60)
 
     try:
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             if is_main_process:
                 print(f"\n📅 Época {epoch + 1}/{num_epochs}")
                 
@@ -1298,9 +1406,9 @@ def train_hrm_distributed(
                 # Guardar checkpoint (solo main process)
                 if step % save_steps == 0 and is_main_process:
                     checkpoint_path = os.path.join(output_dir, f"checkpoint-{step}")
-                    model_to_save = model.module if hasattr(model, 'module') else model
-                    save_model_hf(model_to_save, tokenizer, checkpoint_path, config, step)
-                    print(f"💾 Checkpoint guardado: {checkpoint_path}")
+                    save_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler, step)
+                    save_model_hf(model.module if hasattr(model, 'module') else model, tokenizer, checkpoint_path, config, step)
+                    print(f"💾 Checkpoint completo guardado: {checkpoint_path}")
 
             # Sincronizar todos los procesos al final de cada época
             if is_distributed:
@@ -1370,6 +1478,12 @@ def main():
                        help="Modo rápido: descarga dataset completo")
     parser.add_argument("--no_streaming", action="store_true", default=False,
                        help="Forzar descarga completa del dataset")
+    
+    # Argumentos para reanudar entrenamiento
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                       help="Path al checkpoint para reanudar entrenamiento")
+    parser.add_argument("--auto_resume", action="store_true", default=True,
+                       help="Buscar automáticamente el último checkpoint")
 
     if len(os.sys.argv) == 1:
         print("🚀 HRM Small 50M Distributed Training")
@@ -1411,6 +1525,8 @@ def main():
         min_text_length=args.min_text_length,
         fast_mode=args.fast_mode,
         no_streaming=args.no_streaming,
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        auto_resume=args.auto_resume,
     )
 
 if __name__ == "__main__":
